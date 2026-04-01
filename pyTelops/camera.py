@@ -564,19 +564,26 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
         return self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
+    # Address for download bitrate limit (Float, Mbps, max 1000)
+    _REG_DOWNLOAD_BITRATE_MAX = 0xEAD4
+
     def buffer_download(self, sequence: int = 0, start_frame: int = 0,
-                        n_frames: int = 0, timeout: float = 0
+                        n_frames: int = 0, timeout: float = 0,
+                        bitrate_mbps: float = 1000.0,
+                        packet_size: int = 9000
                         ) -> Optional[np.ndarray]:
         """Download frames from the internal memory buffer.
-
-        The camera streams recorded frames over GVSP at ~15 fps
-        (limited by Ethernet bandwidth).
 
         Args:
             sequence: Sequence index to download.
             start_frame: Starting frame ID (0 = first recorded).
             n_frames: Number of frames (0 = all recorded).
             timeout: Total timeout in seconds (0 = auto-calculate).
+            bitrate_mbps: Max download bitrate in Mbps (default 1000,
+                          camera default is 20 which is very slow).
+            packet_size: GVSP packet size in bytes (default 9000).
+                         Larger packets = faster download. If you get
+                         data loss, try 3000 or 1500.
 
         Returns:
             numpy array (N, H, W) or None on failure.
@@ -600,18 +607,40 @@ class Camera:
             start_frame = first_frame_id
 
         if timeout <= 0:
-            timeout = n_frames / 15.0 * 1.2 + 10.0
+            # Estimate at ~250 fps (measured with 1000 Mbps bitrate)
+            timeout = max(n_frames / 200.0 * 1.5 + 5.0, 10.0)
 
-        print(f"Downloading {n_frames} frames from buffer "
-              f"(~{n_frames / 15.0:.0f}s at 15 fps)...", flush=True)
+        print(f"Downloading {n_frames} frames from buffer...", flush=True)
 
         # Start streaming
         self.start_stream()
         self._gvsp.resend_enabled = False
 
-        # Configure download — mode MUST be set before frame ID/count
+        # Override packet size for download (larger = faster)
+        old_pkt_size = None
+        if packet_size != 1500:
+            pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
+            old_pkt_size = pkt_reg & 0xFFFF
+            flags = pkt_reg & 0xFFFF0000
+            self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
+                                 flags | packet_size)
+            self._gvsp._packet_data_size = packet_size - 8
+
+        # Configure download — mode MUST be set before other registers
+        # (they are locked when mode == OFF)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
                              reg.MemoryBufferDownloadMode.SEQUENCE)
+
+        # Increase download bitrate (register unlocked now that mode != OFF)
+        old_bitrate = None
+        try:
+            old_bitrate = self._gvcp.read_float(self._REG_DOWNLOAD_BITRATE_MAX)
+            if bitrate_mbps != old_bitrate:
+                self._gvcp.write_float(self._REG_DOWNLOAD_BITRATE_MAX,
+                                       bitrate_mbps)
+        except GVCPError:
+            pass
+
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID,
                              start_frame)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT,
@@ -657,11 +686,29 @@ class Camera:
             except GVCPError:
                 pass
             time.sleep(0.2)
+            # Restore original bitrate before turning off download mode
+            # (register locks again when mode == OFF)
+            if old_bitrate is not None:
+                try:
+                    self._gvcp.write_float(self._REG_DOWNLOAD_BITRATE_MAX,
+                                           old_bitrate)
+                except GVCPError:
+                    pass
             try:
                 self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
                                      reg.MemoryBufferDownloadMode.OFF)
             except GVCPError:
                 pass
+            # Restore packet size to standard MTU
+            if old_pkt_size is not None:
+                try:
+                    pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
+                    flags = pkt_reg & 0xFFFF0000
+                    self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
+                                         flags | old_pkt_size)
+                    self._gvsp._packet_data_size = old_pkt_size - 8
+                except GVCPError:
+                    pass
             self._gvsp.resend_enabled = True
             self.stop_stream()
 
