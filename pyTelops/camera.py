@@ -114,6 +114,12 @@ class Camera:
     # Number of metadata rows embedded in each frame by Telops cameras
     HEADER_ROWS = 2
 
+    # Class-level registry of active Camera instances, keyed by camera IP.
+    # Used to forcibly disconnect a stale instance when a new Camera
+    # connects to the same camera (e.g., after a kernel restart or when
+    # the user forgot to disconnect).
+    _active_cameras: dict[str, "Camera"] = {}
+
     def __init__(self, ip: Optional[str] = None,
                  local_ip: Optional[str] = None,
                  timeout: float = 2.0):
@@ -149,6 +155,11 @@ class Camera:
     def connect(self) -> None:
         """Discover camera (if needed) and establish GVCP control.
 
+        If a previous Camera instance in the same process is still
+        connected to this camera, it is automatically disconnected first.
+        If a stale session from another process holds CCP, we poll until
+        the camera's heartbeat timeout expires (up to ~15 s).
+
         Raises:
             RuntimeError: If no camera is found.
             GVCPError: If GVCP handshake fails.
@@ -170,6 +181,18 @@ class Camera:
             print(f"Discovered: {cameras[0].get('manufacturer', '')} "
                   f"{cameras[0].get('model', '')} at {self._camera_ip}")
 
+        # If there's an existing Camera in this process connected to the
+        # same camera IP, disconnect it first (handles "forgot to disconnect"
+        # and "kernel restart" scenarios within the same process).
+        old = Camera._active_cameras.get(self._camera_ip)
+        if old is not None and old is not self and old._connected:
+            print(f"Disconnecting previous Camera instance for "
+                  f"{self._camera_ip}...")
+            try:
+                old.disconnect()
+            except Exception:
+                pass
+
         # Auto-detect local IP if not specified
         if not self._local_ip:
             self._local_ip = _find_local_ip_for(self._camera_ip)
@@ -184,10 +207,24 @@ class Camera:
         except GVCPError:
             pass
 
+        # Stop any stale acquisition left over from a previous session
+        # (e.g., crash without proper disconnect)
+        try:
+            self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        except GVCPError:
+            pass
+
+        # Clear stream destination (stop any stale streaming)
+        try:
+            self._gvcp.write_reg(reg.REG_SC_HOST_PORT, 0)
+        except GVCPError:
+            pass
+
         # Prepare GVSP receiver
         self._gvsp = GVSPReceiver(self._local_ip, gvcp_client=self._gvcp)
 
         self._connected = True
+        Camera._active_cameras[self._camera_ip] = self
 
     def disconnect(self) -> None:
         """Stop streaming, release GVCP control, close sockets."""
@@ -206,6 +243,11 @@ class Camera:
             self._gvcp = None
 
         self._connected = False
+
+        # Remove from active registry
+        if (self._camera_ip and
+                Camera._active_cameras.get(self._camera_ip) is self):
+            del Camera._active_cameras[self._camera_ip]
 
     @property
     def is_connected(self) -> bool:
@@ -505,6 +547,10 @@ class Camera:
         The camera has a 16GB ring buffer that records at full sensor speed
         (up to 3100 fps), independent of the Ethernet link.
 
+        If the buffer already has data or is in an incompatible state,
+        this method automatically stops acquisition, clears the buffer,
+        and re-enables buffer mode before applying the configuration.
+
         Args:
             n_sequences: Number of recording sequences.
             frames_per_seq: Frames per sequence.
@@ -513,8 +559,34 @@ class Camera:
                         (SOFTWARE, EXTERNAL_SIGNAL, ACQUISITION_STARTED).
         """
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
-                             reg.MemoryBufferMode.ON)
+
+        # Try to enable buffer mode; if it fails, clean up stale state
+        try:
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
+                                 reg.MemoryBufferMode.ON)
+        except GVCPError:
+            # Buffer may have stale data or acquisition may be active.
+            # Stop acquisition, turn buffer off, clear, then retry.
+            try:
+                self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+            except GVCPError:
+                pass
+            import time
+            time.sleep(0.3)
+            try:
+                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
+            except GVCPError:
+                pass
+            time.sleep(0.3)
+            try:
+                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
+                                     reg.MemoryBufferMode.OFF)
+            except GVCPError:
+                pass
+            time.sleep(0.3)
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
+                                 reg.MemoryBufferMode.ON)
+
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_NUM_SEQUENCES, n_sequences)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE, frames_per_seq)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, pre_moi)
@@ -581,9 +653,9 @@ class Camera:
             timeout: Total timeout in seconds (0 = auto-calculate).
             bitrate_mbps: Max download bitrate in Mbps (default 1000,
                           camera default is 20 which is very slow).
-            packet_size: GVSP packet size in bytes (default 9000).
-                         Larger packets = faster download. If you get
-                         data loss, try 3000 or 1500.
+            packet_size: GVSP packet size in bytes (default 1500).
+                         Set to 9000 for jumbo frames if your network
+                         supports it.
 
         Returns:
             numpy array (N, H, W) or None on failure.
@@ -612,19 +684,12 @@ class Camera:
 
         print(f"Downloading {n_frames} frames from buffer...", flush=True)
 
-        # Start streaming
-        self.start_stream()
-        self._gvsp.resend_enabled = False
-
-        # Override packet size for download (larger = faster)
-        old_pkt_size = None
-        if packet_size != 1500:
-            pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
-            old_pkt_size = pkt_reg & 0xFFFF
-            flags = pkt_reg & 0xFFFF0000
-            self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
-                                 flags | packet_size)
-            self._gvsp._packet_data_size = packet_size - 8
+        # Ensure acquisition is stopped before configuring download
+        try:
+            self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        except GVCPError:
+            pass
+        time.sleep(0.2)
 
         # Configure download — mode MUST be set before other registers
         # (they are locked when mode == OFF)
@@ -645,6 +710,20 @@ class Camera:
                              start_frame)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT,
                              n_frames)
+
+        # Start streaming
+        self.start_stream()
+        self._gvsp.resend_enabled = False
+
+        # Override packet size for download (larger = faster)
+        old_pkt_size = None
+        if packet_size != 1500:
+            pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
+            old_pkt_size = pkt_reg & 0xFFFF
+            flags = pkt_reg & 0xFFFF0000
+            self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
+                                 flags | packet_size)
+            self._gvsp._packet_data_size = packet_size - 8
 
         # Start download stream
         self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)

@@ -195,8 +195,19 @@ class GVCPClient:
 
     # --- Connection ---
 
-    def connect(self):
-        """Open socket, take control (CCP=2), start heartbeat."""
+    def connect(self, force: bool = True):
+        """Open socket, take control (CCP=2), start heartbeat.
+
+        If another application (or a stale session) holds CCP control
+        and ``force`` is True (default), we poll until the heartbeat
+        timeout expires and the lock releases. This handles the common
+        scenario where a previous Python session crashed without
+        disconnecting.
+
+        Args:
+            force: If True, poll/retry on ACCESS_DENIED (up to ~15 s).
+                   If False, raise immediately.
+        """
         if self._connected:
             return
 
@@ -205,8 +216,29 @@ class GVCPClient:
             self._sock.bind((self.local_ip, 0))
         self._sock.settimeout(self.timeout)
 
-        # Take control
-        self._write_reg_raw(REG_CCP, 0x00000002)
+        # Take control — poll on ACCESS_DENIED until old session's
+        # heartbeat times out.
+        max_wait = 15.0  # seconds — generous upper bound
+        deadline = time.monotonic() + max_wait
+        attempt = 0
+        while True:
+            try:
+                self._write_reg_raw(REG_CCP, 0x00000002)
+                break  # success
+            except GVCPError as e:
+                if e.status == 0x8006 and force:  # ACCESS_DENIED
+                    attempt += 1
+                    if attempt == 1:
+                        print("ACCESS_DENIED: waiting for stale CCP lock "
+                              "to expire...", flush=True)
+                    if time.monotonic() >= deadline:
+                        raise GVCPError(
+                            "Could not take CCP control after "
+                            f"{max_wait:.0f}s — another application may "
+                            "be actively connected", 0x8006)
+                    time.sleep(1.0)
+                else:
+                    raise
         self._connected = True
 
         # Start heartbeat

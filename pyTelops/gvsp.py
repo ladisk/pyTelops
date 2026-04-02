@@ -296,8 +296,9 @@ class GVSPReceiver:
                 "pixel_format": buf.pixel_format,
                 "width": buf.width,
                 "height": buf.height,
-                "missing_packets": (buf.expected_packets - len(buf.data_packets)
-                                    if buf.expected_packets > 0 else 0),
+                "missing_packets": max(0,
+                    buf.expected_packets - len(buf.data_packets)
+                    if buf.expected_packets > 0 else 0),
             }
             if self._frame_queue.full():
                 try:
