@@ -20,7 +20,7 @@ Features
 --------
 
 - **Auto-discovery** — finds cameras on the network regardless of IP
-- **Live streaming** — real-time frame acquisition via GVSP (~49 fps at full resolution)
+- **Live streaming** — real-time frame acquisition via GVSP (up to ~760 fps at full resolution)
 - **Internal buffer** — record at full sensor speed (up to 3100 fps at full frame), download at ~270 fps
 - **Camera control** — exposure, frame rate, calibration mode, trigger, resolution
 - **String enums** — ``cam.calibration_mode = "RT"`` instead of importing enum classes
@@ -68,7 +68,7 @@ Streaming vs buffer
 pyTelops supports two acquisition modes:
 
 **Live streaming** — frames stream directly to PC over Ethernet.
-Throughput depends on resolution; ~49 fps at full frame (320×256, ~8 MB/s):
+Limited by GigE bandwidth (~125 MB/s); up to ~760 fps at full frame (320×256):
 
 .. code-block:: python
 
@@ -80,7 +80,8 @@ sensor speed (up to 3100 fps at full frame), then downloads to PC:
 
 .. code-block:: python
 
-   cam.buffer_configure(n_sequences=3, frames_per_seq=10000, moi_source="software")
+   cam.frame_rate = 2000.0
+   cam.buffer_configure(n_sequences=3, duration=5.0, moi_source="software")
 
    cam.buffer_record()   # records sequence 0
    cam.buffer_record()   # records sequence 1
@@ -106,8 +107,8 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
        cam.frame_rate = 2000.0
        cam.exposure = 30.0
 
-       # Allocate: 3 sequences of 10,000 frames each
-       cam.buffer_configure(n_sequences=3, frames_per_seq=10000,
+       # Allocate: 3 sequences of 5 seconds each (uses current frame_rate)
+       cam.buffer_configure(n_sequences=3, duration=5.0,
                             moi_source="software")
 
        # Record — one call per sequence

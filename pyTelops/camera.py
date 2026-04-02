@@ -657,26 +657,47 @@ class Camera:
     # ==========================================================
 
     def buffer_configure(self, n_sequences: int = 1,
-                         frames_per_seq: int = 100, pre_moi: int = 0,
+                         duration: Optional[float] = None,
+                         frames_per_seq: Optional[int] = None,
+                         pre_moi: int = 0,
                          moi_source="software") -> None:
         """Configure the internal memory buffer for recording.
 
         The camera has a 16GB ring buffer that records at full sensor speed
-        (up to 3100 fps), independent of the Ethernet link. The buffer must
-        be partitioned into fixed-size sequence slots before recording.
+        (up to 3100 fps at full frame), independent of the Ethernet link.
+        The buffer must be partitioned into fixed-size sequence slots
+        before recording.
+
+        Specify either ``duration`` (seconds, uses current frame_rate to
+        calculate frame count) or ``frames_per_seq`` (exact frame count).
 
         If the buffer already has data or is in an incompatible state,
         this method automatically clears it before applying the configuration.
 
         Args:
             n_sequences: Number of recording sequence slots to allocate.
-            frames_per_seq: Frames per sequence slot.
+            duration: Recording duration per sequence in seconds.
+                      Calculates frames_per_seq from current frame_rate.
+            frames_per_seq: Frames per sequence slot (alternative to duration).
             pre_moi: Frames to keep before the MOI trigger.
             moi_source: "software", "external", or "acquisition_started"
                         (or MemoryBufferMOISource enum).
         """
         self._check_connected()
         moi = _resolve_enum(moi_source, reg.MemoryBufferMOISource)
+
+        # Resolve frame count from duration or frames_per_seq
+        if duration is not None and frames_per_seq is not None:
+            raise ValueError("Specify either duration or frames_per_seq, not both.")
+        if duration is not None:
+            fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
+            frames_per_seq = int(duration * fps)
+            if frames_per_seq <= 0:
+                raise ValueError(
+                    f"duration={duration}s at {fps:.0f} fps = {frames_per_seq} "
+                    f"frames. Set frame_rate first.")
+        elif frames_per_seq is None:
+            frames_per_seq = 100
 
         # Track configured sequence count for buffer_record()
         self._buffer_n_sequences = n_sequences
@@ -738,6 +759,19 @@ class Camera:
                 f"All {n_seq} sequence slots are full. "
                 f"Call buffer_clear() or buffer_configure() first.")
 
+        # Warn if recording will exceed timeout
+        fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
+        seq_size = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE)
+        if fps > 0:
+            est_time = seq_size / fps
+            if est_time > timeout * 0.9:
+                import warnings
+                warnings.warn(
+                    f"Recording {seq_size} frames at {fps:.0f} fps "
+                    f"will take ~{est_time:.0f}s, but timeout is "
+                    f"{timeout:.0f}s. Increase timeout or frame_rate.",
+                    UserWarning, stacklevel=2)
+
         label = f" (seq {seq_idx + 1}/{n_seq})" if n_seq > 1 else ""
 
         if verbose:
@@ -757,7 +791,17 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
         # Wait for recording to complete
-        self.buffer_wait(timeout=timeout)
+        try:
+            self.buffer_wait(timeout=timeout)
+        except TimeoutError:
+            # Stop acquisition before re-raising so camera is in clean state
+            try:
+                self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+            except GVCPError:
+                pass
+            if verbose:
+                print("TIMEOUT", flush=True)
+            raise
 
         # Stop acquisition
         try:
