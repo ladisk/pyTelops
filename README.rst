@@ -86,10 +86,7 @@ sensor speed (up to 3100 fps at full frame), then downloads to PC:
    cam.frame_rate = 2000.0
    cam.buffer_configure(n_sequences=3, duration=5.0, moi_source="software")
 
-   cam.buffer_record()   # records sequence 0
-   cam.buffer_record()   # records sequence 1
-   cam.buffer_record()   # records sequence 2
-
+   cam.buffer_record()   # records all 3 sequences automatically
    cam.buffer_info()     # check what was recorded
    data = cam.buffer_download(sequence=0)   # download one sequence
    cam.buffer_clear()
@@ -114,10 +111,8 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
        cam.buffer_configure(n_sequences=3, duration=5.0,
                             moi_source="software")
 
-       # Record — one call per sequence
-       cam.buffer_record()   # arms, fires MOI, waits, stops
-       cam.buffer_record(timeout=30.0)
-       cam.buffer_record(timeout=30.0)
+       # Record all sequences in one call
+       cam.buffer_record()   # arms, fires MOI for each, waits, stops
 
        # Review
        print(cam.buffer_info())
@@ -132,7 +127,9 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
 
 ``buffer_record()`` prints progress::
 
-   Arming... Recording... Done (10000 frames)
+   Arming (seq 1/3)... Recording... Done (10000 frames)
+   Firing (seq 2/3)... Recording... Done (10000 frames)
+   Firing (seq 3/3)... Recording... Done (10000 frames)
 
 ``buffer_download()`` shows a tqdm progress bar and data integrity check::
 
