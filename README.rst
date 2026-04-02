@@ -5,7 +5,7 @@ pyTelops
    :target: https://pypi.org/project/pyTelops/
 
 .. image:: https://img.shields.io/pypi/l/pyTelops.svg
-   :target: https://github.com/ladisk/pyTelops/blob/main/LICENSE
+   :target: https://github.com/jasasonc/pyTelops/blob/main/LICENSE
 
 Pure-Python driver for `Telops <https://www.telops.com/>`_ thermal cameras
 over GigE Vision. No vendor SDK required — communicates directly via GVCP/GVSP
@@ -161,7 +161,8 @@ All settings are properties with string enum support:
 .. code-block:: python
 
    cam.exposure = 50.0                   # microseconds
-   cam.frame_rate = 2000.0               # Hz
+   cam.frame_rate = 2000.0               # Hz (warns if above max)
+   cam.frame_rate_max                    # max Hz for current resolution/exposure
    cam.calibration_mode = "RT"           # "RT", "NUC", "RAW", "IBR", "IBI"
    cam.exposure_auto = "continuous"       # "off", "once", "continuous"
    cam.resolution                        # (320, 258)
