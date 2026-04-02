@@ -16,5 +16,4 @@ env/
 .coverage
 htmlcov/
 *.whl
-ChatGPT Image*
-*.png
+*.npy

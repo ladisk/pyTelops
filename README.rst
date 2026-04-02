@@ -1,3 +1,7 @@
+.. image:: logo.png
+   :width: 300
+   :alt: pyTelops
+
 pyTelops
 ========
 
