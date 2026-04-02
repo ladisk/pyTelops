@@ -465,6 +465,33 @@ class Camera:
         if not self._connected:
             raise RuntimeError("Camera not connected. Call connect() first.")
 
+    def _check_ready(self):
+        """Check if camera is ready for acquisition. Raises with clear message if not."""
+        self._check_connected()
+        try:
+            not_ready = self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY)
+            if not_ready:
+                tdc = self._gvcp.read_reg(reg.REG_TDC_STATUS)
+                reasons = []
+                if tdc & reg.TDC_WAITING_FOR_COOLER:
+                    reasons.append("cooling down")
+                if tdc & reg.TDC_WAITING_FOR_SENSOR:
+                    reasons.append("sensor initializing")
+                if tdc & reg.TDC_WAITING_FOR_INIT:
+                    reasons.append("device initializing")
+                if tdc & reg.TDC_WAITING_FOR_POWER_ON:
+                    reasons.append("powering on")
+                if tdc & reg.TDC_WAITING_FOR_CAL_DATA:
+                    reasons.append("loading calibration")
+                if tdc & reg.TDC_WAITING_FOR_IMAGE_CORRECTION:
+                    reasons.append("NUC in progress")
+                msg = ", ".join(reasons) if reasons else "not ready"
+                raise RuntimeError(
+                    f"Camera is {msg}. "
+                    f"Call cam.wait_until_ready() first.")
+        except GVCPError:
+            pass
+
     def _check_fps_clamped(self, fps_before: float):
         """Warn if a settings change caused the frame rate to be clamped."""
         fps_after = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
@@ -789,7 +816,7 @@ class Camera:
         Returns:
             2D numpy array (H, W) of uint16 pixel values, or None on timeout.
         """
-        self._check_connected()
+        self._check_ready()
         was_streaming = self._streaming
         if not self._streaming:
             self.start_stream()
@@ -817,7 +844,7 @@ class Camera:
         Returns:
             3D numpy array (N, H, W) or None if no frames captured.
         """
-        self._check_connected()
+        self._check_ready()
         was_streaming = self._streaming
         if not self._streaming:
             self.start_stream()
@@ -1133,7 +1160,7 @@ class Camera:
             TimeoutError: If a sequence doesn't finish within the
                 safety timeout.
         """
-        self._check_connected()
+        self._check_ready()
         n_seq = getattr(self, '_buffer_n_sequences', 1)
 
         # Auto-calculate per-sequence timeout from frame count and frame rate
