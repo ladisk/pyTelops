@@ -53,8 +53,9 @@ Quick start
    from pyTelops import Camera
 
    with Camera() as cam:
-       cam.exposure = 50.0              # microseconds
        cam.calibration_mode = "RT"      # radiometric temperature
+       cam.exposure_auto = "continuous"  # auto exposure (or "off" for manual)
+       # cam.exposure = 50.0            # set manually when exposure_auto is "off"
 
        frame = cam.grab()               # single frame -> numpy (H, W)
        frames = cam.acquire(10)         # 10 frames -> numpy (N, H, W)
