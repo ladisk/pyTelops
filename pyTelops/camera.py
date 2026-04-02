@@ -856,7 +856,7 @@ class Camera:
     def buffer_download(self, sequence: int = 0, start_frame: int = 0,
                         n_frames: int = 0, timeout: float = 0,
                         bitrate_mbps: float = 1000.0,
-                        packet_size: int = 9000,
+                        packet_size: int = 1500,
                         strip_header: bool = True,
                         verbose: bool = True
                         ) -> Optional[np.ndarray]:
@@ -901,9 +901,15 @@ class Camera:
         # Set up progress bar
         pbar = None
         if verbose:
-            from tqdm.auto import tqdm
+            from tqdm import tqdm
             pbar = tqdm(total=n_frames, unit="frame",
                         desc="Downloading")
+
+        # Suppress GVSP "packets unrecoverable" warnings during download
+        import logging
+        gvsp_logger = logging.getLogger("pyTelops.gvsp")
+        old_level = gvsp_logger.level
+        gvsp_logger.setLevel(logging.CRITICAL)
 
         # Ensure acquisition is stopped before configuring download
         try:
@@ -1004,6 +1010,7 @@ class Camera:
                     pass
             self._gvsp.resend_enabled = True
             self.stop_stream()
+            gvsp_logger.setLevel(old_level)
 
         if pbar:
             pbar.close()
