@@ -41,15 +41,15 @@ class TestResolveEnum:
         with pytest.raises(TypeError, match="Expected CalibrationMode"):
             _resolve_enum(3.14, reg.CalibrationMode)
 
-    # --- ExposureAuto ---
+    # --- ExposureAuto (integration_time_auto) ---
 
-    def test_exposure_auto_off(self):
+    def test_integration_time_auto_off(self):
         assert _resolve_enum("off", reg.ExposureAuto) == reg.ExposureAuto.OFF
 
-    def test_exposure_auto_continuous(self):
+    def test_integration_time_auto_continuous(self):
         assert _resolve_enum("continuous", reg.ExposureAuto) == reg.ExposureAuto.CONTINUOUS
 
-    def test_exposure_auto_once(self):
+    def test_integration_time_auto_once(self):
         assert _resolve_enum("once", reg.ExposureAuto) == reg.ExposureAuto.ONCE
 
     # --- TriggerSource ---

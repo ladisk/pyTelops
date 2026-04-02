@@ -23,9 +23,13 @@ from .registers import (
     TemperatureLocation, VoltageLocation, CurrentLocation,
 )
 
+# Thermal camera convention alias
+IntegrationTimeAuto = ExposureAuto
+
 __all__ = [
     "Camera", "discover", "GVCPClient", "GVCPError",
-    "CalibrationMode", "ExposureAuto", "TriggerSource",
+    "CalibrationMode", "ExposureAuto", "IntegrationTimeAuto",
+    "TriggerSource",
     "TriggerActivation", "MemoryBufferMOISource", "MemoryBufferStatus",
     "FrameRateMode", "TestImageSelector", "ImageCorrectionMode",
     "TemperatureLocation", "VoltageLocation", "CurrentLocation",

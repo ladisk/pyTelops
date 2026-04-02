@@ -10,7 +10,7 @@ from pyTelops import Camera
 
 with Camera() as cam:
     cam.frame_rate = 2000.0
-    cam.exposure_auto = "continuous"
+    cam.integration_time_auto = "continuous"
 
     # --- Configure buffer: 1 sequence, 5 seconds ---
     cam.buffer_configure(

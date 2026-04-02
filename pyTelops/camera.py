@@ -9,7 +9,7 @@ Usage:
     from pyTelops import Camera
 
     with Camera() as cam:
-        cam.exposure = 50.0
+        cam.integration_time = 50.0
         frame = cam.grab()
 """
 
@@ -181,7 +181,7 @@ class Camera:
 
             cam = Camera(ip="169.254.67.34")
             cam.connect()
-            cam.exposure = 100.0
+            cam.integration_time = 100.0
             frames = cam.acquire(50)
             cam.disconnect()
 
@@ -478,13 +478,13 @@ class Camera:
                 UserWarning, stacklevel=3)
 
     @property
-    def exposure(self) -> float:
-        """Exposure time in microseconds."""
+    def integration_time(self) -> float:
+        """Integration time in microseconds."""
         self._check_connected()
         return self._gvcp.read_float(reg.REG_EXPOSURE_TIME)
 
-    @exposure.setter
-    def exposure(self, us: float):
+    @integration_time.setter
+    def integration_time(self, us: float):
         self._check_connected()
         # Disable AEC if active (it locks ExposureTime register)
         aec = self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO)
@@ -494,17 +494,23 @@ class Camera:
         self._gvcp.write_float(reg.REG_EXPOSURE_TIME, us)
         self._check_fps_clamped(fps_before)
 
+    # Backward-compatible alias
+    exposure = integration_time
+
     @property
-    def exposure_auto(self) -> reg.ExposureAuto:
-        """Auto exposure control mode (OFF, ONCE, CONTINUOUS)."""
+    def integration_time_auto(self) -> reg.ExposureAuto:
+        """Auto integration time control mode (OFF, ONCE, CONTINUOUS)."""
         self._check_connected()
         return reg.ExposureAuto(self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO))
 
-    @exposure_auto.setter
-    def exposure_auto(self, mode):
+    @integration_time_auto.setter
+    def integration_time_auto(self, mode):
         self._check_connected()
         self._gvcp.write_reg(reg.REG_EXPOSURE_AUTO,
                              int(_resolve_enum(mode, reg.ExposureAuto)))
+
+    # Backward-compatible alias
+    exposure_auto = integration_time_auto
 
     @property
     def frame_rate(self) -> float:
@@ -514,7 +520,7 @@ class Camera:
 
     @property
     def frame_rate_max(self) -> float:
-        """Maximum frame rate in Hz for current resolution and exposure."""
+        """Maximum frame rate in Hz for current resolution and integration time."""
         self._check_connected()
         return self._gvcp.read_float(reg.REG_FRAME_RATE_MAX)
 
@@ -528,7 +534,7 @@ class Camera:
             import warnings
             warnings.warn(
                 f"Requested {hz:.0f} Hz exceeds max {max_hz:.0f} Hz "
-                f"(at current resolution/exposure). "
+                f"(at current resolution/integration time). "
                 f"Camera clamped to {actual:.0f} Hz.",
                 UserWarning, stacklevel=2)
 
@@ -574,8 +580,8 @@ class Camera:
             "ip": self._camera_ip,
             "width": self._gvcp.read_reg(reg.REG_WIDTH),
             "height": self._gvcp.read_reg(reg.REG_HEIGHT),
-            "exposure_us": self._gvcp.read_float(reg.REG_EXPOSURE_TIME),
-            "exposure_auto": reg.ExposureAuto(
+            "integration_time_us": self._gvcp.read_float(reg.REG_EXPOSURE_TIME),
+            "integration_time_auto": reg.ExposureAuto(
                 self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO)).name,
             "frame_rate_hz": self._gvcp.read_float(
                 reg.REG_ACQUISITION_FRAME_RATE),

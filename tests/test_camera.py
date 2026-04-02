@@ -34,7 +34,7 @@ class TestCameraInit:
     def test_properties_raise_when_disconnected(self):
         cam = Camera()
         with pytest.raises(RuntimeError):
-            _ = cam.exposure
+            _ = cam.integration_time
         with pytest.raises(RuntimeError):
             _ = cam.frame_rate
         with pytest.raises(RuntimeError):
@@ -89,12 +89,12 @@ class TestCameraHardware:
             assert frame.ndim == 2
             assert frame.dtype.kind == "u"  # unsigned int
 
-    def test_exposure_property(self):
+    def test_integration_time_property(self):
         with Camera() as cam:
-            original = cam.exposure
-            cam.exposure = 100.0
-            assert abs(cam.exposure - 100.0) < 1.0
-            cam.exposure = original
+            original = cam.integration_time
+            cam.integration_time = 100.0
+            assert abs(cam.integration_time - 100.0) < 1.0
+            cam.integration_time = original
 
     def test_frame_rate_property(self):
         with Camera() as cam:

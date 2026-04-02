@@ -25,7 +25,7 @@ Features
 - **Auto-discovery** — finds cameras on the network regardless of IP
 - **Live streaming** — real-time frame acquisition via GVSP (up to ~760 fps at full resolution)
 - **Internal buffer** — record at full sensor speed (up to 3100 fps at full frame), download at ~270 fps
-- **Camera control** — exposure, frame rate, calibration mode, trigger, resolution
+- **Camera control** — integration time, frame rate, calibration mode, trigger, resolution
 - **NUC trigger** — programmatic non-uniformity correction
 - **Diagnostics** — 13 temperature sensors, voltage, current, uptime counters
 - **Time sync** — synchronize camera clock, GEV timestamps
@@ -62,8 +62,8 @@ Quick start
 
    with Camera() as cam:
        cam.calibration_mode = "RT"      # radiometric temperature
-       cam.exposure_auto = "continuous"  # auto exposure (or "off" for manual)
-       # cam.exposure = 50.0            # set manually when exposure_auto is "off"
+       cam.integration_time_auto = "continuous"  # auto integration time (or "off" for manual)
+       # cam.integration_time = 50.0             # set manually when integration_time_auto is "off"
 
        frame = cam.grab()               # single frame -> numpy (H, W)
        frames = cam.acquire(10)         # 10 frames -> numpy (N, H, W)
@@ -110,7 +110,7 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
 
    with Camera() as cam:
        cam.frame_rate = 2000.0
-       cam.exposure = 30.0
+       cam.integration_time = 30.0
 
        # Allocate: 3 sequences of 5 seconds each (uses current frame_rate)
        cam.buffer_configure(n_sequences=3, duration=5.0,
@@ -167,12 +167,12 @@ All settings are properties with string enum support:
 
 .. code-block:: python
 
-   cam.exposure = 50.0                   # microseconds
+   cam.integration_time = 50.0            # microseconds
    cam.frame_rate = 2000.0               # Hz (warns if above max)
-   cam.frame_rate_max                    # max Hz for current resolution/exposure
+   cam.frame_rate_max                    # max Hz for current resolution/integration time
    cam.frame_rate_mode = "fixed"         # "fixed", "fixed_locked", "maximum", "burst"
    cam.calibration_mode = "RT"           # "RT", "NUC", "RAW", "IBR", "IBI"
-   cam.exposure_auto = "continuous"       # "off", "once", "continuous"
+   cam.integration_time_auto = "continuous"  # "off", "once", "continuous"
    cam.resolution                        # (320, 258)
    cam.roi_offset = (10, 20)             # ROI subwindow offset (x, y)
    cam.bad_pixel_replacement = True      # auto-replace hot pixels (ON by default)

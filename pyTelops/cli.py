@@ -52,8 +52,8 @@ def cmd_grab(args):
     from .camera import Camera
 
     with Camera(ip=args.ip) as cam:
-        if args.exposure:
-            cam.exposure = args.exposure
+        if args.integration_time:
+            cam.integration_time = args.integration_time
         frame = cam.grab(timeout=args.timeout)
 
     if frame is None:
@@ -167,8 +167,8 @@ def main(argv: Optional[list[str]] = None):
     p_grab.add_argument("-o", "--output", default="frame.npy",
                         help="Output file (.npy or .csv)")
     p_grab.add_argument("--ip", default=None)
-    p_grab.add_argument("--exposure", type=float, default=None,
-                        help="Exposure time in microseconds")
+    p_grab.add_argument("--integration-time", type=float, default=None,
+                        help="Integration time in microseconds")
     p_grab.add_argument("--timeout", type=float, default=5.0)
 
     # live

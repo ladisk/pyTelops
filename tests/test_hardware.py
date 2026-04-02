@@ -70,7 +70,7 @@ class TestProperties:
         info = cam.info
         assert info["width"] > 0
         assert info["height"] > 0
-        assert "exposure_us" in info
+        assert "integration_time_us" in info
         assert "frame_rate_hz" in info
         assert "frame_rate_max_hz" in info
         assert "calibration" in info
@@ -82,11 +82,11 @@ class TestProperties:
         w, h = cam.resolution
         assert w > 0 and h > 0
 
-    def test_exposure_read_write(self, cam):
-        orig = cam.exposure
-        cam.exposure = 100.0
-        assert abs(cam.exposure - 100.0) < 2.0
-        cam.exposure = orig
+    def test_integration_time_read_write(self, cam):
+        orig = cam.integration_time
+        cam.integration_time = 100.0
+        assert abs(cam.integration_time - 100.0) < 2.0
+        cam.integration_time = orig
 
     def test_frame_rate_read_write(self, cam):
         orig = cam.frame_rate
@@ -131,11 +131,11 @@ class TestProperties:
 
         cam.calibration_mode = orig
 
-    def test_exposure_auto_string(self, cam):
-        orig = cam.exposure_auto
-        cam.exposure_auto = "off"
-        assert cam.exposure_auto == reg.ExposureAuto.OFF
-        cam.exposure_auto = orig
+    def test_integration_time_auto_string(self, cam):
+        orig = cam.integration_time_auto
+        cam.integration_time_auto = "off"
+        assert cam.integration_time_auto == reg.ExposureAuto.OFF
+        cam.integration_time_auto = orig
 
 
 # ============================================================
@@ -243,7 +243,7 @@ class TestBuffer:
             cam.buffer_configure(duration=5.0, frames_per_seq=1000)
 
     def test_buffer_record_and_info(self, cam):
-        cam.exposure = 30.0
+        cam.integration_time = 30.0
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=1, frames_per_seq=50,
                              moi_source="software")
@@ -257,7 +257,7 @@ class TestBuffer:
 
     def test_buffer_record_multiple_sequences(self, cam):
         """buffer_record() handles multi-sequence automatically."""
-        cam.exposure = 30.0
+        cam.integration_time = 30.0
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=3, frames_per_seq=50,
                              moi_source="software")
@@ -272,7 +272,7 @@ class TestBuffer:
 
     def test_buffer_multi_sequence_manual(self, cam):
         """Manual multi-sequence: arm + fire_moi + poll seq count."""
-        cam.exposure = 30.0
+        cam.integration_time = 30.0
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=3, frames_per_seq=50,
                              moi_source="software")
@@ -297,7 +297,7 @@ class TestBuffer:
         cam.buffer_clear()
 
     def test_buffer_download(self, cam):
-        cam.exposure = 30.0
+        cam.integration_time = 30.0
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=1, frames_per_seq=50,
                              moi_source="software")
@@ -348,7 +348,7 @@ class TestBuffer:
 
     def test_buffer_wait_timeout(self, cam):
         """buffer_wait should raise TimeoutError."""
-        cam.exposure = 30.0
+        cam.integration_time = 30.0
         cam.frame_rate = 100.0
         cam.buffer_configure(n_sequences=1, frames_per_seq=10000,
                              moi_source="software")
@@ -388,7 +388,7 @@ class TestFullWorkflow:
     def test_complete_measurement(self, cam):
         """Full workflow: configure → record → download → verify."""
         # Configure
-        cam.exposure = 30.0
+        cam.integration_time = 30.0
         cam.frame_rate = 2000.0
         cam.calibration_mode = "RT"
 
@@ -417,7 +417,7 @@ class TestFullWorkflow:
 
     def test_multiple_recordings_selective_download(self, cam):
         """Record 3 sequences, download only the second one."""
-        cam.exposure = 30.0
+        cam.integration_time = 30.0
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=3, frames_per_seq=30,
                              moi_source="software")

@@ -13,7 +13,7 @@ with Camera() as cam:
 
     # Configure
     cam.calibration_mode = "RT"
-    cam.exposure_auto = "continuous"
+    cam.integration_time_auto = "continuous"
 
     # Single frame (headers stripped automatically)
     frame = cam.grab()
