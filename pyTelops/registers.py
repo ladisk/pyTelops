@@ -13,6 +13,13 @@ from enum import IntEnum
 # ============================================================
 REG_SC_HOST_PORT = 0x0D00
 REG_SC_PACKET_SIZE = 0x0D04
+# SC_PACKET_SIZE register layout (GigE Vision spec):
+#   Bits 15:2 — packet size in bytes
+#   Bit 1     — GevSCPSDoNotFragment (1=don't fragment, 0=allow fragmentation)
+#   Bit 0     — GevSCPSFireTestPacket (write-only trigger)
+SC_PACKET_SIZE_MASK = 0xFFFC       # bits 15:2 (packet size, excludes flag bits)
+SC_SCPS_DO_NOT_FRAGMENT = 1 << 1   # bit 1
+SC_SCPS_FIRE_TEST_PACKET = 1 << 0  # bit 0 (write-only)
 REG_SC_PACKET_DELAY = 0x0D08
 REG_SC_DEST_ADDR = 0x0D18
 
@@ -99,7 +106,8 @@ REG_MEMORY_BUFFER_FREE_SPACE_LOW = 0xEB74
 # ============================================================
 # Device Control / Status
 # ============================================================
-REG_DEVICE_RESET = 0xE948  # Command
+REG_DEVICE_RESET = 0xD340  # Command (was incorrectly 0xE948)
+REG_DEVICE_POWER_STATE_SETPOINT = 0xE948  # Enum: DevicePowerState
 REG_DEVICE_POWER_STATE = 0xE94C
 REG_DEVICE_LED = 0xE950
 REG_DEVICE_NOT_READY = 0xEA84
@@ -255,6 +263,7 @@ REGISTER_INFO = {
     REG_MEMORY_BUFFER_SEQ_SIZE: ("MemoryBufferSequenceSize", "int", "RW"),
     REG_MEMORY_BUFFER_DOWNLOAD_MODE: ("MemoryBufferDownloadMode", "enum", "RW"),
     REG_MEMORY_BUFFER_STATUS: ("MemoryBufferStatus", "enum", "RO"),
+    REG_DEVICE_POWER_STATE_SETPOINT: ("DevicePowerStateSetpoint", "enum", "RW"),
     REG_DEVICE_POWER_STATE: ("DevicePowerState", "enum", "RO"),
     REG_DEVICE_NOT_READY: ("DeviceNotReady", "bool", "RO"),
     REG_DEVICE_TEMPERATURE: ("DeviceTemperature", "float", "RO"),

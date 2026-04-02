@@ -492,14 +492,15 @@ class Camera:
         if self._streaming:
             return
 
-        # Clamp packet size to standard MTU
+        # Clamp packet size to standard MTU, preserving flag bits
         target_pkt_size = 1500
         pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
-        current_size = pkt_reg & 0xFFFF
+        current_size = pkt_reg & reg.SC_PACKET_SIZE_MASK
         if current_size != target_pkt_size:
-            flags = pkt_reg & 0xFFFF0000
+            # Preserve upper flags and lower flag bits (DoNotFragment etc.)
+            non_size_bits = pkt_reg & ~reg.SC_PACKET_SIZE_MASK
             self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
-                                 flags | target_pkt_size)
+                                 non_size_bits | target_pkt_size)
 
         self._gvsp._packet_data_size = target_pkt_size - 8
 
@@ -734,40 +735,45 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE, int(moi))
 
     def buffer_record(self, verbose: bool = True) -> int:
-        """Record a single sequence to the internal buffer.
+        """Record all configured sequences to the internal buffer.
 
-        Configures with ``n_sequences=1`` before calling, or use for
-        single-sequence workflows. Arms the camera, fires software MOI,
-        waits for recording to complete, and stops acquisition.
+        Supports both single-sequence and multi-sequence recordings.
+        For each sequence, arms (first only), fires a software MOI, and
+        waits for the sequence to complete by polling the
+        ``MemoryBufferSequenceCount`` register (0xE914).
 
-        For multi-sequence recordings, use the manual flow::
+        Single-sequence example::
 
-            cam.buffer_configure(n_sequences=3, duration=5.0)
+            cam.buffer_configure(n_sequences=1, frames_per_seq=100)
+            n = cam.buffer_record()  # -> 100
+
+        Multi-sequence example::
+
+            cam.buffer_configure(n_sequences=3, frames_per_seq=50)
+            n = cam.buffer_record()  # records all 3, returns total
+
+        For external-trigger workflows where the MOI comes from an
+        outside signal, use the manual flow instead::
+
+            cam.buffer_configure(n_sequences=3, moi_source="external")
             cam.buffer_arm()
-            cam.buffer_fire_moi()   # seq 0
-            cam.buffer_fire_moi()   # seq 1
-            cam.buffer_fire_moi()   # seq 2
-            cam.buffer_wait()       # waits for all sequences
+            # ... external trigger fires 3 times ...
+            cam.buffer_wait()       # waits for HOLDING/IDLE
 
         Args:
             verbose: Print status messages (default True).
 
         Returns:
-            Number of frames recorded.
+            Total number of frames recorded across all sequences.
 
         Raises:
-            RuntimeError: If buffer is configured for multiple sequences.
-            TimeoutError: If recording doesn't finish (safety timeout).
+            TimeoutError: If a sequence doesn't finish within the
+                safety timeout.
         """
         self._check_connected()
         n_seq = getattr(self, '_buffer_n_sequences', 1)
-        if n_seq != 1:
-            raise RuntimeError(
-                f"buffer_record() only works with n_sequences=1 "
-                f"(configured: {n_seq}). For multi-sequence recording, "
-                f"use buffer_arm() + buffer_fire_moi() + buffer_wait().")
 
-        # Auto-calculate timeout from frame count and frame rate
+        # Auto-calculate per-sequence timeout from frame count and frame rate
         fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
         seq_size = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE)
         if fps > 0:
@@ -776,41 +782,59 @@ class Camera:
         else:
             timeout = 60.0
 
-        if verbose:
-            print("Arming...", end=" ", flush=True)
+        total_recorded = 0
 
-        self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
-        self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
-        time.sleep(0.5)
+        for seq_idx in range(n_seq):
+            if seq_idx == 0:
+                # First sequence: arm + start + settle + fire MOI
+                if verbose:
+                    print(f"Arming (seq {seq_idx + 1}/{n_seq})...",
+                          end=" ", flush=True)
 
-        if verbose:
-            print("Recording...", end=" ", flush=True)
+                self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
+                self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+                time.sleep(0.5)
+            else:
+                # Subsequent sequences: camera stays armed, just fire MOI
+                if verbose:
+                    print(f"Firing (seq {seq_idx + 1}/{n_seq})...",
+                          end=" ", flush=True)
 
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
-
-        # Wait for HOLDING or IDLE
-        try:
-            self.buffer_wait(timeout=timeout)
-        except TimeoutError:
-            try:
-                self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-            except GVCPError:
-                pass
             if verbose:
-                print("TIMEOUT", flush=True)
-            raise
+                print("Recording...", end=" ", flush=True)
 
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
+
+            # Wait for this sequence to complete
+            try:
+                self._buffer_wait_sequence(seq_idx + 1, timeout=timeout)
+            except TimeoutError:
+                # On timeout of the last sequence, stop acquisition
+                try:
+                    self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+                except GVCPError:
+                    pass
+                if verbose:
+                    print("TIMEOUT", flush=True)
+                raise
+
+            if verbose:
+                print(f"Done ({seq_size} frames)", flush=True)
+            total_recorded += seq_size
+
+        # Stop acquisition after all sequences complete
         try:
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         except GVCPError:
             pass
+        time.sleep(0.3)
 
-        recorded = self.buffer_recorded_frames(0)
+        # Now read actual per-sequence counts (registers unlocked after stop)
+        total_recorded = 0
+        for i in range(n_seq):
+            total_recorded += self.buffer_recorded_frames(i)
 
-        if verbose:
-            print(f"Done ({recorded} frames)", flush=True)
-
-        return recorded
+        return total_recorded
 
     def buffer_arm(self) -> None:
         """Arm the camera and start acquisition for buffer recording.
@@ -857,6 +881,37 @@ class Camera:
         raise TimeoutError(
             f"Buffer recording not complete after {timeout:.0f}s "
             f"(last status: {status.name})")
+
+    def _buffer_wait_sequence(self, target_count: int,
+                              timeout: float = 30.0,
+                              poll_interval: float = 0.5) -> None:
+        """Wait for the sequence counter to reach *target_count*.
+
+        Polls ``MemoryBufferSequenceCount`` (0xE914) which increments
+        each time a sequence finishes recording.  This allows
+        per-sequence completion detection without waiting for the
+        overall buffer status to leave RECORDING (which only happens
+        after the *last* configured sequence).
+
+        Args:
+            target_count: Expected value of the sequence counter
+                (1 after first sequence completes, 2 after second, ...).
+            timeout: Max seconds to wait.
+            poll_interval: Seconds between polls.
+
+        Raises:
+            TimeoutError: If *target_count* is not reached in time.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            count = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_COUNT)
+            if count >= target_count:
+                return
+            time.sleep(poll_interval)
+        raise TimeoutError(
+            f"Sequence count did not reach {target_count} within "
+            f"{timeout:.0f}s (current: "
+            f"{self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_COUNT)})")
 
     def buffer_info(self) -> dict:
         """Summary of buffer state and recorded sequences.
@@ -1018,14 +1073,22 @@ class Camera:
         self.start_stream()
         self._gvsp.resend_enabled = False
 
-        # Override packet size for download (larger = faster)
-        old_pkt_size = None
+        # Override packet size for download (larger = faster).
+        # When using packet_size > 1500 (e.g. 9000), UDP packets will be
+        # IP-fragmented by the camera.  If GevSCPSDoNotFragment (bit 1)
+        # is set, the camera/NIC drops oversized packets instead of
+        # fragmenting them, causing complete data loss.  We clear the
+        # flag when using large packets and restore the original register
+        # value afterwards.
+        old_pkt_reg = None
         if packet_size != 1500:
-            pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
-            old_pkt_size = pkt_reg & 0xFFFF
-            flags = pkt_reg & 0xFFFF0000
-            self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
-                                 flags | packet_size)
+            old_pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
+            upper_flags = old_pkt_reg & 0xFFFF0000
+            new_pkt_reg = upper_flags | (packet_size & reg.SC_PACKET_SIZE_MASK)
+            if packet_size > 1500:
+                # Allow IP fragmentation for large packets
+                new_pkt_reg &= ~reg.SC_SCPS_DO_NOT_FRAGMENT
+            self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE, new_pkt_reg)
             self._gvsp._packet_data_size = packet_size - 8
 
         # Start download stream
@@ -1073,13 +1136,12 @@ class Camera:
                                      reg.MemoryBufferDownloadMode.OFF)
             except GVCPError:
                 pass
-            if old_pkt_size is not None:
+            if old_pkt_reg is not None:
                 try:
-                    pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
-                    flags = pkt_reg & 0xFFFF0000
-                    self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
-                                         flags | old_pkt_size)
-                    self._gvsp._packet_data_size = old_pkt_size - 8
+                    # Restore original register value (size + flags incl.
+                    # DoNotFragment) exactly as it was before download.
+                    self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE, old_pkt_reg)
+                    self._gvsp._packet_data_size = (old_pkt_reg & reg.SC_PACKET_SIZE_MASK) - 8
                 except GVCPError:
                     pass
             self._gvsp.resend_enabled = True

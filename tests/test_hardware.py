@@ -255,20 +255,23 @@ class TestBuffer:
         assert info["recorded"][0] == 50
         cam.buffer_clear()
 
-    def test_buffer_record_rejects_multi_sequence(self, cam):
+    def test_buffer_record_multiple_sequences(self, cam):
+        """buffer_record() handles multi-sequence automatically."""
         cam.exposure = 30.0
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=3, frames_per_seq=50,
                              moi_source="software")
 
-        with pytest.raises(RuntimeError, match="n_sequences=1"):
-            cam.buffer_record(verbose=False)
+        total = cam.buffer_record(verbose=False)
+        assert total == 150  # 3 x 50
+
+        info = cam.buffer_info()
+        assert all(r == 50 for r in info["recorded"])
 
         cam.buffer_clear()
 
-    @pytest.mark.slow
     def test_buffer_multi_sequence_manual(self, cam):
-        """Multi-sequence uses arm + fire_moi + wait."""
+        """Manual multi-sequence: arm + fire_moi + poll seq count."""
         cam.exposure = 30.0
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=3, frames_per_seq=50,
@@ -276,18 +279,17 @@ class TestBuffer:
 
         cam.buffer_arm()
         time.sleep(1.0)
-        cam.buffer_fire_moi()  # seq 0
-        time.sleep(1.0)
-        cam.buffer_fire_moi()  # seq 1
-        time.sleep(1.0)
-        cam.buffer_fire_moi()  # seq 2
 
-        cam.buffer_wait(timeout=60.0)
+        for i in range(3):
+            cam.buffer_fire_moi()
+            # Poll sequence count register until this seq completes
+            cam._buffer_wait_sequence(i + 1, timeout=30.0)
 
         try:
             cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         except GVCPError:
             pass
+        time.sleep(0.3)
 
         info = cam.buffer_info()
         assert all(r == 50 for r in info["recorded"])
@@ -413,7 +415,6 @@ class TestFullWorkflow:
         # Clean up
         cam.buffer_clear()
 
-    @pytest.mark.slow
     def test_multiple_recordings_selective_download(self, cam):
         """Record 3 sequences, download only the second one."""
         cam.exposure = 30.0
@@ -421,20 +422,8 @@ class TestFullWorkflow:
         cam.buffer_configure(n_sequences=3, frames_per_seq=30,
                              moi_source="software")
 
-        # Multi-sequence: manual flow
-        cam.buffer_arm()
-        time.sleep(1.0)
-        cam.buffer_fire_moi()
-        time.sleep(1.0)
-        cam.buffer_fire_moi()
-        time.sleep(1.0)
-        cam.buffer_fire_moi()
-        cam.buffer_wait(timeout=60.0)
-
-        try:
-            cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except GVCPError:
-            pass
+        total = cam.buffer_record(verbose=False)
+        assert total == 90  # 3 x 30
 
         info = cam.buffer_info()
         assert all(r == 30 for r in info["recorded"])
