@@ -16,5 +16,14 @@ __version__ = "0.1.0"
 
 from .camera import Camera, discover
 from .gvcp import GVCPClient, GVCPError
+from .registers import (
+    CalibrationMode, ExposureAuto, TriggerSource, TriggerActivation,
+    MemoryBufferMOISource, MemoryBufferStatus,
+)
 
-__all__ = ["Camera", "discover", "GVCPClient", "GVCPError", "__version__"]
+__all__ = [
+    "Camera", "discover", "GVCPClient", "GVCPError",
+    "CalibrationMode", "ExposureAuto", "TriggerSource",
+    "TriggerActivation", "MemoryBufferMOISource", "MemoryBufferStatus",
+    "__version__",
+]

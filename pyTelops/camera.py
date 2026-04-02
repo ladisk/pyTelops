@@ -24,6 +24,61 @@ from .gvcp import GVCPClient, GVCPError, REG_HEARTBEAT_TIMEOUT
 from .gvsp import GVSPReceiver
 from . import registers as reg
 
+# --- Enum string resolution ---
+_ENUM_ALIASES = {
+    reg.CalibrationMode: {
+        "raw": reg.CalibrationMode.RAW, "raw0": reg.CalibrationMode.RAW0,
+        "nuc": reg.CalibrationMode.NUC, "rt": reg.CalibrationMode.RT,
+        "ibr": reg.CalibrationMode.IBR, "ibi": reg.CalibrationMode.IBI,
+    },
+    reg.ExposureAuto: {
+        "off": reg.ExposureAuto.OFF, "once": reg.ExposureAuto.ONCE,
+        "continuous": reg.ExposureAuto.CONTINUOUS,
+    },
+    reg.TriggerSource: {
+        "software": reg.TriggerSource.SOFTWARE,
+        "external": reg.TriggerSource.EXTERNAL_SIGNAL,
+    },
+    reg.TriggerActivation: {
+        "rising": reg.TriggerActivation.RISING_EDGE,
+        "falling": reg.TriggerActivation.FALLING_EDGE,
+        "any": reg.TriggerActivation.ANY_EDGE,
+    },
+    reg.TriggerSelector: {
+        "acquisition_start": reg.TriggerSelector.ACQUISITION_START,
+        "flagging": reg.TriggerSelector.FLAGGING,
+        "gating": reg.TriggerSelector.GATING,
+    },
+    reg.MemoryBufferMOISource: {
+        "software": reg.MemoryBufferMOISource.SOFTWARE,
+        "external": reg.MemoryBufferMOISource.EXTERNAL_SIGNAL,
+        "acquisition_started": reg.MemoryBufferMOISource.ACQUISITION_STARTED,
+        "none": reg.MemoryBufferMOISource.NONE,
+    },
+}
+
+
+def _resolve_enum(value, enum_cls):
+    """Resolve a string or enum value to the enum type."""
+    if isinstance(value, enum_cls):
+        return value
+    if isinstance(value, int):
+        return enum_cls(value)
+    if isinstance(value, str):
+        aliases = _ENUM_ALIASES.get(enum_cls, {})
+        key = value.lower().strip()
+        if key in aliases:
+            return aliases[key]
+        # Try matching enum member name
+        for member in enum_cls:
+            if member.name.lower() == key:
+                return member
+        valid = list(aliases.keys()) + [m.name for m in enum_cls]
+        raise ValueError(f"Unknown {enum_cls.__name__}: {value!r}. "
+                         f"Valid: {valid}")
+    raise TypeError(f"Expected {enum_cls.__name__}, str, or int, "
+                    f"got {type(value).__name__}")
+
 
 def discover(interface_ip: str = "", timeout: float = 2.0) -> list[dict]:
     """Discover Telops cameras on the network.
@@ -131,11 +186,19 @@ class Camera:
         self._gvsp: Optional[GVSPReceiver] = None
         self._streaming = False
         self._connected = False
+        self._buffer_n_sequences = 1
+        self._buffer_next_sequence = 0
 
     def __repr__(self) -> str:
         status = "connected" if self._connected else "disconnected"
         ip = self._camera_ip or "unknown"
         return f"Camera({ip}, {status})"
+
+    def __del__(self):
+        try:
+            self.disconnect()
+        except Exception:
+            pass
 
     # ==========================================================
     # Context Manager
@@ -294,9 +357,10 @@ class Camera:
         return reg.ExposureAuto(self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO))
 
     @exposure_auto.setter
-    def exposure_auto(self, mode: reg.ExposureAuto):
+    def exposure_auto(self, mode):
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_EXPOSURE_AUTO, int(mode))
+        self._gvcp.write_reg(reg.REG_EXPOSURE_AUTO,
+                             int(_resolve_enum(mode, reg.ExposureAuto)))
 
     @property
     def frame_rate(self) -> float:
@@ -316,9 +380,10 @@ class Camera:
         return reg.CalibrationMode(self._gvcp.read_reg(reg.REG_CALIBRATION_MODE))
 
     @calibration_mode.setter
-    def calibration_mode(self, mode: reg.CalibrationMode):
+    def calibration_mode(self, mode):
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_CALIBRATION_MODE, int(mode))
+        self._gvcp.write_reg(reg.REG_CALIBRATION_MODE,
+                             int(_resolve_enum(mode, reg.CalibrationMode)))
 
     @property
     def resolution(self) -> tuple[int, int]:
@@ -444,10 +509,25 @@ class Camera:
     # Frame Acquisition
     # ==========================================================
 
-    def grab(self, timeout: float = 5.0) -> Optional[np.ndarray]:
+    def _strip_headers(self, arr: np.ndarray) -> np.ndarray:
+        """Strip Telops header rows from a frame or batch of frames."""
+        if self.HEADER_ROWS == 0:
+            return arr
+        if arr.ndim == 2:
+            return arr[self.HEADER_ROWS:, :]
+        elif arr.ndim == 3:
+            return arr[:, self.HEADER_ROWS:, :]
+        return arr
+
+    def grab(self, timeout: float = 5.0,
+             strip_header: bool = True) -> Optional[np.ndarray]:
         """Grab a single frame.
 
         Starts streaming if not already active, grabs one frame.
+
+        Args:
+            timeout: Seconds to wait for a frame.
+            strip_header: Remove Telops metadata rows (default True).
 
         Returns:
             2D numpy array (H, W) of uint16 pixel values, or None on timeout.
@@ -463,15 +543,18 @@ class Camera:
         if not was_streaming:
             self.stop_stream()
 
+        if frame is not None and strip_header:
+            frame = self._strip_headers(frame)
         return frame
 
-    def acquire(self, n_frames: int, timeout: float = 30.0
-                ) -> Optional[np.ndarray]:
-        """Acquire multiple frames.
+    def acquire(self, n_frames: int, timeout: float = 30.0,
+                strip_header: bool = True) -> Optional[np.ndarray]:
+        """Acquire multiple frames via live streaming.
 
         Args:
             n_frames: Number of frames to capture.
             timeout: Total timeout in seconds.
+            strip_header: Remove Telops metadata rows (default True).
 
         Returns:
             3D numpy array (N, H, W) or None if no frames captured.
@@ -498,30 +581,33 @@ class Camera:
 
         if not frames:
             return None
-        return np.stack(frames)
+        result = np.stack(frames)
+        if strip_header:
+            result = self._strip_headers(result)
+        return result
 
     # ==========================================================
     # Trigger
     # ==========================================================
 
-    def configure_trigger(
-            self,
-            source: reg.TriggerSource = reg.TriggerSource.EXTERNAL_SIGNAL,
-            activation: reg.TriggerActivation = reg.TriggerActivation.RISING_EDGE,
-            selector: reg.TriggerSelector = reg.TriggerSelector.ACQUISITION_START,
-            enabled: bool = True) -> None:
+    def configure_trigger(self, source="external", activation="rising",
+                          selector="acquisition_start",
+                          enabled: bool = True) -> None:
         """Configure external trigger.
 
         Args:
-            source: Trigger source (SOFTWARE or EXTERNAL_SIGNAL).
-            activation: Edge type (RISING_EDGE, FALLING_EDGE, etc.).
-            selector: What to trigger (ACQUISITION_START, FLAGGING, GATING).
+            source: "software" or "external" (or TriggerSource enum).
+            activation: "rising", "falling", "any" (or TriggerActivation enum).
+            selector: "acquisition_start", "flagging", "gating" (or enum).
             enabled: Enable or disable trigger mode.
         """
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_TRIGGER_SELECTOR, int(selector))
-        self._gvcp.write_reg(reg.REG_TRIGGER_SOURCE, int(source))
-        self._gvcp.write_reg(reg.REG_TRIGGER_ACTIVATION, int(activation))
+        self._gvcp.write_reg(reg.REG_TRIGGER_SELECTOR,
+                             int(_resolve_enum(selector, reg.TriggerSelector)))
+        self._gvcp.write_reg(reg.REG_TRIGGER_SOURCE,
+                             int(_resolve_enum(source, reg.TriggerSource)))
+        self._gvcp.write_reg(reg.REG_TRIGGER_ACTIVATION,
+                             int(_resolve_enum(activation, reg.TriggerActivation)))
         self._gvcp.write_reg(reg.REG_TRIGGER_MODE,
                              int(reg.TriggerMode.ON if enabled
                                  else reg.TriggerMode.OFF))
@@ -535,43 +621,41 @@ class Camera:
     # Memory Buffer (16GB onboard)
     # ==========================================================
 
-    def buffer_configure(
-            self,
-            n_sequences: int = 1,
-            frames_per_seq: int = 100,
-            pre_moi: int = 0,
-            moi_source: reg.MemoryBufferMOISource = reg.MemoryBufferMOISource.SOFTWARE
-    ) -> None:
+    def buffer_configure(self, n_sequences: int = 1,
+                         frames_per_seq: int = 100, pre_moi: int = 0,
+                         moi_source="software") -> None:
         """Configure the internal memory buffer for recording.
 
         The camera has a 16GB ring buffer that records at full sensor speed
-        (up to 3100 fps), independent of the Ethernet link.
+        (up to 3100 fps), independent of the Ethernet link. The buffer must
+        be partitioned into fixed-size sequence slots before recording.
 
         If the buffer already has data or is in an incompatible state,
-        this method automatically stops acquisition, clears the buffer,
-        and re-enables buffer mode before applying the configuration.
+        this method automatically clears it before applying the configuration.
 
         Args:
-            n_sequences: Number of recording sequences.
-            frames_per_seq: Frames per sequence.
+            n_sequences: Number of recording sequence slots to allocate.
+            frames_per_seq: Frames per sequence slot.
             pre_moi: Frames to keep before the MOI trigger.
-            moi_source: What triggers the Moment of Interest
-                        (SOFTWARE, EXTERNAL_SIGNAL, ACQUISITION_STARTED).
+            moi_source: "software", "external", or "acquisition_started"
+                        (or MemoryBufferMOISource enum).
         """
         self._check_connected()
+        moi = _resolve_enum(moi_source, reg.MemoryBufferMOISource)
+
+        # Track configured sequence count for buffer_record()
+        self._buffer_n_sequences = n_sequences
+        self._buffer_next_sequence = 0
 
         # Try to enable buffer mode; if it fails, clean up stale state
         try:
             self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
                                  reg.MemoryBufferMode.ON)
         except GVCPError:
-            # Buffer may have stale data or acquisition may be active.
-            # Stop acquisition, turn buffer off, clear, then retry.
             try:
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
             except GVCPError:
                 pass
-            import time
             time.sleep(0.3)
             try:
                 self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
@@ -590,10 +674,61 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_NUM_SEQUENCES, n_sequences)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE, frames_per_seq)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, pre_moi)
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE, int(moi_source))
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE, int(moi))
+
+    def buffer_record(self, timeout: float = 30.0) -> int:
+        """Record one sequence to the internal buffer.
+
+        Arms the camera, fires software MOI, waits for recording to
+        complete, and stops acquisition. Call this repeatedly to fill
+        successive sequence slots (up to n_sequences configured).
+
+        Args:
+            timeout: Max seconds to wait for recording to finish.
+
+        Returns:
+            Number of frames recorded in this sequence.
+
+        Raises:
+            RuntimeError: If all sequence slots are full.
+            TimeoutError: If recording doesn't finish within timeout.
+        """
+        self._check_connected()
+        n_seq = getattr(self, '_buffer_n_sequences', 1)
+        seq_idx = getattr(self, '_buffer_next_sequence', 0)
+        if seq_idx >= n_seq:
+            raise RuntimeError(
+                f"All {n_seq} sequence slots are full. "
+                f"Call buffer_clear() or buffer_configure() first.")
+
+        # Arm + start acquisition
+        self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
+        self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+
+        # Fire software MOI
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
+
+        # Wait for recording to complete
+        self.buffer_wait(timeout=timeout)
+
+        # Stop acquisition
+        try:
+            self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        except GVCPError:
+            pass
+
+        recorded = self.buffer_recorded_frames(seq_idx)
+        self._buffer_next_sequence = seq_idx + 1
+        return recorded
 
     def buffer_arm(self) -> None:
-        """Arm the camera and start acquisition for buffer recording."""
+        """Arm the camera and start acquisition for buffer recording.
+
+        Use this for external trigger workflows where you need to arm
+        the camera and wait for an external MOI signal. After the
+        trigger fires, call buffer_wait() to block until recording
+        completes.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
         self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
@@ -602,6 +737,68 @@ class Camera:
         """Fire software MOI (Moment of Interest) trigger."""
         self._check_connected()
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
+
+    def buffer_wait(self, timeout: float = 30.0,
+                    poll_interval: float = 0.5) -> reg.MemoryBufferStatus:
+        """Wait for buffer recording to complete.
+
+        Polls buffer_status() until HOLDING or IDLE.
+
+        Args:
+            timeout: Max seconds to wait.
+            poll_interval: Seconds between status polls.
+
+        Returns:
+            Final MemoryBufferStatus.
+
+        Raises:
+            TimeoutError: If not complete within timeout.
+        """
+        self._check_connected()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = self.buffer_status()
+            if status in (reg.MemoryBufferStatus.HOLDING,
+                          reg.MemoryBufferStatus.IDLE):
+                return status
+            time.sleep(poll_interval)
+        raise TimeoutError(
+            f"Buffer recording not complete after {timeout:.0f}s "
+            f"(last status: {status.name})")
+
+    def buffer_info(self) -> dict:
+        """Summary of buffer state and recorded sequences.
+
+        Returns:
+            Dict with keys: status, n_sequences, recorded (list of
+            frame counts per sequence), total_bytes, free_bytes.
+        """
+        self._check_connected()
+        status = self.buffer_status()
+        n_seq = getattr(self, '_buffer_n_sequences', 1)
+
+        recorded = []
+        for i in range(n_seq):
+            try:
+                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, i)
+                count = self._gvcp.read_reg(
+                    reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
+                recorded.append(count)
+            except GVCPError:
+                recorded.append(0)
+
+        total_hi = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_TOTAL_SPACE_HIGH)
+        total_lo = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_TOTAL_SPACE_LOW)
+        free_hi = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_FREE_SPACE_HIGH)
+        free_lo = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_FREE_SPACE_LOW)
+
+        return {
+            "status": status.name,
+            "n_sequences": n_seq,
+            "recorded": recorded,
+            "total_bytes": (total_hi << 32) | total_lo,
+            "free_bytes": (free_hi << 32) | free_lo,
+        }
 
     def buffer_status(self) -> reg.MemoryBufferStatus:
         """Read memory buffer status.
@@ -642,7 +839,8 @@ class Camera:
     def buffer_download(self, sequence: int = 0, start_frame: int = 0,
                         n_frames: int = 0, timeout: float = 0,
                         bitrate_mbps: float = 1000.0,
-                        packet_size: int = 9000
+                        packet_size: int = 9000,
+                        strip_header: bool = True
                         ) -> Optional[np.ndarray]:
         """Download frames from the internal memory buffer.
 
@@ -651,11 +849,10 @@ class Camera:
             start_frame: Starting frame ID (0 = first recorded).
             n_frames: Number of frames (0 = all recorded).
             timeout: Total timeout in seconds (0 = auto-calculate).
-            bitrate_mbps: Max download bitrate in Mbps (default 1000,
-                          camera default is 20 which is very slow).
-            packet_size: GVSP packet size in bytes (default 1500).
-                         Set to 9000 for jumbo frames if your network
-                         supports it.
+            bitrate_mbps: Max download bitrate in Mbps (default 1000).
+            packet_size: GVSP packet size in bytes (default 9000).
+                         If you get data loss, try 3000 or 1500.
+            strip_header: Remove Telops metadata rows (default True).
 
         Returns:
             numpy array (N, H, W) or None on failure.
@@ -800,7 +997,10 @@ class Camera:
 
         if not frames:
             return None
-        return np.stack(frames)
+        result = np.stack(frames)
+        if strip_header:
+            result = self._strip_headers(result)
+        return result
 
     def buffer_clear(self) -> None:
         """Clear all sequences from the memory buffer."""
