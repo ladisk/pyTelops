@@ -21,7 +21,7 @@ Features
 
 - **Auto-discovery** — finds cameras on the network regardless of IP
 - **Live streaming** — real-time frame acquisition via GVSP (~49 fps at full resolution)
-- **Internal buffer** — record at full sensor speed (up to 3100 fps), download at ~270 fps
+- **Internal buffer** — record at full sensor speed (up to 3100 fps at full frame), download at ~270 fps
 - **Camera control** — exposure, frame rate, calibration mode, trigger, resolution
 - **String enums** — ``cam.calibration_mode = "RT"`` instead of importing enum classes
 - **Auto header stripping** — frames are returned without Telops metadata rows
@@ -75,7 +75,7 @@ Throughput depends on resolution; ~49 fps at full frame (320×256, ~8 MB/s):
    frames = cam.acquire(100)      # 100 frames
 
 **Buffer recording** — the camera records to its internal 16 GB memory at full
-sensor speed (up to 3100 fps), then downloads to PC:
+sensor speed (up to 3100 fps at full frame), then downloads to PC:
 
 .. code-block:: python
 
