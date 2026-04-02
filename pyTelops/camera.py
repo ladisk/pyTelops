@@ -732,8 +732,7 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, pre_moi)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE, int(moi))
 
-    def buffer_record(self, timeout: float = 30.0,
-                      verbose: bool = True) -> int:
+    def buffer_record(self, verbose: bool = True) -> int:
         """Record one sequence to the internal buffer.
 
         Arms the camera, fires software MOI, waits for recording to
@@ -741,7 +740,6 @@ class Camera:
         successive sequence slots (up to n_sequences configured).
 
         Args:
-            timeout: Max seconds to wait for recording to finish.
             verbose: Print status messages (default True).
 
         Returns:
@@ -749,7 +747,7 @@ class Camera:
 
         Raises:
             RuntimeError: If all sequence slots are full.
-            TimeoutError: If recording doesn't finish within timeout.
+            TimeoutError: If recording doesn't finish (safety timeout).
         """
         self._check_connected()
         n_seq = getattr(self, '_buffer_n_sequences', 1)
@@ -759,18 +757,13 @@ class Camera:
                 f"All {n_seq} sequence slots are full. "
                 f"Call buffer_clear() or buffer_configure() first.")
 
-        # Warn if recording will exceed timeout
+        # Auto-calculate timeout from frame count and frame rate
         fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
         seq_size = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE)
         if fps > 0:
-            est_time = seq_size / fps
-            if est_time > timeout * 0.9:
-                import warnings
-                warnings.warn(
-                    f"Recording {seq_size} frames at {fps:.0f} fps "
-                    f"will take ~{est_time:.0f}s, but timeout is "
-                    f"{timeout:.0f}s. Increase timeout or frame_rate.",
-                    UserWarning, stacklevel=2)
+            timeout = max(seq_size / fps * 2 + 10, 15.0)
+        else:
+            timeout = 60.0
 
         label = f" (seq {seq_idx + 1}/{n_seq})" if n_seq > 1 else ""
 

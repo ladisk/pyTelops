@@ -112,7 +112,7 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
                             moi_source="software")
 
        # Record — one call per sequence
-       cam.buffer_record(timeout=30.0)   # arms, fires MOI, waits, stops
+       cam.buffer_record()   # arms, fires MOI, waits, stops
        cam.buffer_record(timeout=30.0)
        cam.buffer_record(timeout=30.0)
 
