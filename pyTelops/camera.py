@@ -774,6 +774,9 @@ class Camera:
     # Frame Acquisition
     # ==========================================================
 
+    # RT mode outputs centi-Kelvin as uint16 (e.g., 29315 = 293.15 K = 20 C)
+    RT_SCALE = 100.0
+
     def _strip_headers(self, arr: np.ndarray) -> np.ndarray:
         """Strip Telops header rows from a frame or batch of frames."""
         if self.HEADER_ROWS == 0:
@@ -784,8 +787,20 @@ class Camera:
             return arr[:, self.HEADER_ROWS:, :]
         return arr
 
+    def _to_kelvin(self, arr: np.ndarray) -> np.ndarray:
+        """Convert RT mode centi-Kelvin uint16 to Kelvin float32."""
+        return arr.astype(np.float32) / self.RT_SCALE
+
+    def _is_rt_mode(self) -> bool:
+        """Check if camera is in radiometric temperature mode."""
+        try:
+            return self._gvcp.read_reg(reg.REG_CALIBRATION_MODE) == reg.CalibrationMode.RT
+        except GVCPError:
+            return False
+
     def grab(self, timeout: float = 5.0,
-             strip_header: bool = True) -> Optional[np.ndarray]:
+             strip_header: bool = True,
+             convert: bool = True) -> Optional[np.ndarray]:
         """Grab a single frame.
 
         Starts streaming if not already active, grabs one frame.
@@ -793,9 +808,12 @@ class Camera:
         Args:
             timeout: Seconds to wait for a frame.
             strip_header: Remove Telops metadata rows (default True).
+            convert: Convert to Kelvin in RT mode (default True).
+                     Set False for raw uint16 values.
 
         Returns:
-            2D numpy array (H, W) of uint16 pixel values, or None on timeout.
+            2D numpy array (H, W). Float32 Kelvin in RT mode,
+            uint16 raw counts otherwise. None on timeout.
         """
         self._check_ready()
         was_streaming = self._streaming
@@ -809,21 +827,27 @@ class Camera:
             if not was_streaming:
                 self.stop_stream()
 
-        if frame is not None and strip_header:
-            frame = self._strip_headers(frame)
+        if frame is not None:
+            if strip_header:
+                frame = self._strip_headers(frame)
+            if convert and self._is_rt_mode():
+                frame = self._to_kelvin(frame)
         return frame
 
     def acquire(self, n_frames: int, timeout: float = 30.0,
-                strip_header: bool = True) -> Optional[np.ndarray]:
+                strip_header: bool = True,
+                convert: bool = True) -> Optional[np.ndarray]:
         """Acquire multiple frames via live streaming.
 
         Args:
             n_frames: Number of frames to capture.
             timeout: Total timeout in seconds.
             strip_header: Remove Telops metadata rows (default True).
+            convert: Convert to Kelvin in RT mode (default True).
 
         Returns:
             3D numpy array (N, H, W) or None if no frames captured.
+            Float32 Kelvin in RT mode, uint16 raw counts otherwise.
         """
         self._check_ready()
         was_streaming = self._streaming
@@ -850,6 +874,8 @@ class Camera:
         result = np.stack(frames)
         if strip_header:
             result = self._strip_headers(result)
+        if convert and self._is_rt_mode():
+            result = self._to_kelvin(result)
         return result
 
     # ==========================================================
@@ -1356,6 +1382,7 @@ class Camera:
                         bitrate_mbps: float = 1000.0,
                         packet_size: int = 1500,
                         strip_header: bool = True,
+                        convert: bool = True,
                         verbose: bool = True
                         ) -> Optional[np.ndarray]:
         """Download frames from the internal memory buffer.
@@ -1370,6 +1397,7 @@ class Camera:
                          Try 9000 for faster downloads if your network
                          supports it.
             strip_header: Remove Telops metadata rows (default True).
+            convert: Convert to Kelvin in RT mode (default True).
             verbose: Show progress bar/messages (default True).
 
         Returns:
@@ -1529,6 +1557,8 @@ class Camera:
         result = np.stack(frames)
         if strip_header:
             result = self._strip_headers(result)
+        if convert and self._is_rt_mode():
+            result = self._to_kelvin(result)
 
         if verbose:
             self._download_diagnostics(result, n_frames)
