@@ -314,9 +314,19 @@ class Camera:
         # Prepare GVSP receiver
         self._gvsp = GVSPReceiver(self._local_ip, gvcp_client=self._gvcp)
 
-        # Apply sensible defaults for new users
+        self._connected = True
+        Camera._active_cameras[self._camera_ip] = self
+
+        # Auto-wait if camera is not ready (cooling down, initializing, etc.)
         try:
-            self._gvcp.write_reg(reg.REG_BAD_PIXEL_REPLACEMENT, 1)  # ON
+            if self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY):
+                self.wait_until_ready()
+        except GVCPError:
+            pass
+
+        # Apply sensible defaults (after camera is ready so writes succeed)
+        try:
+            self._gvcp.write_reg(reg.REG_BAD_PIXEL_REPLACEMENT, 1)
         except GVCPError:
             pass
         try:
@@ -331,16 +341,6 @@ class Camera:
         try:
             self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR,
                                  reg.TestImageSelector.OFF)
-        except GVCPError:
-            pass
-
-        self._connected = True
-        Camera._active_cameras[self._camera_ip] = self
-
-        # Auto-wait if camera is not ready (cooling down, initializing, etc.)
-        try:
-            if self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY):
-                self.wait_until_ready()
         except GVCPError:
             pass
 

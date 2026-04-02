@@ -119,6 +119,18 @@ class _FrameBuffer:
         self.last_packet_at = time.monotonic()
 
         if self._raw_buffer is not None and self._packet_data_size > 0:
+            # Auto-detect actual payload size from first full packet.
+            # The assumed _packet_data_size (packet_size - 8) may differ
+            # from actual payloads due to extended GVSP headers.
+            if (packet_id == 1 and len(payload) != self._packet_data_size
+                    and len(payload) > 0):
+                self._packet_data_size = len(payload)
+                bpp = PIXEL_BPP.get(self.pixel_format, 2)
+                total_bytes = self.width * self.height * bpp
+                self.expected_packets = math.ceil(
+                    total_bytes / self._packet_data_size)
+                self._received = bytearray(self.expected_packets + 1)
+
             offset = (packet_id - 1) * self._packet_data_size
             end = min(offset + len(payload), len(self._raw_buffer))
             if offset < len(self._raw_buffer):
@@ -127,15 +139,10 @@ class _FrameBuffer:
                 if not self._received[packet_id]:
                     self._received[packet_id] = 1
                     self._received_count += 1
-                    # Update contiguous counter
                     if packet_id == self._last_contiguous + 1:
                         while (self._last_contiguous + 1 < len(self._received)
                                and self._received[self._last_contiguous + 1]):
                             self._last_contiguous += 1
-        else:
-            # Fallback: leader not yet received, can't pre-allocate
-            # This shouldn't happen in normal flow
-            pass
 
     def missing_packets(self) -> list[int]:
         """Return list of missing packet IDs (gaps in received set)."""
