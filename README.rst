@@ -1,6 +1,5 @@
-.. image:: logo.png
-   :width: 300
-   :alt: pyTelops
+.. image:: banner.png
+   :alt: pyTelops — Pure-Python Telops Thermal Camera Driver
 
 pyTelops
 ========
