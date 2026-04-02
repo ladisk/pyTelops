@@ -26,6 +26,11 @@ Features
 - **Live streaming** — real-time frame acquisition via GVSP (up to ~760 fps at full resolution)
 - **Internal buffer** — record at full sensor speed (up to 3100 fps at full frame), download at ~270 fps
 - **Camera control** — exposure, frame rate, calibration mode, trigger, resolution
+- **NUC trigger** — programmatic non-uniformity correction
+- **Diagnostics** — 13 temperature sensors, voltage, current, uptime counters
+- **Time sync** — synchronize camera clock, GEV timestamps
+- **ROI subwindow** — offset + resolution for higher frame rates
+- **Bad pixel replacement** — enabled by default
 - **String enums** — ``cam.calibration_mode = "RT"`` instead of importing enum classes
 - **Auto header stripping** — frames are returned without Telops metadata rows
 - **GUI viewer** — live thermal image display with colormap selection
@@ -165,12 +170,63 @@ All settings are properties with string enum support:
    cam.exposure = 50.0                   # microseconds
    cam.frame_rate = 2000.0               # Hz (warns if above max)
    cam.frame_rate_max                    # max Hz for current resolution/exposure
+   cam.frame_rate_mode = "fixed"         # "fixed", "fixed_locked", "maximum", "burst"
    cam.calibration_mode = "RT"           # "RT", "NUC", "RAW", "IBR", "IBI"
    cam.exposure_auto = "continuous"       # "off", "once", "continuous"
    cam.resolution                        # (320, 258)
+   cam.roi_offset = (10, 20)             # ROI subwindow offset (x, y)
+   cam.bad_pixel_replacement = True      # auto-replace hot pixels (ON by default)
+   cam.reverse_x = True                  # horizontal flip
+   cam.reverse_y = True                  # vertical flip
+   cam.test_image = "static"             # "off", "static", "dynamic", "constant"
+   cam.trigger_frame_count = 10          # frames per trigger event
    cam.temperature                       # sensor temperature in Celsius
    cam.info                              # dict with all settings
    cam.state                             # "disconnected", "connected", "streaming"
+
+Image correction (NUC)
+----------------------
+
+Trigger a Non-Uniformity Correction programmatically:
+
+.. code-block:: python
+
+   cam.nuc()                              # one-point NUC (blocks until done)
+   cam.nuc(mode="icu")                    # using internal calibration unit
+   cam.nuc(blackbody_temp=25.0)           # with blackbody reference temperature
+
+Diagnostics
+-----------
+
+Read temperature sensors, voltages, currents, and uptime counters:
+
+.. code-block:: python
+
+   cam.sensor_temperature("sensor")       # single sensor, Celsius
+   cam.sensor_temperature("compressor")
+   cam.sensor_temperature("processing_fpga")
+
+   cam.diagnostics()                      # all sensors at once (dict)
+   # {'temperatures': {'sensor': 25.1, 'compressor': 18.3, ...},
+   #  'voltages': {'cooler': 12.1, ...},
+   #  'currents': {'cooler': 0.8, ...},
+   #  'device_running_s': 123456, 'power_on_cycles': 42, ...}
+
+Time synchronization
+--------------------
+
+.. code-block:: python
+
+   cam.sync_time()                        # set camera clock to host UTC
+   cam.posix_time                         # read as Python datetime
+   cam.gev_timestamp_ns                   # GigE Vision timestamp (nanoseconds)
+
+Device management
+-----------------
+
+.. code-block:: python
+
+   cam.save_config()                      # persist settings to camera memory
 
 Live viewer
 -----------
