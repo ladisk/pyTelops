@@ -329,11 +329,15 @@ class Camera:
         except GVCPError:
             pass
 
-        # Note: camera readiness is checked automatically before
-        # acquisition (grab, acquire, buffer_record) via _check_ready()
-
         self._connected = True
         Camera._active_cameras[self._camera_ip] = self
+
+        # Auto-wait if camera is not ready (cooling down, initializing, etc.)
+        try:
+            if self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY):
+                self.wait_until_ready()
+        except GVCPError:
+            pass
 
     def wait_until_ready(self, timeout: float = 120.0,
                          verbose: bool = True) -> None:
