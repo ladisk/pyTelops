@@ -55,6 +55,34 @@ _ENUM_ALIASES = {
         "acquisition_started": reg.MemoryBufferMOISource.ACQUISITION_STARTED,
         "none": reg.MemoryBufferMOISource.NONE,
     },
+    reg.ImageCorrectionMode: {
+        "black_body": reg.ImageCorrectionMode.BLACK_BODY,
+        "blackbody": reg.ImageCorrectionMode.BLACK_BODY,
+        "icu": reg.ImageCorrectionMode.ICU,
+    },
+    reg.TestImageSelector: {
+        "off": reg.TestImageSelector.OFF,
+        "static": reg.TestImageSelector.STATIC_SHADE,
+        "dynamic": reg.TestImageSelector.DYNAMIC_SHADE,
+        "constant": reg.TestImageSelector.CONSTANT_VALUE,
+    },
+    reg.FrameRateMode: {
+        "fixed_locked": reg.FrameRateMode.FIXED_LOCKED,
+        "locked": reg.FrameRateMode.FIXED_LOCKED,
+        "fixed": reg.FrameRateMode.FIXED,
+        "maximum": reg.FrameRateMode.MAXIMUM,
+        "max": reg.FrameRateMode.MAXIMUM,
+        "burst": reg.FrameRateMode.BURST,
+    },
+    reg.TemperatureLocation: {
+        "sensor": reg.TemperatureLocation.SENSOR,
+        "mainboard": reg.TemperatureLocation.MAINBOARD,
+        "compressor": reg.TemperatureLocation.COMPRESSOR,
+        "cold_finger": reg.TemperatureLocation.COLD_FINGER,
+        "processing_fpga": reg.TemperatureLocation.PROCESSING_FPGA,
+        "output_fpga": reg.TemperatureLocation.OUTPUT_FPGA,
+        "storage_fpga": reg.TemperatureLocation.STORAGE_FPGA,
+    },
 }
 
 
@@ -286,6 +314,21 @@ class Camera:
         # Prepare GVSP receiver
         self._gvsp = GVSPReceiver(self._local_ip, gvcp_client=self._gvcp)
 
+        # Apply sensible defaults for new users
+        try:
+            self._gvcp.write_reg(reg.REG_BAD_PIXEL_REPLACEMENT, 1)  # ON
+        except GVCPError:
+            pass
+        try:
+            self._gvcp.write_reg(reg.REG_FRAME_RATE_MODE,
+                                 reg.FrameRateMode.FIXED)
+        except GVCPError:
+            pass
+        try:
+            self._gvcp.write_float(reg.REG_FRAME_RATE_MAX_FG, 1e9)  # no receiver throttle
+        except GVCPError:
+            pass
+
         self._connected = True
         Camera._active_cameras[self._camera_ip] = self
 
@@ -339,7 +382,7 @@ class Camera:
         """Warn if a settings change caused the frame rate to be clamped."""
         fps_after = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
         if fps_after < fps_before - 0.5:
-            max_hz = self._gvcp.read_float(self._REG_FRAME_RATE_MAX)
+            max_hz = self._gvcp.read_float(reg.REG_FRAME_RATE_MAX)
             import warnings
             warnings.warn(
                 f"Frame rate was reduced from {fps_before:.0f} to "
@@ -382,18 +425,16 @@ class Camera:
         self._check_connected()
         return self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
 
-    _REG_FRAME_RATE_MAX = 0xEAB4
-
     @property
     def frame_rate_max(self) -> float:
         """Maximum frame rate in Hz for current resolution and exposure."""
         self._check_connected()
-        return self._gvcp.read_float(self._REG_FRAME_RATE_MAX)
+        return self._gvcp.read_float(reg.REG_FRAME_RATE_MAX)
 
     @frame_rate.setter
     def frame_rate(self, hz: float):
         self._check_connected()
-        max_hz = self._gvcp.read_float(self._REG_FRAME_RATE_MAX)
+        max_hz = self._gvcp.read_float(reg.REG_FRAME_RATE_MAX)
         self._gvcp.write_float(reg.REG_ACQUISITION_FRAME_RATE, hz)
         if hz > max_hz:
             actual = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
@@ -452,7 +493,7 @@ class Camera:
             "frame_rate_hz": self._gvcp.read_float(
                 reg.REG_ACQUISITION_FRAME_RATE),
             "frame_rate_max_hz": self._gvcp.read_float(
-                self._REG_FRAME_RATE_MAX),
+                reg.REG_FRAME_RATE_MAX),
             "calibration": reg.CalibrationMode(
                 self._gvcp.read_reg(reg.REG_CALIBRATION_MODE)).name,
             "trigger_mode": reg.TriggerMode(
@@ -462,6 +503,12 @@ class Camera:
             "temperature_c": self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE),
             "buffer_mode": reg.MemoryBufferMode(
                 self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_MODE)).name,
+            "bad_pixel_replacement": bool(self._gvcp.read_reg(reg.REG_BAD_PIXEL_REPLACEMENT)),
+            "reverse_x": bool(self._gvcp.read_reg(reg.REG_REVERSE_X)),
+            "reverse_y": bool(self._gvcp.read_reg(reg.REG_REVERSE_Y)),
+            "test_image": reg.TestImageSelector(self._gvcp.read_reg(reg.REG_TEST_IMAGE_SELECTOR)).name,
+            "frame_rate_mode": reg.FrameRateMode(self._gvcp.read_reg(reg.REG_FRAME_RATE_MODE)).name,
+            "roi_offset": (self._gvcp.read_reg(reg.REG_OFFSET_X), self._gvcp.read_reg(reg.REG_OFFSET_Y)),
         }
 
     @property
@@ -481,6 +528,87 @@ class Camera:
             return "connected"
         except GVCPError:
             return "error"
+
+    @property
+    def bad_pixel_replacement(self) -> bool:
+        """Bad pixel auto-replacement. ON by default (replaces with neighbor value)."""
+        self._check_connected()
+        return bool(self._gvcp.read_reg(reg.REG_BAD_PIXEL_REPLACEMENT))
+
+    @bad_pixel_replacement.setter
+    def bad_pixel_replacement(self, enabled: bool):
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_BAD_PIXEL_REPLACEMENT, int(enabled))
+
+    @property
+    def reverse_x(self) -> bool:
+        """Horizontal image flip."""
+        self._check_connected()
+        return bool(self._gvcp.read_reg(reg.REG_REVERSE_X))
+
+    @reverse_x.setter
+    def reverse_x(self, enabled: bool):
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_REVERSE_X, int(enabled))
+
+    @property
+    def reverse_y(self) -> bool:
+        """Vertical image flip."""
+        self._check_connected()
+        return bool(self._gvcp.read_reg(reg.REG_REVERSE_Y))
+
+    @reverse_y.setter
+    def reverse_y(self, enabled: bool):
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_REVERSE_Y, int(enabled))
+
+    @property
+    def test_image(self):
+        """Test image source ("off" for normal operation)."""
+        self._check_connected()
+        return reg.TestImageSelector(self._gvcp.read_reg(reg.REG_TEST_IMAGE_SELECTOR))
+
+    @test_image.setter
+    def test_image(self, mode):
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR,
+                             int(_resolve_enum(mode, reg.TestImageSelector)))
+
+    @property
+    def roi_offset(self) -> tuple[int, int]:
+        """ROI offset as (x, y) pixels."""
+        self._check_connected()
+        return (self._gvcp.read_reg(reg.REG_OFFSET_X),
+                self._gvcp.read_reg(reg.REG_OFFSET_Y))
+
+    @roi_offset.setter
+    def roi_offset(self, xy: tuple[int, int]):
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_OFFSET_X, xy[0])
+        self._gvcp.write_reg(reg.REG_OFFSET_Y, xy[1])
+
+    @property
+    def frame_rate_mode(self):
+        """Frame rate mode (FIXED, FIXED_LOCKED, MAXIMUM, BURST)."""
+        self._check_connected()
+        return reg.FrameRateMode(self._gvcp.read_reg(reg.REG_FRAME_RATE_MODE))
+
+    @frame_rate_mode.setter
+    def frame_rate_mode(self, mode):
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_FRAME_RATE_MODE,
+                             int(_resolve_enum(mode, reg.FrameRateMode)))
+
+    @property
+    def trigger_frame_count(self) -> int:
+        """Frames per trigger event (for burst capture)."""
+        self._check_connected()
+        return self._gvcp.read_reg(reg.REG_TRIGGER_FRAME_COUNT)
+
+    @trigger_frame_count.setter
+    def trigger_frame_count(self, count: int):
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_TRIGGER_FRAME_COUNT, count)
 
     # ==========================================================
     # Streaming
@@ -653,6 +781,148 @@ class Camera:
         """Send a software trigger command."""
         self._check_connected()
         self._gvcp.write_reg(reg.REG_TRIGGER_SOFTWARE, 1)
+
+    # ==========================================================
+    # Image Processing
+    # ==========================================================
+
+    def nuc(self, mode="black_body", blackbody_temp=None, timeout=60.0):
+        """Perform Non-Uniformity Correction (NUC).
+
+        Blocks until complete. Locks many camera registers while running.
+
+        Args:
+            mode: "black_body" or "icu" (or ImageCorrectionMode enum).
+            blackbody_temp: Temperature in Celsius (for black body mode).
+            timeout: Max seconds to wait.
+        """
+        self._check_connected()
+        m = _resolve_enum(mode, reg.ImageCorrectionMode)
+        self._gvcp.write_reg(reg.REG_IMAGE_CORRECTION_MODE, int(m))
+        if blackbody_temp is not None:
+            self._gvcp.write_float(reg.REG_EXTERNAL_BLACKBODY_TEMP, blackbody_temp)
+        self._gvcp.write_reg(reg.REG_IMAGE_CORRECTION, 1)
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY):
+                return
+            time.sleep(1.0)
+        raise TimeoutError(f"NUC did not complete within {timeout:.0f}s")
+
+    # ==========================================================
+    # Diagnostics
+    # ==========================================================
+
+    def sensor_temperature(self, location="sensor") -> float:
+        """Read temperature at a specific sensor location.
+
+        Args:
+            location: "sensor", "compressor", "cold_finger", "processing_fpga",
+                      etc. (or TemperatureLocation enum).
+        """
+        self._check_connected()
+        loc = _resolve_enum(location, reg.TemperatureLocation)
+        self._gvcp.write_reg(reg.REG_DEVICE_TEMPERATURE_SELECTOR, int(loc))
+        return self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE_READOUT)
+
+    def diagnostics(self) -> dict:
+        """Read all diagnostic sensors (temperatures, voltages, currents, uptime).
+
+        Involves ~40 register reads, may take a few hundred milliseconds.
+        Sensors not available on this model return None.
+        """
+        self._check_connected()
+
+        temps = {}
+        for loc in reg.TemperatureLocation:
+            try:
+                self._gvcp.write_reg(reg.REG_DEVICE_TEMPERATURE_SELECTOR, int(loc))
+                temps[loc.name.lower()] = self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE_READOUT)
+            except GVCPError:
+                temps[loc.name.lower()] = None
+
+        voltages = {}
+        for src in reg.VoltageLocation:
+            try:
+                self._gvcp.write_reg(reg.REG_DEVICE_VOLTAGE_SELECTOR, int(src))
+                voltages[src.name.lower()] = self._gvcp.read_float(reg.REG_DEVICE_VOLTAGE_READOUT)
+            except GVCPError:
+                voltages[src.name.lower()] = None
+
+        currents = {}
+        for src in reg.CurrentLocation:
+            try:
+                self._gvcp.write_reg(reg.REG_DEVICE_CURRENT_SELECTOR, int(src))
+                currents[src.name.lower()] = self._gvcp.read_float(reg.REG_DEVICE_CURRENT_READOUT)
+            except GVCPError:
+                currents[src.name.lower()] = None
+
+        return {
+            "temperatures": temps,
+            "voltages": voltages,
+            "currents": currents,
+            "device_running_s": self._gvcp.read_reg(reg.REG_DEVICE_RUNNING_TIME),
+            "cooler_running_s": self._gvcp.read_reg(reg.REG_DEVICE_COOLER_RUNNING_TIME),
+            "power_on_cycles": self._gvcp.read_reg(reg.REG_DEVICE_POWER_ON_CYCLES),
+            "cooler_power_on_cycles": self._gvcp.read_reg(reg.REG_DEVICE_COOLER_POWER_ON_CYCLES),
+        }
+
+    # ==========================================================
+    # Device Management
+    # ==========================================================
+
+    def save_config(self) -> None:
+        """Save current configuration to camera non-volatile memory."""
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_SAVE_CONFIGURATION, 1)
+
+    def sync_time(self) -> None:
+        """Synchronize camera clock to host system time (UTC)."""
+        import datetime
+        self._check_connected()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self._gvcp.write_reg(reg.REG_POSIX_TIME, int(now.timestamp()))
+
+    @property
+    def posix_time(self):
+        """Camera time as Python datetime (UTC)."""
+        import datetime
+        self._check_connected()
+        seconds = self._gvcp.read_reg(reg.REG_POSIX_TIME)
+        sub_100ns = self._gvcp.read_reg(reg.REG_SUB_SECOND_TIME)
+        microseconds = sub_100ns // 10  # 100ns ticks -> microseconds
+        return datetime.datetime.fromtimestamp(
+            seconds, tz=datetime.timezone.utc
+        ).replace(microsecond=microseconds)
+
+    @posix_time.setter
+    def posix_time(self, dt):
+        """Set camera time from a datetime object."""
+        self._check_connected()
+        if hasattr(dt, 'timestamp'):
+            self._gvcp.write_reg(reg.REG_POSIX_TIME, int(dt.timestamp()))
+        else:
+            self._gvcp.write_reg(reg.REG_POSIX_TIME, int(dt))
+
+    @property
+    def gev_timestamp_ns(self) -> int:
+        """GigE Vision timestamp in nanoseconds (read-only)."""
+        self._check_connected()
+        # Latch timestamp
+        self._gvcp.write_reg(reg.REG_GEV_TIMESTAMP_CONTROL, 2)
+
+        tick_hi = self._gvcp.read_reg(reg.REG_GEV_TIMESTAMP_VALUE_HIGH)
+        tick_lo = self._gvcp.read_reg(reg.REG_GEV_TIMESTAMP_VALUE_LOW)
+        ticks = (tick_hi << 32) | tick_lo
+
+        freq_hi = self._gvcp.read_reg(reg.REG_GEV_TIMESTAMP_TICK_FREQ_HIGH)
+        freq_lo = self._gvcp.read_reg(reg.REG_GEV_TIMESTAMP_TICK_FREQ_LOW)
+        freq = (freq_hi << 32) | freq_lo
+
+        if freq == 0:
+            return ticks
+        return int(ticks * 1_000_000_000 / freq)
 
     # ==========================================================
     # Memory Buffer (16GB onboard)
@@ -979,9 +1249,6 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
         return self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
-    # Address for download bitrate limit (Float, Mbps, max 1000)
-    _REG_DOWNLOAD_BITRATE_MAX = 0xEAD4
-
     def buffer_download(self, sequence: int = 0,
                         start_frame: Optional[int] = None,
                         n_frames: int = 0, timeout: float = 0,
@@ -1057,9 +1324,9 @@ class Camera:
         # Increase download bitrate (register unlocked now that mode != OFF)
         old_bitrate = None
         try:
-            old_bitrate = self._gvcp.read_float(self._REG_DOWNLOAD_BITRATE_MAX)
+            old_bitrate = self._gvcp.read_float(reg.REG_DOWNLOAD_BITRATE_MAX)
             if bitrate_mbps != old_bitrate:
-                self._gvcp.write_float(self._REG_DOWNLOAD_BITRATE_MAX,
+                self._gvcp.write_float(reg.REG_DOWNLOAD_BITRATE_MAX,
                                        bitrate_mbps)
         except GVCPError:
             pass
@@ -1127,7 +1394,7 @@ class Camera:
             time.sleep(0.2)
             if old_bitrate is not None:
                 try:
-                    self._gvcp.write_float(self._REG_DOWNLOAD_BITRATE_MAX,
+                    self._gvcp.write_float(reg.REG_DOWNLOAD_BITRATE_MAX,
                                            old_bitrate)
                 except GVCPError:
                     pass

@@ -114,6 +114,69 @@ REG_DEVICE_NOT_READY = 0xEA84
 REG_DEVICE_TEMPERATURE = 0xE970  # Float, Celsius
 
 # ============================================================
+# Image Processing
+# ============================================================
+REG_IMAGE_CORRECTION = 0xE888          # Command (WO) - trigger NUC
+REG_IMAGE_CORRECTION_MODE = 0xE884     # Enum: ImageCorrectionMode
+REG_EXTERNAL_BLACKBODY_TEMP = 0xE944   # Float, Celsius (-273.15 to 1500)
+REG_BAD_PIXEL_REPLACEMENT = 0xEB60     # Bool (RW)
+REG_REVERSE_X = 0xE8D4                # Bool (RW)
+REG_REVERSE_Y = 0xE8D8                # Bool (RW)
+REG_TEST_IMAGE_SELECTOR = 0xEACC      # Enum: TestImageSelector
+
+# ============================================================
+# ROI / Subwindow
+# ============================================================
+REG_OFFSET_X = 0xEB44                  # Int (RW)
+REG_OFFSET_Y = 0xEB48                  # Int (RW)
+REG_CENTER_IMAGE = 0xE8E8              # Bool (RW)
+
+# ============================================================
+# Frame Rate (extended)
+# ============================================================
+REG_FRAME_RATE_MODE = 0xE818           # Enum: FrameRateMode
+REG_FRAME_RATE_MAX_FG = 0xE81C         # Float, Hz (RW) - frame grabber limit
+REG_FRAME_RATE_MAX = 0xEAB4            # Float, Hz (RO) - camera max
+REG_TRIGGER_FRAME_COUNT = 0xEAD0       # Int (RW), 1 to 2^32-1
+
+# ============================================================
+# Diagnostics
+# ============================================================
+REG_DEVICE_TEMPERATURE_SELECTOR = 0xEA6C  # Enum: TemperatureLocation
+REG_DEVICE_TEMPERATURE_READOUT = 0xEA70   # Float, Celsius (RO)
+REG_DEVICE_VOLTAGE_SELECTOR = 0xEA88      # Enum: VoltageLocation
+REG_DEVICE_VOLTAGE_READOUT = 0xEA8C       # Float, Volts (RO)
+REG_DEVICE_CURRENT_SELECTOR = 0xEA90      # Enum: CurrentLocation
+REG_DEVICE_CURRENT_READOUT = 0xEA94       # Float, Amps (RO)
+REG_DEVICE_RUNNING_TIME = 0xEA98          # Int, seconds (RO)
+REG_DEVICE_COOLER_RUNNING_TIME = 0xEA9C   # Int, seconds (RO)
+REG_DEVICE_POWER_ON_CYCLES = 0xEAA0       # Int, count (RO)
+REG_DEVICE_COOLER_POWER_ON_CYCLES = 0xEAA4 # Int, count (RO)
+
+# ============================================================
+# Device Management (extended)
+# ============================================================
+REG_SAVE_CONFIGURATION = 0xEC34           # Command (WO)
+REG_LOAD_CONFIG_ON_STARTUP = 0xEC30       # Bool (RW)
+REG_ACQ_START_ON_STARTUP = 0xE8E4         # Bool (RW)
+REG_POSIX_TIME = 0xE980                   # Int, seconds since epoch (RW)
+REG_SUB_SECOND_TIME = 0xE984              # Int, 100ns ticks (RO)
+
+# ============================================================
+# GEV Timestamps
+# ============================================================
+REG_GEV_TIMESTAMP_TICK_FREQ_HIGH = 0x093C  # Int (RO)
+REG_GEV_TIMESTAMP_TICK_FREQ_LOW = 0x0940   # Int (RO)
+REG_GEV_TIMESTAMP_CONTROL = 0x0944         # Command: 1=reset, 2=latch
+REG_GEV_TIMESTAMP_VALUE_HIGH = 0x0948      # Int (RO)
+REG_GEV_TIMESTAMP_VALUE_LOW = 0x094C       # Int (RO)
+
+# ============================================================
+# Download Speed
+# ============================================================
+REG_DOWNLOAD_BITRATE_MAX = 0xEAD4          # Float, Mbps (RW, locked when DownloadMode=OFF)
+
+# ============================================================
 # Enumerations
 # ============================================================
 
@@ -234,6 +297,51 @@ class PixelFormat(IntEnum):
     MONO14 = 0x01100025
 
 
+class ImageCorrectionMode(IntEnum):
+    BLACK_BODY = 0
+    ICU = 1
+
+
+class TestImageSelector(IntEnum):
+    OFF = 0
+    STATIC_SHADE = 30
+    DYNAMIC_SHADE = 31
+    CONSTANT_VALUE = 35
+
+
+class FrameRateMode(IntEnum):
+    FIXED_LOCKED = 0
+    FIXED = 1
+    MAXIMUM = 2
+    BURST = 3
+
+
+class TemperatureLocation(IntEnum):
+    SENSOR = 0
+    MAINBOARD = 1
+    INTERNAL_LENS = 2
+    EXTERNAL_LENS = 3
+    ICU = 4
+    FILTER_WHEEL = 5
+    COMPRESSOR = 6
+    COLD_FINGER = 7
+    SPARE = 8
+    EXTERNAL_THERMISTOR = 9
+    PROCESSING_FPGA = 10
+    OUTPUT_FPGA = 11
+    STORAGE_FPGA = 12
+
+
+class VoltageLocation(IntEnum):
+    COOLER = 10
+    SUPPLY_24V = 11
+
+
+class CurrentLocation(IntEnum):
+    COOLER = 0
+    SUPPLY_24V = 1
+
+
 # ============================================================
 # Register metadata: address -> (name, type, access)
 # ============================================================
@@ -268,6 +376,48 @@ REGISTER_INFO = {
     REG_DEVICE_NOT_READY: ("DeviceNotReady", "bool", "RO"),
     REG_DEVICE_TEMPERATURE: ("DeviceTemperature", "float", "RO"),
     REG_DEVICE_RESET: ("DeviceReset", "cmd", "WO"),
+    # Image Processing
+    REG_IMAGE_CORRECTION: ("ImageCorrection", "cmd", "WO"),
+    REG_IMAGE_CORRECTION_MODE: ("ImageCorrectionMode", "enum", "RW"),
+    REG_EXTERNAL_BLACKBODY_TEMP: ("ExternalBlackbodyTemp", "float", "RW"),
+    REG_BAD_PIXEL_REPLACEMENT: ("BadPixelReplacement", "bool", "RW"),
+    REG_REVERSE_X: ("ReverseX", "bool", "RW"),
+    REG_REVERSE_Y: ("ReverseY", "bool", "RW"),
+    REG_TEST_IMAGE_SELECTOR: ("TestImageSelector", "enum", "RW"),
+    # ROI / Subwindow
+    REG_OFFSET_X: ("OffsetX", "int", "RW"),
+    REG_OFFSET_Y: ("OffsetY", "int", "RW"),
+    REG_CENTER_IMAGE: ("CenterImage", "bool", "RW"),
+    # Frame Rate (extended)
+    REG_FRAME_RATE_MODE: ("FrameRateMode", "enum", "RW"),
+    REG_FRAME_RATE_MAX_FG: ("FrameRateMaxFG", "float", "RW"),
+    REG_FRAME_RATE_MAX: ("FrameRateMax", "float", "RO"),
+    REG_TRIGGER_FRAME_COUNT: ("TriggerFrameCount", "int", "RW"),
+    # Diagnostics
+    REG_DEVICE_TEMPERATURE_SELECTOR: ("DeviceTemperatureSelector", "enum", "RW"),
+    REG_DEVICE_TEMPERATURE_READOUT: ("DeviceTemperatureReadout", "float", "RO"),
+    REG_DEVICE_VOLTAGE_SELECTOR: ("DeviceVoltageSelector", "enum", "RW"),
+    REG_DEVICE_VOLTAGE_READOUT: ("DeviceVoltageReadout", "float", "RO"),
+    REG_DEVICE_CURRENT_SELECTOR: ("DeviceCurrentSelector", "enum", "RW"),
+    REG_DEVICE_CURRENT_READOUT: ("DeviceCurrentReadout", "float", "RO"),
+    REG_DEVICE_RUNNING_TIME: ("DeviceRunningTime", "int", "RO"),
+    REG_DEVICE_COOLER_RUNNING_TIME: ("DeviceCoolerRunningTime", "int", "RO"),
+    REG_DEVICE_POWER_ON_CYCLES: ("DevicePowerOnCycles", "int", "RO"),
+    REG_DEVICE_COOLER_POWER_ON_CYCLES: ("DeviceCoolerPowerOnCycles", "int", "RO"),
+    # Device Management (extended)
+    REG_SAVE_CONFIGURATION: ("SaveConfiguration", "cmd", "WO"),
+    REG_LOAD_CONFIG_ON_STARTUP: ("LoadConfigOnStartup", "bool", "RW"),
+    REG_ACQ_START_ON_STARTUP: ("AcqStartOnStartup", "bool", "RW"),
+    REG_POSIX_TIME: ("PosixTime", "int", "RW"),
+    REG_SUB_SECOND_TIME: ("SubSecondTime", "int", "RO"),
+    # GEV Timestamps
+    REG_GEV_TIMESTAMP_TICK_FREQ_HIGH: ("GevTimestampTickFreqHigh", "int", "RO"),
+    REG_GEV_TIMESTAMP_TICK_FREQ_LOW: ("GevTimestampTickFreqLow", "int", "RO"),
+    REG_GEV_TIMESTAMP_CONTROL: ("GevTimestampControl", "cmd", "WO"),
+    REG_GEV_TIMESTAMP_VALUE_HIGH: ("GevTimestampValueHigh", "int", "RO"),
+    REG_GEV_TIMESTAMP_VALUE_LOW: ("GevTimestampValueLow", "int", "RO"),
+    # Download Speed
+    REG_DOWNLOAD_BITRATE_MAX: ("DownloadBitrateMax", "float", "RW"),
 }
 
 FEATURE_TO_ADDRESS = {v[0]: k for k, v in REGISTER_INFO.items()}

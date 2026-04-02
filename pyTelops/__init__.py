@@ -19,11 +19,15 @@ from .gvcp import GVCPClient, GVCPError
 from .registers import (
     CalibrationMode, ExposureAuto, TriggerSource, TriggerActivation,
     MemoryBufferMOISource, MemoryBufferStatus,
+    FrameRateMode, TestImageSelector, ImageCorrectionMode,
+    TemperatureLocation, VoltageLocation, CurrentLocation,
 )
 
 __all__ = [
     "Camera", "discover", "GVCPClient", "GVCPError",
     "CalibrationMode", "ExposureAuto", "TriggerSource",
     "TriggerActivation", "MemoryBufferMOISource", "MemoryBufferStatus",
+    "FrameRateMode", "TestImageSelector", "ImageCorrectionMode",
+    "TemperatureLocation", "VoltageLocation", "CurrentLocation",
     "__version__",
 ]

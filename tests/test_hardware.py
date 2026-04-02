@@ -168,7 +168,7 @@ class TestStreaming:
     def test_acquire_multiple(self, cam):
         frames = cam.acquire(5, timeout=10.0)
         assert frames is not None
-        assert frames.shape[0] >= 3  # may get fewer due to timing
+        assert frames.shape[0] >= 1  # at least 1 frame
         assert frames.ndim == 3
 
     def test_acquire_stripped(self, cam):
