@@ -734,61 +734,64 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE, int(moi))
 
     def buffer_record(self, verbose: bool = True) -> int:
-        """Record one sequence to the internal buffer.
+        """Record a single sequence to the internal buffer.
 
-        Arms the camera, fires software MOI, waits for recording to
-        complete, and stops acquisition. Call this repeatedly to fill
-        successive sequence slots (up to n_sequences configured).
+        Configures with ``n_sequences=1`` before calling, or use for
+        single-sequence workflows. Arms the camera, fires software MOI,
+        waits for recording to complete, and stops acquisition.
+
+        For multi-sequence recordings, use the manual flow::
+
+            cam.buffer_configure(n_sequences=3, duration=5.0)
+            cam.buffer_arm()
+            cam.buffer_fire_moi()   # seq 0
+            cam.buffer_fire_moi()   # seq 1
+            cam.buffer_fire_moi()   # seq 2
+            cam.buffer_wait()       # waits for all sequences
 
         Args:
             verbose: Print status messages (default True).
 
         Returns:
-            Number of frames recorded in this sequence.
+            Number of frames recorded.
 
         Raises:
-            RuntimeError: If all sequence slots are full.
+            RuntimeError: If buffer is configured for multiple sequences.
             TimeoutError: If recording doesn't finish (safety timeout).
         """
         self._check_connected()
         n_seq = getattr(self, '_buffer_n_sequences', 1)
-        seq_idx = getattr(self, '_buffer_next_sequence', 0)
-        if seq_idx >= n_seq:
+        if n_seq != 1:
             raise RuntimeError(
-                f"All {n_seq} sequence slots are full. "
-                f"Call buffer_clear() or buffer_configure() first.")
+                f"buffer_record() only works with n_sequences=1 "
+                f"(configured: {n_seq}). For multi-sequence recording, "
+                f"use buffer_arm() + buffer_fire_moi() + buffer_wait().")
 
         # Auto-calculate timeout from frame count and frame rate
         fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
         seq_size = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE)
         if fps > 0:
-            timeout = max(seq_size / fps * 2 + 10, 15.0)
+            recording_time = seq_size / fps
+            timeout = max(recording_time * 2 + 30, 45.0)
         else:
             timeout = 60.0
 
-        label = f" (seq {seq_idx + 1}/{n_seq})" if n_seq > 1 else ""
-
         if verbose:
-            print(f"Arming{label}...", end=" ", flush=True)
+            print("Arming...", end=" ", flush=True)
 
-        # Arm + start acquisition
         self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
         self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
-
-        # Wait for camera to enter RECORDING state before firing MOI
         time.sleep(0.5)
 
         if verbose:
             print("Recording...", end=" ", flush=True)
 
-        # Fire software MOI
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
-        # Wait for recording to complete
+        # Wait for HOLDING or IDLE
         try:
             self.buffer_wait(timeout=timeout)
         except TimeoutError:
-            # Stop acquisition before re-raising so camera is in clean state
             try:
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
             except GVCPError:
@@ -797,14 +800,12 @@ class Camera:
                 print("TIMEOUT", flush=True)
             raise
 
-        # Stop acquisition
         try:
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         except GVCPError:
             pass
 
-        recorded = self.buffer_recorded_frames(seq_idx)
-        self._buffer_next_sequence = seq_idx + 1
+        recorded = self.buffer_recorded_frames(0)
 
         if verbose:
             print(f"Done ({recorded} frames)", flush=True)
@@ -902,7 +903,6 @@ class Camera:
         try:
             self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_STATUS,
                                  reg.MemoryBufferStatus.REFRESH)
-            time.sleep(0.1)
         except GVCPError:
             pass
         val = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_STATUS)

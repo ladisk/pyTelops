@@ -12,6 +12,8 @@ def pytest_addoption(parser):
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "hardware: test requires a connected Telops camera")
+    config.addinivalue_line(
+        "markers", "slow: test takes >60s (multi-sequence buffer operations)")
 
 
 def pytest_collection_modifyitems(config, items):
