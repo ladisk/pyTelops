@@ -335,6 +335,18 @@ class Camera:
         if not self._connected:
             raise RuntimeError("Camera not connected. Call connect() first.")
 
+    def _check_fps_clamped(self, fps_before: float):
+        """Warn if a settings change caused the frame rate to be clamped."""
+        fps_after = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
+        if fps_after < fps_before - 0.5:
+            max_hz = self._gvcp.read_float(self._REG_FRAME_RATE_MAX)
+            import warnings
+            warnings.warn(
+                f"Frame rate was reduced from {fps_before:.0f} to "
+                f"{fps_after:.0f} Hz (max for current settings: "
+                f"{max_hz:.0f} Hz).",
+                UserWarning, stacklevel=3)
+
     @property
     def exposure(self) -> float:
         """Exposure time in microseconds."""
@@ -348,7 +360,9 @@ class Camera:
         aec = self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO)
         if aec != reg.ExposureAuto.OFF:
             self._gvcp.write_reg(reg.REG_EXPOSURE_AUTO, reg.ExposureAuto.OFF)
+        fps_before = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
         self._gvcp.write_float(reg.REG_EXPOSURE_TIME, us)
+        self._check_fps_clamped(fps_before)
 
     @property
     def exposure_auto(self) -> reg.ExposureAuto:
@@ -368,10 +382,27 @@ class Camera:
         self._check_connected()
         return self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
 
+    _REG_FRAME_RATE_MAX = 0xEAB4
+
+    @property
+    def frame_rate_max(self) -> float:
+        """Maximum frame rate in Hz for current resolution and exposure."""
+        self._check_connected()
+        return self._gvcp.read_float(self._REG_FRAME_RATE_MAX)
+
     @frame_rate.setter
     def frame_rate(self, hz: float):
         self._check_connected()
+        max_hz = self._gvcp.read_float(self._REG_FRAME_RATE_MAX)
         self._gvcp.write_float(reg.REG_ACQUISITION_FRAME_RATE, hz)
+        if hz > max_hz:
+            actual = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
+            import warnings
+            warnings.warn(
+                f"Requested {hz:.0f} Hz exceeds max {max_hz:.0f} Hz "
+                f"(at current resolution/exposure). "
+                f"Camera clamped to {actual:.0f} Hz.",
+                UserWarning, stacklevel=2)
 
     @property
     def calibration_mode(self) -> reg.CalibrationMode:
@@ -396,8 +427,10 @@ class Camera:
     @resolution.setter
     def resolution(self, wh: tuple[int, int]):
         self._check_connected()
+        fps_before = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
         self._gvcp.write_reg(reg.REG_WIDTH, wh[0])
         self._gvcp.write_reg(reg.REG_HEIGHT, wh[1])
+        self._check_fps_clamped(fps_before)
 
     @property
     def temperature(self) -> float:
@@ -418,6 +451,8 @@ class Camera:
                 self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO)).name,
             "frame_rate_hz": self._gvcp.read_float(
                 reg.REG_ACQUISITION_FRAME_RATE),
+            "frame_rate_max_hz": self._gvcp.read_float(
+                self._REG_FRAME_RATE_MAX),
             "calibration": reg.CalibrationMode(
                 self._gvcp.read_reg(reg.REG_CALIBRATION_MODE)).name,
             "trigger_mode": reg.TriggerMode(
