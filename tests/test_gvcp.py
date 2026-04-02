@@ -125,3 +125,238 @@ class TestConstants:
         assert CMD_READREG == 0x0080
         assert CMD_WRITEREG == 0x0082
         assert CMD_READMEM == 0x0084
+
+
+# ---------------------------------------------------------------------------
+# Tests for _send_cmd robustness (ACK ID validation, retries, PENDING_ACK)
+# ---------------------------------------------------------------------------
+
+import socket
+import time
+from unittest.mock import MagicMock, patch, PropertyMock
+from pyTelops.gvcp import REG_CCP
+
+
+def _make_ack(status: int, ack_cmd: int, payload_len: int,
+              ack_id: int, extra: bytes = b"") -> bytes:
+    """Build a raw GVCP ACK packet."""
+    return struct.pack(">HHHH", status, ack_cmd, payload_len, ack_id) + extra
+
+
+def _make_readreg_ack(ack_id: int, value: int,
+                      status: int = STATUS_SUCCESS) -> bytes:
+    """Build a READREG_ACK with a 4-byte register value."""
+    return _make_ack(status, CMD_READREG | 0x0001, 4, ack_id,
+                     struct.pack(">I", value))
+
+
+def _make_writereg_ack(ack_id: int,
+                       status: int = STATUS_SUCCESS) -> bytes:
+    """Build a WRITEREG_ACK (no extra payload)."""
+    return _make_ack(status, CMD_WRITEREG | 0x0001, 0, ack_id)
+
+
+def _client_with_mock_socket() -> GVCPClient:
+    """Return a GVCPClient with a mock socket (no real network)."""
+    client = GVCPClient("192.168.1.1")
+    client._sock = MagicMock()
+    client._req_id = 0  # _next_id will return 1 first
+    # Fast timeouts for testing
+    client._cmd_timeout = 0.1
+    client._n_retries = 3
+    return client
+
+
+class TestSendCmdAckValidation:
+    """Test _send_cmd ACK ID matching and stale packet discard."""
+
+    def test_normal_read_reg(self):
+        """Normal READREG: matching ack_id is accepted."""
+        client = _client_with_mock_socket()
+        ack = _make_readreg_ack(ack_id=1, value=0xDEADBEEF)
+        client._sock.recvfrom = MagicMock(return_value=(ack, ("192.168.1.1", 3956)))
+
+        result = client._read_reg_raw(0xD300)
+        assert result == 0xDEADBEEF
+
+    def test_normal_write_reg(self):
+        """Normal WRITEREG: matching ack_id is accepted."""
+        client = _client_with_mock_socket()
+        ack = _make_writereg_ack(ack_id=1)
+        client._sock.recvfrom = MagicMock(return_value=(ack, ("192.168.1.1", 3956)))
+
+        # Should not raise
+        client._write_reg_raw(0xD300, 42)
+
+    def test_stale_ack_discarded(self):
+        """Stale ACK (wrong ack_id) is discarded, correct one accepted."""
+        client = _client_with_mock_socket()
+        stale_ack = _make_readreg_ack(ack_id=99, value=0xBAAAAAAD)
+        good_ack = _make_readreg_ack(ack_id=1, value=0x12345678)
+        client._sock.recvfrom = MagicMock(
+            side_effect=[
+                (stale_ack, ("192.168.1.1", 3956)),
+                (good_ack, ("192.168.1.1", 3956)),
+            ]
+        )
+
+        result = client._read_reg_raw(0xD300)
+        assert result == 0x12345678
+        assert client._sock.recvfrom.call_count == 2
+
+    def test_multiple_stale_acks_discarded(self):
+        """Multiple stale ACKs before the correct one."""
+        client = _client_with_mock_socket()
+        stale1 = _make_readreg_ack(ack_id=50, value=0x11111111)
+        stale2 = _make_readreg_ack(ack_id=51, value=0x22222222)
+        good = _make_readreg_ack(ack_id=1, value=0xCAFECAFE)
+        client._sock.recvfrom = MagicMock(
+            side_effect=[
+                (stale1, ("192.168.1.1", 3956)),
+                (stale2, ("192.168.1.1", 3956)),
+                (good, ("192.168.1.1", 3956)),
+            ]
+        )
+
+        result = client._read_reg_raw(0xD300)
+        assert result == 0xCAFECAFE
+        assert client._sock.recvfrom.call_count == 3
+
+    def test_runt_packet_ignored(self):
+        """Packets shorter than 8 bytes are ignored."""
+        client = _client_with_mock_socket()
+        runt = b"\x00\x00\x00"  # 3 bytes — too short
+        good = _make_readreg_ack(ack_id=1, value=42)
+        client._sock.recvfrom = MagicMock(
+            side_effect=[
+                (runt, ("192.168.1.1", 3956)),
+                (good, ("192.168.1.1", 3956)),
+            ]
+        )
+
+        result = client._read_reg_raw(0xD300)
+        assert result == 42
+
+
+class TestSendCmdTimeout:
+    """Test retry and timeout behavior."""
+
+    def test_timeout_raises_after_retries(self):
+        """After _n_retries timeouts, GVCPError is raised."""
+        client = _client_with_mock_socket()
+        client._n_retries = 2
+        client._cmd_timeout = 0.05
+        client._sock.recvfrom = MagicMock(side_effect=socket.timeout)
+
+        with pytest.raises(GVCPError, match="Timeout"):
+            client._read_reg_raw(0xD300)
+
+        # sendto called once per retry
+        assert client._sock.sendto.call_count == 2
+
+    def test_retry_succeeds_on_second_attempt(self):
+        """First attempt times out, second attempt gets an ACK."""
+        client = _client_with_mock_socket()
+        client._n_retries = 3
+        client._cmd_timeout = 0.05
+        # req_id will be 1 for the first call to _next_id (only called once
+        # since _send_cmd calls it at the top, before the retry loop)
+        good_ack = _make_readreg_ack(ack_id=1, value=0xABCD)
+
+        # First recvfrom: timeout, second: success
+        client._sock.recvfrom = MagicMock(
+            side_effect=[
+                socket.timeout,
+                (good_ack, ("192.168.1.1", 3956)),
+            ]
+        )
+
+        result = client._read_reg_raw(0xD300)
+        assert result == 0xABCD
+
+    def test_error_status_raises(self):
+        """Non-SUCCESS status in matching ACK raises GVCPError."""
+        client = _client_with_mock_socket()
+        ack = _make_readreg_ack(ack_id=1, value=0, status=0x8006)
+        client._sock.recvfrom = MagicMock(
+            return_value=(ack, ("192.168.1.1", 3956)))
+
+        with pytest.raises(GVCPError, match="ACCESS_DENIED"):
+            client._read_reg_raw(0xD300)
+
+
+class TestSendCmdPendingAck:
+    """Test PENDING_ACK handling."""
+
+    def test_pending_ack_extends_deadline(self):
+        """PENDING_ACK (0x0089) extends the wait, then real ACK arrives."""
+        client = _client_with_mock_socket()
+        client._cmd_timeout = 0.1
+
+        # PENDING_ACK: ack_cmd=0x0089, extra 4 bytes = timeout in ms
+        pending_timeout_ms = 2000
+        pending_ack = _make_ack(
+            STATUS_SUCCESS, 0x0089, 4, 0,
+            struct.pack(">I", pending_timeout_ms))
+
+        good_ack = _make_readreg_ack(ack_id=1, value=0x42)
+
+        client._sock.recvfrom = MagicMock(
+            side_effect=[
+                (pending_ack, ("192.168.1.1", 3956)),
+                (good_ack, ("192.168.1.1", 3956)),
+            ]
+        )
+
+        result = client._read_reg_raw(0xD300)
+        assert result == 0x42
+
+
+class TestHeartbeatControlLoss:
+    """Test heartbeat control-loss detection."""
+
+    def test_init_control_lost_is_false(self):
+        client = GVCPClient("192.168.1.1")
+        assert client._control_lost is False
+
+    def test_control_lost_detected(self):
+        """If CCP read returns 0 (control bit cleared), flag is set."""
+        client = _client_with_mock_socket()
+        client._connected = True
+        client._control_lost = False
+
+        # Simulate CCP register returning 0 (no control)
+        ack = _make_readreg_ack(ack_id=1, value=0x00000000)
+        client._sock.recvfrom = MagicMock(
+            return_value=(ack, ("192.168.1.1", 3956)))
+
+        # Call _read_reg_raw directly to simulate what heartbeat does
+        with client._lock:
+            value = client._read_reg_raw(REG_CCP)
+        if (value & 0x02) == 0:
+            client._control_lost = True
+
+        assert client._control_lost is True
+
+    def test_control_still_held(self):
+        """If CCP read returns 0x02 (control bit set), flag stays False."""
+        client = _client_with_mock_socket()
+        client._connected = True
+        client._control_lost = False
+
+        ack = _make_readreg_ack(ack_id=1, value=0x00000002)
+        client._sock.recvfrom = MagicMock(
+            return_value=(ack, ("192.168.1.1", 3956)))
+
+        with client._lock:
+            value = client._read_reg_raw(REG_CCP)
+        if (value & 0x02) == 0:
+            client._control_lost = True
+
+        assert client._control_lost is False
+
+    def test_retry_config_defaults(self):
+        """New init attributes have correct defaults."""
+        client = GVCPClient("192.168.1.1")
+        assert client._n_retries == 3
+        assert client._cmd_timeout == 0.5

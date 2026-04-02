@@ -87,8 +87,11 @@ class GVCPClient:
         self._lock = threading.Lock()
         self._req_id = 0
         self._connected = False
+        self._control_lost = False
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._heartbeat_stop = threading.Event()
+        self._n_retries = 3
+        self._cmd_timeout = 0.5  # seconds per attempt
 
     # --- Context Manager ---
 
@@ -245,6 +248,7 @@ class GVCPClient:
             self._sock = None
             raise
         self._connected = True
+        self._control_lost = False
 
         # Start heartbeat
         self._heartbeat_stop.clear()
@@ -314,27 +318,60 @@ class GVCPClient:
         return self._req_id
 
     def _send_cmd(self, flag: int, cmd: int, payload: bytes = b"") -> bytes:
-        """Send a GVCP command and return raw ACK data."""
+        """Send a GVCP command and return raw ACK data.
+
+        Validates that the ACK packet's req_id matches the command we sent.
+        Stale ACKs from previous commands are silently discarded.
+        PENDING_ACK (0x0089) responses extend the deadline.
+
+        Retries up to ``_n_retries`` times, each with a ``_cmd_timeout``
+        deadline.
+        """
         req_id = self._next_id()
         header = struct.pack(">BBHHH", GVCP_KEY, flag, cmd,
                              len(payload), req_id)
-        self._sock.sendto(header + payload, (self.camera_ip, GVCP_PORT))
 
-        # Receive ACK (retry once on timeout)
-        for attempt in range(2):
-            try:
-                data, _ = self._sock.recvfrom(8192)
-                break
-            except socket.timeout:
-                if attempt == 1:
-                    raise GVCPError(f"Timeout waiting for ACK (cmd=0x{cmd:04X})")
+        for attempt in range(self._n_retries):
+            self._sock.sendto(header + payload, (self.camera_ip, GVCP_PORT))
 
-        status = struct.unpack(">H", data[0:2])[0]
-        if status != STATUS_SUCCESS:
-            raise GVCPError(
-                f"Command 0x{cmd:04X} at addr failed", status)
+            deadline = time.monotonic() + self._cmd_timeout
+            while time.monotonic() < deadline:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._sock.settimeout(max(remaining, 0.01))
+                try:
+                    data, _ = self._sock.recvfrom(8192)
+                except socket.timeout:
+                    break  # this attempt timed out, retry
 
-        return data
+                if len(data) < 8:
+                    continue  # runt packet, ignore
+
+                ack_status = struct.unpack(">H", data[0:2])[0]
+                ack_cmd = struct.unpack(">H", data[2:4])[0]
+                ack_id = struct.unpack(">H", data[6:8])[0]
+
+                # Handle PENDING_ACK: camera needs more time
+                if ack_cmd == 0x0089:
+                    if len(data) >= 12:
+                        pending_ms = struct.unpack(">I", data[8:12])[0]
+                        deadline = time.monotonic() + pending_ms / 1000.0
+                    continue
+
+                # Stale ACK from a previous command — discard
+                if ack_id != req_id:
+                    continue
+
+                # Got our response
+                if ack_status != STATUS_SUCCESS:
+                    raise GVCPError(
+                        f"Command 0x{cmd:04X} failed", ack_status)
+                return data
+
+        raise GVCPError(
+            f"Timeout waiting for ACK (cmd=0x{cmd:04X}, "
+            f"{self._n_retries} retries)")
 
     def _read_reg_raw(self, addr: int) -> int:
         """Internal: read single register (not locked)."""
@@ -367,10 +404,17 @@ class GVCPClient:
     # --- Heartbeat ---
 
     def _heartbeat_loop(self):
-        """Background thread: read CCP every 2s to keep session alive."""
+        """Background thread: read CCP every 2s to keep session alive.
+
+        Also checks the CCP control bit — if cleared by another
+        application (or firmware), sets ``_control_lost`` so callers
+        can detect it.
+        """
         while not self._heartbeat_stop.wait(2.0):
             try:
                 with self._lock:
-                    self._read_reg_raw(REG_CCP)
+                    value = self._read_reg_raw(REG_CCP)
+                if (value & 0x02) == 0:  # control bit cleared
+                    self._control_lost = True
             except (OSError, GVCPError):
                 pass

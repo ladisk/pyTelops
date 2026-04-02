@@ -329,8 +329,95 @@ class Camera:
         except GVCPError:
             pass
 
+        # Check if camera is ready
+        try:
+            not_ready = self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY)
+            if not_ready:
+                tdc = self._gvcp.read_reg(reg.REG_TDC_STATUS)
+                if tdc & reg.TDC_WAITING_FOR_COOLER:
+                    print("Note: Camera is cooling down. "
+                          "Call cam.wait_until_ready() before acquisition.",
+                          flush=True)
+                elif not_ready:
+                    print("Note: Camera is not ready. "
+                          "Call cam.wait_until_ready() before acquisition.",
+                          flush=True)
+        except GVCPError:
+            pass
+
         self._connected = True
         Camera._active_cameras[self._camera_ip] = self
+
+    def wait_until_ready(self, timeout: float = 120.0,
+                         verbose: bool = True) -> None:
+        """Wait for camera to be ready (cooled down, initialized).
+
+        Polls the TDC Status register for human-readable status updates.
+        Call after connect() if the camera was just powered on.
+
+        Args:
+            timeout: Max seconds to wait.
+            verbose: Print status updates.
+
+        Raises:
+            TimeoutError: If camera not ready within timeout.
+        """
+        self._check_connected()
+
+        _TDC_REASONS = {
+            reg.TDC_WAITING_FOR_COOLER: "Cooling down",
+            reg.TDC_WAITING_FOR_SENSOR: "Sensor initializing",
+            reg.TDC_WAITING_FOR_INIT: "Device initializing",
+            reg.TDC_WAITING_FOR_ICU: "Calibration unit warming up",
+            reg.TDC_WAITING_FOR_CAL_INIT: "Loading calibration",
+            reg.TDC_WAITING_FOR_CAL_DATA: "Loading calibration data",
+            reg.TDC_WAITING_FOR_IMAGE_CORRECTION: "Image correction in progress",
+            reg.TDC_WAITING_FOR_OUTPUT_FPGA: "Output FPGA initializing",
+            reg.TDC_WAITING_FOR_POWER_ON: "Powering on",
+            reg.TDC_WAITING_FOR_FLASH_SETTINGS: "Loading saved settings",
+            reg.TDC_WAITING_FOR_VALID_PARAMS: "Invalid parameter combination",
+        }
+
+        deadline = time.monotonic() + timeout
+        last_msg = ""
+
+        while time.monotonic() < deadline:
+            not_ready = self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY)
+            if not not_ready:
+                if verbose and last_msg:
+                    print("Ready.", flush=True)
+                return
+
+            # Get detailed reason from TDC status
+            tdc = self._gvcp.read_reg(reg.REG_TDC_STATUS)
+            # Mask out ACQUISITION_STARTED (bit 10) -- not a "waiting" state
+            tdc &= ~reg.TDC_ACQUISITION_STARTED
+
+            reasons = [desc for flag, desc in _TDC_REASONS.items()
+                       if tdc & flag]
+            msg = ", ".join(reasons) if reasons else "Not ready"
+
+            # Add temperature if cooling
+            if tdc & reg.TDC_WAITING_FOR_COOLER:
+                try:
+                    temp = self.sensor_temperature("sensor")
+                    msg += f" ({temp:.1f} C)"
+                except Exception:
+                    pass
+
+            if verbose and msg != last_msg:
+                print(f"Waiting: {msg}...", flush=True)
+                last_msg = msg
+
+            time.sleep(2.0)
+
+        raise TimeoutError(f"Camera not ready after {timeout:.0f}s")
+
+    @property
+    def tdc_status(self) -> int:
+        """Raw TDC Status bitmask (see TDC_* constants in registers)."""
+        self._check_connected()
+        return self._gvcp.read_reg(reg.REG_TDC_STATUS)
 
     def disconnect(self) -> None:
         """Stop streaming, release GVCP control, close sockets."""
