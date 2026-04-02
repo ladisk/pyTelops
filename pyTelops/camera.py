@@ -325,7 +325,12 @@ class Camera:
         except GVCPError:
             pass
         try:
-            self._gvcp.write_float(reg.REG_FRAME_RATE_MAX_FG, 1e9)  # no receiver throttle
+            self._gvcp.write_float(reg.REG_FRAME_RATE_MAX_FG, 1e9)
+        except GVCPError:
+            pass
+        try:
+            self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR,
+                                 reg.TestImageSelector.OFF)
         except GVCPError:
             pass
 
