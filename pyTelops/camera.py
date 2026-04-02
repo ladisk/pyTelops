@@ -706,7 +706,7 @@ class Camera:
         label = f" (seq {seq_idx + 1}/{n_seq})" if n_seq > 1 else ""
 
         if verbose:
-            print(f"Recording{label}...", end="", flush=True)
+            print(f"Arming{label}...", end=" ", flush=True)
 
         # Arm + start acquisition
         self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
@@ -715,10 +715,13 @@ class Camera:
         # Wait for camera to enter RECORDING state before firing MOI
         time.sleep(0.5)
 
+        if verbose:
+            print("Recording...", end=" ", flush=True)
+
         # Fire software MOI
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
-        # Wait for recording to complete — this is the actual recording time
+        # Wait for recording to complete
         self.buffer_wait(timeout=timeout)
 
         # Stop acquisition
@@ -731,7 +734,7 @@ class Camera:
         self._buffer_next_sequence = seq_idx + 1
 
         if verbose:
-            print(f" {recorded} frames", flush=True)
+            print(f"Done ({recorded} frames)", flush=True)
 
         return recorded
 
