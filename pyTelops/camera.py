@@ -900,15 +900,12 @@ class Camera:
         if timeout <= 0:
             timeout = max(n_frames / 200.0 * 1.5 + 5.0, 10.0)
 
-        # Set up progress reporting
+        # Set up progress bar
         pbar = None
         if verbose:
-            try:
-                from tqdm.auto import tqdm
-                pbar = tqdm(total=n_frames, unit="frame",
-                            desc="Downloading")
-            except ImportError:
-                print(f"Downloading {n_frames} frames...", flush=True)
+            from tqdm.auto import tqdm
+            pbar = tqdm(total=n_frames, unit="frame",
+                        desc="Downloading")
 
         # Ensure acquisition is stopped before configuring download
         try:
@@ -970,15 +967,6 @@ class Camera:
                     frames.append(result)
                     if pbar:
                         pbar.update(1)
-                    elif verbose:
-                        now = time.monotonic()
-                        if now - last_progress >= 5.0:
-                            elapsed = now - t_start
-                            pct = len(frames) / n_frames * 100
-                            fps = len(frames) / elapsed
-                            print(f"  {len(frames)}/{n_frames} ({pct:.0f}%) "
-                                  f"{fps:.0f} fps", flush=True)
-                            last_progress = now
                 else:
                     result = self._gvsp.get_frame(timeout=2.0)
                     if result is not None:

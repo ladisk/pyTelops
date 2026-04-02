@@ -30,6 +30,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.20",
+    "tqdm",
 ]
 
 [project.optional-dependencies]
