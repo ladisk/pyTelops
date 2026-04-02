@@ -9,6 +9,12 @@ The camera sends frames as a sequence of packets:
 
 This module is generic — it works with any GigE Vision camera.
 Byte order is configurable (Telops sends little-endian, most others big-endian).
+
+Implements aravis-inspired improvements:
+  - Pre-allocated frame buffers (direct offset writes, no dict+sort)
+  - Real-time gap detection on every received packet
+  - Packet resend sent directly from the stream socket (not GVCP)
+  - Three-tier timeouts: initial gap grace, resend interval, frame retention
 """
 
 import logging
@@ -17,7 +23,6 @@ import socket
 import struct
 import threading
 import time
-from collections import defaultdict
 from queue import Queue, Empty
 from typing import Optional
 
@@ -56,9 +61,15 @@ PIXEL_DTYPE = {
     PIXEL_MONO16: np.uint16,
 }
 
+# GVCP constants for direct resend from stream socket
+_GVCP_PORT = 3956
+_GVCP_KEY = 0x42
+_GVCP_FLAG_ACK = 0x01
+_GVCP_CMD_PACKETRESEND = 0x0040
+
 
 class _FrameBuffer:
-    """Accumulates packets for a single frame."""
+    """Accumulates packets for a single frame using a pre-allocated buffer."""
 
     def __init__(self, block_id: int):
         self.block_id = block_id
@@ -67,47 +78,101 @@ class _FrameBuffer:
         self.width = 0
         self.height = 0
         self.payload_type = 0
-        self.data_packets: dict[int, bytes] = {}
         self.leader_received = False
         self.trailer_received = False
         self.expected_packets = 0
         self.created_at = time.monotonic()
+        self.last_packet_at = time.monotonic()
+
+        # Pre-allocated buffer (set up when leader arrives and we know size)
+        self._raw_buffer: Optional[bytearray] = None
+        self._received: Optional[bytearray] = None  # bitfield: 1=received
+        self._last_contiguous = 0  # highest contiguous packet from start
+        self._received_count = 0
+        self._packet_data_size = 0
+
+        # Resend tracking per-packet
+        self._resend_requested: set[int] = set()
+
+    def setup_buffer(self, packet_data_size: int):
+        """Allocate frame buffer once dimensions are known."""
+        if self.width <= 0 or self.height <= 0:
+            return
+
+        MAX_PIXELS = 2048 * 2048
+        if self.width * self.height > MAX_PIXELS:
+            logger.warning(f"Frame {self.block_id}: invalid dimensions "
+                           f"{self.width}x{self.height}, skipping")
+            return
+
+        bpp = PIXEL_BPP.get(self.pixel_format, 2)
+        total_bytes = self.width * self.height * bpp
+        self.expected_packets = math.ceil(total_bytes / packet_data_size)
+        self._packet_data_size = packet_data_size
+        self._raw_buffer = bytearray(total_bytes)
+        self._received = bytearray(self.expected_packets + 1)  # 0-indexed unused
+        self._last_contiguous = 0
+        self._received_count = 0
+
+    def write_packet(self, packet_id: int, payload: bytes):
+        """Write a data packet directly to the correct buffer offset."""
+        self.last_packet_at = time.monotonic()
+
+        if self._raw_buffer is not None and self._packet_data_size > 0:
+            offset = (packet_id - 1) * self._packet_data_size
+            end = min(offset + len(payload), len(self._raw_buffer))
+            if offset < len(self._raw_buffer):
+                self._raw_buffer[offset:end] = payload[:end - offset]
+            if packet_id <= len(self._received) - 1:
+                if not self._received[packet_id]:
+                    self._received[packet_id] = 1
+                    self._received_count += 1
+                    # Update contiguous counter
+                    if packet_id == self._last_contiguous + 1:
+                        while (self._last_contiguous + 1 < len(self._received)
+                               and self._received[self._last_contiguous + 1]):
+                            self._last_contiguous += 1
+        else:
+            # Fallback: leader not yet received, can't pre-allocate
+            # This shouldn't happen in normal flow
+            pass
+
+    def missing_packets(self) -> list[int]:
+        """Return list of missing packet IDs (gaps in received set)."""
+        if self._received is None or self.expected_packets == 0:
+            return []
+        return [i for i in range(1, self.expected_packets + 1)
+                if not self._received[i]]
 
     def is_complete(self) -> bool:
         if not self.leader_received or not self.trailer_received:
             return False
         if self.expected_packets > 0:
-            return len(self.data_packets) >= self.expected_packets
+            return self._received_count >= self.expected_packets
         return True
 
     def assemble(self, byteswap: bool = False) -> Optional[np.ndarray]:
-        """Assemble data packets into a numpy array.
-
-        Args:
-            byteswap: If True, swap byte order (for big-endian cameras).
-                      Telops sends little-endian (native x86) so False.
-        """
+        """Assemble the frame from the pre-allocated buffer."""
         if not self.leader_received:
             return None
 
-        # Sanity check dimensions to prevent multi-GB allocation on corruption
-        MAX_PIXELS = 2048 * 2048
-        if self.width * self.height > MAX_PIXELS or self.width <= 0 or self.height <= 0:
-            logger.warning(f"Frame {self.block_id}: invalid dimensions "
-                           f"{self.width}x{self.height}, skipping")
+        if self.width <= 0 or self.height <= 0:
             return None
 
-        sorted_ids = sorted(self.data_packets.keys())
-        raw = b"".join(self.data_packets[pid] for pid in sorted_ids)
+        MAX_PIXELS = 2048 * 2048
+        if self.width * self.height > MAX_PIXELS:
+            return None
 
         bpp = PIXEL_BPP.get(self.pixel_format, 2)
         dtype = PIXEL_DTYPE.get(self.pixel_format, np.uint16)
-
         expected_size = self.width * self.height * bpp
-        if len(raw) < expected_size:
-            raw = raw + b"\x00" * (expected_size - len(raw))
 
-        arr = np.frombuffer(raw[:expected_size], dtype=dtype)
+        if self._raw_buffer is not None:
+            raw = bytes(self._raw_buffer[:expected_size])
+        else:
+            raw = b"\x00" * expected_size
+
+        arr = np.frombuffer(raw, dtype=dtype)
 
         if byteswap:
             arr = arr.byteswap()
@@ -125,21 +190,32 @@ class GVSPReceiver:
         local_ip: Local IP to bind to.
         local_port: Local UDP port (0 = auto-assign).
         max_queue: Max completed frames to buffer.
-        stale_timeout: Seconds before dropping incomplete frames.
-        gvcp_client: Optional GVCPClient for packet resend requests.
+        gvcp_client: Optional GVCPClient (used for camera_ip only).
         packet_size: Network packet size (default 1500 = standard MTU).
         byteswap: Swap pixel byte order (False for Telops, True for most others).
+        camera_ip: Camera IP for direct resend (auto-detected from gvcp_client).
+        initial_packet_timeout: Grace period before first resend (seconds).
+        packet_timeout: Timeout between resend attempts (seconds).
+        frame_retention: Max time to keep an incomplete frame (seconds).
     """
 
     def __init__(self, local_ip: str = "", local_port: int = 0,
-                 max_queue: int = 30, stale_timeout: float = 5.0,
+                 max_queue: int = 30,
                  gvcp_client=None, packet_size: int = 1500,
-                 byteswap: bool = False):
+                 byteswap: bool = False, camera_ip: str = "",
+                 initial_packet_timeout: float = 0.005,
+                 packet_timeout: float = 0.020,
+                 frame_retention: float = 0.200):
         self.local_ip = local_ip
-        self.stale_timeout = stale_timeout
         self.byteswap = byteswap
         self._gvcp = gvcp_client
         self._packet_data_size = packet_size - 8
+        self._camera_ip = camera_ip or (gvcp_client.camera_ip if gvcp_client else "")
+
+        # Three-tier timeout strategy (aravis-inspired)
+        self._initial_packet_timeout = initial_packet_timeout
+        self._packet_timeout = packet_timeout
+        self._frame_retention = frame_retention
 
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -148,7 +224,7 @@ class GVSPReceiver:
         except OSError:
             pass
         self._sock.bind((local_ip, local_port))
-        self._sock.settimeout(1.0)
+        self._sock.settimeout(0.05)  # short timeout for responsive gap checking
 
         self._port = self._sock.getsockname()[1]
         self._frame_queue: Queue = Queue(maxsize=max_queue)
@@ -157,6 +233,9 @@ class GVSPReceiver:
         self._frame_buffers: dict[int, _FrameBuffer] = {}
         self._resend_stats = {"requested": 0, "recovered": 0, "failed": 0}
         self.resend_enabled = True
+
+        # Resend req_id counter (for direct resend from stream socket)
+        self._resend_req_id = 0
 
     @property
     def port(self) -> int:
@@ -201,12 +280,13 @@ class GVSPReceiver:
     # --- Internal ---
 
     def _receive_loop(self):
-        """Main receiver loop running in background thread."""
+        """Main receiver loop with real-time gap detection."""
         while not self._stop_event.is_set():
             try:
                 data, addr = self._sock.recvfrom(65536)
             except socket.timeout:
-                self._cleanup_stale()
+                # No packet received — check for gaps and stale frames
+                self._check_gaps_and_timeouts()
                 continue
             except OSError:
                 break
@@ -215,7 +295,9 @@ class GVSPReceiver:
                 continue
 
             self._parse_packet(data)
-            self._cleanup_stale()
+
+            # Check gaps on every packet (aravis pattern)
+            self._check_gaps_and_timeouts()
 
     def _parse_packet(self, data: bytes):
         """Parse a single GVSP packet."""
@@ -247,7 +329,7 @@ class GVSPReceiver:
             self._handle_trailer(block_id, payload)
 
     def _handle_leader(self, block_id: int, payload: bytes):
-        """Parse leader packet with image metadata."""
+        """Parse leader packet and pre-allocate frame buffer."""
         buf = _FrameBuffer(block_id)
 
         if len(payload) >= 24:
@@ -258,43 +340,45 @@ class GVSPReceiver:
             buf.height = struct.unpack(">I", payload[20:24])[0]
 
         buf.leader_received = True
+        buf.setup_buffer(self._packet_data_size)
         self._frame_buffers[block_id] = buf
 
     def _handle_data(self, block_id: int, packet_id: int, payload: bytes):
-        """Store data packet payload."""
+        """Write data packet directly to pre-allocated frame buffer."""
         if block_id not in self._frame_buffers:
             self._frame_buffers[block_id] = _FrameBuffer(block_id)
-        self._frame_buffers[block_id].data_packets[packet_id] = payload
+        self._frame_buffers[block_id].write_packet(packet_id, payload)
 
     def _handle_trailer(self, block_id: int, payload: bytes):
-        """Handle trailer packet, request resend for missing packets, emit frame."""
+        """Handle trailer packet, emit completed frame."""
         if block_id not in self._frame_buffers:
             return
 
         buf = self._frame_buffers[block_id]
         buf.trailer_received = True
 
-        if buf.leader_received and buf.width > 0 and buf.height > 0:
-            bpp = PIXEL_BPP.get(buf.pixel_format, 2)
-            total_bytes = buf.width * buf.height * bpp
-            buf.expected_packets = math.ceil(total_bytes / self._packet_data_size)
+        # If we didn't get a leader (no pre-allocated buffer), calculate
+        # expected packets now for the missing count
+        if buf.expected_packets == 0 and buf.leader_received:
+            if buf.width > 0 and buf.height > 0:
+                bpp = PIXEL_BPP.get(buf.pixel_format, 2)
+                total_bytes = buf.width * buf.height * bpp
+                buf.expected_packets = math.ceil(
+                    total_bytes / self._packet_data_size)
 
-        # Check for missing packets and request resend
-        if buf.expected_packets > 0:
-            expected_ids = set(range(1, buf.expected_packets + 1))
-            received_ids = set(buf.data_packets.keys())
-            missing = expected_ids - received_ids
-
-            if missing and self._gvcp is not None and self.resend_enabled:
-                missing = self._request_resend(buf, missing)
-
-            if missing:
-                self._resend_stats["failed"] += len(missing)
-                logger.warning(
-                    f"Frame {block_id}: {len(missing)}/{buf.expected_packets} "
-                    f"packets unrecoverable")
+        # Log missing packets
+        missing = buf.missing_packets()
+        if missing:
+            self._resend_stats["failed"] += len(missing)
+            logger.warning(
+                f"Frame {block_id}: {len(missing)}/{buf.expected_packets} "
+                f"packets unrecoverable")
 
         # Assemble and emit
+        self._emit_frame(buf)
+
+    def _emit_frame(self, buf: _FrameBuffer):
+        """Assemble frame and put it on the output queue."""
         frame = buf.assemble(byteswap=self.byteswap)
         if frame is not None:
             info = {
@@ -304,7 +388,7 @@ class GVSPReceiver:
                 "width": buf.width,
                 "height": buf.height,
                 "missing_packets": max(0,
-                    buf.expected_packets - len(buf.data_packets)
+                    buf.expected_packets - buf._received_count
                     if buf.expected_packets > 0 else 0),
             }
             if self._frame_queue.full():
@@ -314,42 +398,83 @@ class GVSPReceiver:
                     pass
             self._frame_queue.put((frame, info))
 
-        self._frame_buffers.pop(block_id, None)
+        self._frame_buffers.pop(buf.block_id, None)
 
-    def _request_resend(self, buf: _FrameBuffer, missing: set[int],
-                        max_attempts: int = 2, wait_ms: float = 200.0
-                        ) -> set[int]:
-        """Request retransmission of missing packets."""
-        for attempt in range(max_attempts):
-            ranges = self._contiguous_ranges(sorted(missing))
-            for first, last in ranges:
-                try:
-                    self._gvcp.send_packetresend(buf.block_id, first, last)
-                    self._resend_stats["requested"] += (last - first + 1)
-                except Exception as e:
-                    logger.debug(f"Resend request failed: {e}")
-                    return missing
+    def _check_gaps_and_timeouts(self):
+        """Real-time gap detection and frame retention timeout.
 
-            deadline = time.monotonic() + wait_ms / 1000.0
-            while time.monotonic() < deadline:
-                still_missing = missing - set(buf.data_packets.keys())
-                if not still_missing:
-                    self._resend_stats["recovered"] += len(missing)
-                    return set()
-                time.sleep(0.005)
+        Called on every received packet and on socket timeouts.
+        - Requests resend for packets missing longer than initial_packet_timeout
+        - Emits or drops frames older than frame_retention
+        """
+        now = time.monotonic()
+        to_remove = []
 
-            missing = missing - set(buf.data_packets.keys())
-            if not missing:
-                self._resend_stats["recovered"] += len(missing)
-                return set()
+        for block_id, buf in self._frame_buffers.items():
+            age = now - buf.created_at
+            since_last = now - buf.last_packet_at
 
-        return missing
+            # Frame retention timeout — emit whatever we have
+            if since_last > self._frame_retention and buf.leader_received:
+                if buf.trailer_received or age > self._frame_retention * 2:
+                    self._emit_frame(buf)
+                    to_remove.append(block_id)
+                    continue
+
+            # Real-time gap detection — request resend for missing packets
+            if (self.resend_enabled and self._camera_ip
+                    and buf.leader_received and buf.expected_packets > 0
+                    and age > self._initial_packet_timeout):
+                missing = buf.missing_packets()
+                # Only resend packets we haven't already requested
+                new_missing = [p for p in missing
+                               if p not in buf._resend_requested]
+                if new_missing:
+                    # Cap at 25% of frame packets per request (aravis default)
+                    max_resend = max(1, buf.expected_packets // 4)
+                    to_resend = new_missing[:max_resend]
+                    self._send_resend_direct(block_id, to_resend)
+                    buf._resend_requested.update(to_resend)
+
+            # Hard timeout — drop frame
+            if age > self._frame_retention * 5:
+                to_remove.append(block_id)
+
+        for bid in to_remove:
+            self._frame_buffers.pop(bid, None)
+
+    def _send_resend_direct(self, block_id: int, packet_ids: list[int]):
+        """Send PACKETRESEND directly from the stream socket.
+
+        Sends to camera's GVCP port (3956) from the stream socket,
+        avoiding the GVCP client lock. This is the aravis approach.
+        """
+        if not packet_ids:
+            return
+
+        ranges = self._contiguous_ranges(packet_ids)
+        for first, last in ranges:
+            self._resend_req_id = (self._resend_req_id + 1) & 0xFFFF
+            if self._resend_req_id == 0:
+                self._resend_req_id = 1
+
+            payload = struct.pack(">HHII", 0, block_id, first, last)
+            header = struct.pack(">BBHHH", _GVCP_KEY, _GVCP_FLAG_ACK,
+                                 _GVCP_CMD_PACKETRESEND,
+                                 len(payload), self._resend_req_id)
+            try:
+                self._sock.sendto(header + payload,
+                                  (self._camera_ip, _GVCP_PORT))
+                self._resend_stats["requested"] += (last - first + 1)
+            except OSError:
+                pass
 
     @staticmethod
     def _contiguous_ranges(ids: list[int]) -> list[tuple[int, int]]:
         """Group sorted packet IDs into contiguous (first, last) ranges."""
         if not ids:
             return []
+        ids = sorted(ids)
         ranges = []
         first = last = ids[0]
         for pid in ids[1:]:
@@ -360,11 +485,3 @@ class GVSPReceiver:
                 first = last = pid
         ranges.append((first, last))
         return ranges
-
-    def _cleanup_stale(self):
-        """Remove frame buffers that have been incomplete for too long."""
-        now = time.monotonic()
-        stale = [bid for bid, buf in self._frame_buffers.items()
-                 if now - buf.created_at > self.stale_timeout]
-        for bid in stale:
-            self._frame_buffers.pop(bid, None)
