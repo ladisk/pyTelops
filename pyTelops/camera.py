@@ -703,10 +703,10 @@ class Camera:
                 f"All {n_seq} sequence slots are full. "
                 f"Call buffer_clear() or buffer_configure() first.")
 
-        label = f"[seq {seq_idx}/{n_seq}]" if n_seq > 1 else ""
+        label = f" (seq {seq_idx + 1}/{n_seq})" if n_seq > 1 else ""
 
         if verbose:
-            print(f"Arming camera... {label}", flush=True)
+            print(f"Recording{label}...", end="", flush=True)
 
         # Arm + start acquisition
         self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
@@ -715,16 +715,11 @@ class Camera:
         # Wait for camera to enter RECORDING state before firing MOI
         time.sleep(0.5)
 
-        if verbose:
-            print("Recording...", flush=True)
-
         # Fire software MOI
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
-        # Wait for recording to complete
-        t0 = time.monotonic()
+        # Wait for recording to complete — this is the actual recording time
         self.buffer_wait(timeout=timeout)
-        elapsed = time.monotonic() - t0
 
         # Stop acquisition
         try:
@@ -736,7 +731,7 @@ class Camera:
         self._buffer_next_sequence = seq_idx + 1
 
         if verbose:
-            print(f"Recorded {recorded} frames in {elapsed:.1f}s", flush=True)
+            print(f" {recorded} frames", flush=True)
 
         return recorded
 
