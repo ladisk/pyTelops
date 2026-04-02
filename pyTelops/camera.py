@@ -676,7 +676,8 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, pre_moi)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE, int(moi))
 
-    def buffer_record(self, timeout: float = 30.0) -> int:
+    def buffer_record(self, timeout: float = 30.0,
+                      verbose: bool = True) -> int:
         """Record one sequence to the internal buffer.
 
         Arms the camera, fires software MOI, waits for recording to
@@ -685,6 +686,7 @@ class Camera:
 
         Args:
             timeout: Max seconds to wait for recording to finish.
+            verbose: Print status messages (default True).
 
         Returns:
             Number of frames recorded in this sequence.
@@ -701,15 +703,28 @@ class Camera:
                 f"All {n_seq} sequence slots are full. "
                 f"Call buffer_clear() or buffer_configure() first.")
 
+        label = f"[seq {seq_idx}/{n_seq}]" if n_seq > 1 else ""
+
+        if verbose:
+            print(f"Arming camera... {label}", flush=True)
+
         # Arm + start acquisition
         self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
         self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+
+        # Wait for camera to enter RECORDING state before firing MOI
+        time.sleep(0.5)
+
+        if verbose:
+            print("Recording...", flush=True)
 
         # Fire software MOI
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
         # Wait for recording to complete
+        t0 = time.monotonic()
         self.buffer_wait(timeout=timeout)
+        elapsed = time.monotonic() - t0
 
         # Stop acquisition
         try:
@@ -719,6 +734,10 @@ class Camera:
 
         recorded = self.buffer_recorded_frames(seq_idx)
         self._buffer_next_sequence = seq_idx + 1
+
+        if verbose:
+            print(f"Recorded {recorded} frames in {elapsed:.1f}s", flush=True)
+
         return recorded
 
     def buffer_arm(self) -> None:
@@ -840,7 +859,8 @@ class Camera:
                         n_frames: int = 0, timeout: float = 0,
                         bitrate_mbps: float = 1000.0,
                         packet_size: int = 9000,
-                        strip_header: bool = True
+                        strip_header: bool = True,
+                        verbose: bool = True
                         ) -> Optional[np.ndarray]:
         """Download frames from the internal memory buffer.
 
@@ -853,6 +873,7 @@ class Camera:
             packet_size: GVSP packet size in bytes (default 9000).
                          If you get data loss, try 3000 or 1500.
             strip_header: Remove Telops metadata rows (default True).
+            verbose: Show progress bar/messages (default True).
 
         Returns:
             numpy array (N, H, W) or None on failure.
@@ -867,7 +888,8 @@ class Camera:
                 reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
         if n_frames == 0:
-            print("No frames recorded in buffer")
+            if verbose:
+                print("No frames recorded in buffer")
             return None
 
         first_frame_id = self._gvcp.read_reg(
@@ -876,10 +898,17 @@ class Camera:
             start_frame = first_frame_id
 
         if timeout <= 0:
-            # Estimate at ~250 fps (measured with 1000 Mbps bitrate)
             timeout = max(n_frames / 200.0 * 1.5 + 5.0, 10.0)
 
-        print(f"Downloading {n_frames} frames from buffer...", flush=True)
+        # Set up progress reporting
+        pbar = None
+        if verbose:
+            try:
+                from tqdm.auto import tqdm
+                pbar = tqdm(total=n_frames, unit="frame",
+                            desc="Downloading")
+            except ImportError:
+                print(f"Downloading {n_frames} frames...", flush=True)
 
         # Ensure acquisition is stopped before configuring download
         try:
@@ -935,26 +964,28 @@ class Camera:
             for i in range(n_frames):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    print(f"Timeout after {len(frames)}/{n_frames} frames")
                     break
                 result = self._gvsp.get_frame(timeout=min(remaining, 10.0))
                 if result is not None:
                     frames.append(result)
-                    now = time.monotonic()
-                    if now - last_progress >= 5.0:
-                        elapsed = now - t_start
-                        pct = len(frames) / n_frames * 100
-                        fps = len(frames) / elapsed
-                        eta = (n_frames - len(frames)) / fps if fps > 0 else 0
-                        print(f"  {len(frames)}/{n_frames} ({pct:.0f}%) "
-                              f"{fps:.0f} fps, ETA {eta:.0f}s", flush=True)
-                        last_progress = now
+                    if pbar:
+                        pbar.update(1)
+                    elif verbose:
+                        now = time.monotonic()
+                        if now - last_progress >= 5.0:
+                            elapsed = now - t_start
+                            pct = len(frames) / n_frames * 100
+                            fps = len(frames) / elapsed
+                            print(f"  {len(frames)}/{n_frames} ({pct:.0f}%) "
+                                  f"{fps:.0f} fps", flush=True)
+                            last_progress = now
                 else:
                     result = self._gvsp.get_frame(timeout=2.0)
                     if result is not None:
                         frames.append(result)
+                        if pbar:
+                            pbar.update(1)
                     else:
-                        print(f"Stream stopped at {len(frames)}/{n_frames}")
                         break
         finally:
             try:
@@ -988,12 +1019,16 @@ class Camera:
             self._gvsp.resend_enabled = True
             self.stop_stream()
 
+        if pbar:
+            pbar.close()
+
         elapsed = time.monotonic() - t_start
-        if frames:
+        if verbose and frames:
+            fps = len(frames) / elapsed if elapsed > 0 else 0
+            mbps = len(frames) * self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE) \
+                / elapsed / 1e6 if elapsed > 0 else 0
             print(f"Downloaded {len(frames)} frames in {elapsed:.1f}s "
-                  f"({len(frames) / elapsed:.0f} fps)")
-        else:
-            print("Download failed: 0 frames")
+                  f"({fps:.0f} fps, {mbps:.1f} MB/s)")
 
         if not frames:
             return None
