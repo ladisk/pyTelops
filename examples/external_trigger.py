@@ -1,48 +1,35 @@
 """External trigger example.
 
-Configure the camera to start acquisition on a BNC trigger signal.
+Configure the camera to record to the internal buffer when a BNC
+trigger signal arrives.
 """
 
 import numpy as np
 from pyTelops import Camera
-from pyTelops.registers import (
-    TriggerSource, TriggerActivation, MemoryBufferMOISource,
-)
 
 with Camera() as cam:
+    cam.frame_rate = 2000.0
+
     # --- Configure external trigger ---
     cam.configure_trigger(
-        source=TriggerSource.EXTERNAL_SIGNAL,
-        activation=TriggerActivation.RISING_EDGE,
+        source="external",
+        activation="rising",
         enabled=True,
     )
-    print("External trigger armed (waiting for BNC rising edge)")
 
-    # --- Option A: Live capture on trigger ---
-    frame = cam.grab(timeout=30.0)  # waits up to 30s for trigger
-    if frame is not None:
-        print(f"Captured: {frame.shape}")
-
-    # --- Option B: Buffer recording with external MOI ---
+    # --- Buffer recording with external MOI ---
     cam.buffer_configure(
         n_sequences=1,
-        frames_per_seq=500,
-        pre_moi=100,  # 100 frames before trigger
-        moi_source=MemoryBufferMOISource.EXTERNAL_SIGNAL,
+        duration=5.0,
+        pre_moi=1000,           # keep 1000 frames before trigger
+        moi_source="external",
     )
+
     cam.buffer_arm()
-    print("Buffer armed, waiting for external MOI signal...")
+    print("Buffer armed, waiting for external trigger...")
 
-    # The camera will record automatically when BNC trigger fires.
-    # Poll buffer status to know when it's done:
-    import time
-    from pyTelops.registers import MemoryBufferStatus
-
-    while True:
-        status = cam.buffer_status()
-        if status == MemoryBufferStatus.HOLDING:
-            break
-        time.sleep(0.5)
+    cam.buffer_wait(timeout=60.0)
+    print("Recording complete")
 
     data = cam.buffer_download()
     np.save("triggered_data.npy", data)

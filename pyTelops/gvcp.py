@@ -221,24 +221,29 @@ class GVCPClient:
         max_wait = 15.0  # seconds — generous upper bound
         deadline = time.monotonic() + max_wait
         attempt = 0
-        while True:
-            try:
-                self._write_reg_raw(REG_CCP, 0x00000002)
-                break  # success
-            except GVCPError as e:
-                if e.status == 0x8006 and force:  # ACCESS_DENIED
-                    attempt += 1
-                    if attempt == 1:
-                        print("ACCESS_DENIED: waiting for stale CCP lock "
-                              "to expire...", flush=True)
-                    if time.monotonic() >= deadline:
-                        raise GVCPError(
-                            "Could not take CCP control after "
-                            f"{max_wait:.0f}s — another application may "
-                            "be actively connected", 0x8006)
-                    time.sleep(1.0)
-                else:
-                    raise
+        try:
+            while True:
+                try:
+                    self._write_reg_raw(REG_CCP, 0x00000002)
+                    break  # success
+                except GVCPError as e:
+                    if e.status == 0x8006 and force:  # ACCESS_DENIED
+                        attempt += 1
+                        if attempt == 1:
+                            print("ACCESS_DENIED: waiting for stale CCP lock "
+                                  "to expire...", flush=True)
+                        if time.monotonic() >= deadline:
+                            raise GVCPError(
+                                "Could not take CCP control after "
+                                f"{max_wait:.0f}s — another application may "
+                                "be actively connected", 0x8006)
+                        time.sleep(1.0)
+                    else:
+                        raise
+        except Exception:
+            self._sock.close()
+            self._sock = None
+            raise
         self._connected = True
 
         # Start heartbeat

@@ -1,42 +1,27 @@
 """Buffer recording and download example.
 
 The Telops FAST M3k has a 16GB internal ring buffer that records at
-full sensor speed (up to 3100 fps), independent of the Ethernet link.
-After recording, frames are downloaded over Ethernet at ~15 fps.
+full sensor speed (up to 3100 fps at full frame), independent of the
+Ethernet link. After recording, frames are downloaded over Ethernet.
 """
 
-import time
 import numpy as np
 from pyTelops import Camera
-from pyTelops.registers import MemoryBufferMOISource
 
 with Camera() as cam:
-    # --- Configure buffer ---
+    cam.frame_rate = 2000.0
+    cam.exposure_auto = "continuous"
+
+    # --- Configure buffer: 1 sequence, 5 seconds ---
     cam.buffer_configure(
         n_sequences=1,
-        frames_per_seq=100,
-        pre_moi=20,  # keep 20 frames before trigger
-        moi_source=MemoryBufferMOISource.SOFTWARE,
+        duration=5.0,           # uses current frame_rate
+        moi_source="software",
     )
-    print(f"Buffer status: {cam.buffer_status().name}")
+    print(cam.buffer_info())
 
-    # --- Arm and start recording ---
-    cam.buffer_arm()
-    print("Recording... (camera records to internal memory)")
-
-    # Simulate waiting for an event
-    time.sleep(1.0)
-
-    # --- Fire MOI trigger ---
-    cam.buffer_fire_moi()
-    print("MOI fired, waiting for recording to finish...")
-
-    # Wait for recording to complete
-    time.sleep(1.0)
-
-    # --- Check what was recorded ---
-    n_recorded = cam.buffer_recorded_frames(sequence=0)
-    print(f"Recorded {n_recorded} frames")
+    # --- Record ---
+    cam.buffer_record()
 
     # --- Download ---
     data = cam.buffer_download(sequence=0)

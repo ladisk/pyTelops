@@ -11,14 +11,14 @@ for cam in cameras:
 with Camera() as cam:
     print(cam.info)
 
-    # Set exposure and frame rate
-    cam.exposure = 50.0        # microseconds
-    cam.frame_rate = 100.0     # Hz
+    # Configure
+    cam.calibration_mode = "RT"
+    cam.exposure_auto = "continuous"
 
-    # Single frame
+    # Single frame (headers stripped automatically)
     frame = cam.grab()
     print(f"Frame: {frame.shape}, {frame.dtype}")
 
-    # Multiple frames
+    # Multiple frames via live streaming
     frames = cam.acquire(10)
     print(f"Batch: {frames.shape}")

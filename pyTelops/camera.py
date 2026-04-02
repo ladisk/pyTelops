@@ -573,10 +573,11 @@ class Camera:
             self.start_stream()
             self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
 
-        frame = self._gvsp.get_frame(timeout=timeout)
-
-        if not was_streaming:
-            self.stop_stream()
+        try:
+            frame = self._gvsp.get_frame(timeout=timeout)
+        finally:
+            if not was_streaming:
+                self.stop_stream()
 
         if frame is not None and strip_header:
             frame = self._strip_headers(frame)
@@ -601,18 +602,18 @@ class Camera:
             self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
 
         frames = []
-        deadline = time.monotonic() + timeout
-
-        for i in range(n_frames):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            result = self._gvsp.get_frame(timeout=remaining)
-            if result is not None:
-                frames.append(result)
-
-        if not was_streaming:
-            self.stop_stream()
+        try:
+            deadline = time.monotonic() + timeout
+            for i in range(n_frames):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                result = self._gvsp.get_frame(timeout=remaining)
+                if result is not None:
+                    frames.append(result)
+        finally:
+            if not was_streaming:
+                self.stop_stream()
 
         if not frames:
             return None
@@ -844,6 +845,7 @@ class Camera:
             TimeoutError: If not complete within timeout.
         """
         self._check_connected()
+        status = self.buffer_status()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status = self.buffer_status()
@@ -925,7 +927,8 @@ class Camera:
     # Address for download bitrate limit (Float, Mbps, max 1000)
     _REG_DOWNLOAD_BITRATE_MAX = 0xEAD4
 
-    def buffer_download(self, sequence: int = 0, start_frame: int = 0,
+    def buffer_download(self, sequence: int = 0,
+                        start_frame: Optional[int] = None,
                         n_frames: int = 0, timeout: float = 0,
                         bitrate_mbps: float = 1000.0,
                         packet_size: int = 1500,
@@ -936,12 +939,13 @@ class Camera:
 
         Args:
             sequence: Sequence index to download.
-            start_frame: Starting frame ID (0 = first recorded).
+            start_frame: Starting frame ID (None = first recorded).
             n_frames: Number of frames (0 = all recorded).
             timeout: Total timeout in seconds (0 = auto-calculate).
             bitrate_mbps: Max download bitrate in Mbps (default 1000).
-            packet_size: GVSP packet size in bytes (default 9000).
-                         If you get data loss, try 3000 or 1500.
+            packet_size: GVSP packet size in bytes (default 1500).
+                         Try 9000 for faster downloads if your network
+                         supports it.
             strip_header: Remove Telops metadata rows (default True).
             verbose: Show progress bar/messages (default True).
 
@@ -964,7 +968,7 @@ class Camera:
 
         first_frame_id = self._gvcp.read_reg(
             reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
-        if start_frame == 0:
+        if start_frame is None:
             start_frame = first_frame_id
 
         if timeout <= 0:
@@ -1031,7 +1035,6 @@ class Camera:
         frames = []
         t_start = time.monotonic()
         deadline = time.monotonic() + timeout
-        last_progress = t_start
 
         try:
             for i in range(n_frames):
@@ -1052,13 +1055,13 @@ class Camera:
                     else:
                         break
         finally:
+            if pbar:
+                pbar.close()
             try:
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
             except GVCPError:
                 pass
             time.sleep(0.2)
-            # Restore original bitrate before turning off download mode
-            # (register locks again when mode == OFF)
             if old_bitrate is not None:
                 try:
                     self._gvcp.write_float(self._REG_DOWNLOAD_BITRATE_MAX,
@@ -1070,7 +1073,6 @@ class Camera:
                                      reg.MemoryBufferDownloadMode.OFF)
             except GVCPError:
                 pass
-            # Restore packet size to standard MTU
             if old_pkt_size is not None:
                 try:
                     pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
@@ -1083,9 +1085,6 @@ class Camera:
             self._gvsp.resend_enabled = True
             self.stop_stream()
             gvsp_logger.setLevel(old_level)
-
-        if pbar:
-            pbar.close()
 
         elapsed = time.monotonic() - t_start
         if verbose and frames:

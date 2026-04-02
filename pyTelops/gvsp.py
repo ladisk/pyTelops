@@ -90,6 +90,13 @@ class _FrameBuffer:
         if not self.leader_received:
             return None
 
+        # Sanity check dimensions to prevent multi-GB allocation on corruption
+        MAX_PIXELS = 2048 * 2048
+        if self.width * self.height > MAX_PIXELS or self.width <= 0 or self.height <= 0:
+            logger.warning(f"Frame {self.block_id}: invalid dimensions "
+                           f"{self.width}x{self.height}, skipping")
+            return None
+
         sorted_ids = sorted(self.data_packets.keys())
         raw = b"".join(self.data_packets[pid] for pid in sorted_ids)
 
