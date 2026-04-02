@@ -1028,7 +1028,35 @@ class Camera:
         result = np.stack(frames)
         if strip_header:
             result = self._strip_headers(result)
+
+        if verbose:
+            self._download_diagnostics(result, n_frames)
+
         return result
+
+    @staticmethod
+    def _download_diagnostics(data: np.ndarray, expected: int) -> None:
+        """Print data integrity summary after download."""
+        n = data.shape[0]
+        frame_means = data.mean(axis=tuple(range(1, data.ndim)))
+        zero_frames = int(np.sum(frame_means == 0))
+        row_sums = data.reshape(n, data.shape[1], -1).sum(axis=2)
+        frames_with_zero_rows = int(np.sum(np.any(row_sums == 0, axis=1)))
+
+        issues = []
+        if n < expected:
+            issues.append(f"{expected - n} frames missing")
+        if zero_frames > 0:
+            issues.append(f"{zero_frames} blank frames")
+        if frames_with_zero_rows > 0:
+            issues.append(f"{frames_with_zero_rows} frames with zero rows")
+
+        if issues:
+            print(f"Data check: WARNING — {', '.join(issues)}")
+        else:
+            print(f"Data check: OK — {n} frames, "
+                  f"range [{data.min()}–{data.max()}], "
+                  f"mean {data.mean():.0f}")
 
     def buffer_clear(self) -> None:
         """Clear all sequences from the memory buffer."""
