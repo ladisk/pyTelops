@@ -20,7 +20,7 @@ Features
 --------
 
 - **Auto-discovery** — finds cameras on the network regardless of IP
-- **Live streaming** — real-time frame acquisition via GVSP (~49 fps)
+- **Live streaming** — real-time frame acquisition via GVSP (~49 fps at full resolution)
 - **Internal buffer** — record at full sensor speed (up to 3100 fps), download at ~270 fps
 - **Camera control** — exposure, frame rate, calibration mode, trigger, resolution
 - **String enums** — ``cam.calibration_mode = "RT"`` instead of importing enum classes
@@ -53,14 +53,11 @@ Quick start
    from pyTelops import Camera
 
    with Camera() as cam:
-       print(cam.info)
+       cam.exposure = 50.0              # microseconds
+       cam.calibration_mode = "RT"      # radiometric temperature
 
-       cam.exposure = 50.0       # microseconds
-       cam.frame_rate = 100.0    # Hz
-       cam.calibration_mode = "RT"  # radiometric temperature
-
-       frame = cam.grab()        # single frame -> numpy (H, W)
-       frames = cam.acquire(10)  # batch -> numpy (N, H, W)
+       frame = cam.grab()               # single frame -> numpy (H, W)
+       frames = cam.acquire(10)         # 10 frames -> numpy (N, H, W)
 
 Frames are returned as numpy arrays with Telops header rows already stripped.
 
@@ -69,12 +66,13 @@ Streaming vs buffer
 
 pyTelops supports two acquisition modes:
 
-**Live streaming** — frames stream directly to PC over Ethernet:
+**Live streaming** — frames stream directly to PC over Ethernet.
+Throughput depends on resolution; ~49 fps at full frame (320×256, ~8 MB/s):
 
 .. code-block:: python
 
    frame = cam.grab()             # single frame
-   frames = cam.acquire(100)      # 100 frames, limited by Ethernet (~49 fps)
+   frames = cam.acquire(100)      # 100 frames
 
 **Buffer recording** — the camera records to its internal 16 GB memory at full
 sensor speed (up to 3100 fps), then downloads to PC:
