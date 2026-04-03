@@ -204,6 +204,30 @@ Resolution  Int. time   Max FPS
 64x6        5 us        95,184
 ==========  ==========  =========
 
+Calibration
+-----------
+
+Each lens + temperature range has its own calibration data on the camera.
+Load lens/temperature info from the USB drive shipped with the camera:
+
+.. code-block:: python
+
+   cam.load_calibration_info("path/to/TEL-8050 Calibration Data/")
+   cam.calibration_collections()
+   # [{'index': 0, 'lens': 'MW Microscope 1X', 'temp_range': (0, 204), ...},
+   #  {'index': 4, 'lens': 'MW 25mm',          'temp_range': (0, 184), ...},
+   #  {'index': 8, 'lens': 'MW 50mm',          'temp_range': (0, 175), ...}, ...]
+
+   # Select by lens name + target temperature
+   cam.calibration_load(lens="50mm", temp=25)       # MW 50mm, 0-175 C range
+   cam.calibration_load(lens="25mm", temp=300)       # MW 25mm, 115-376 C range
+
+   # Or by index
+   cam.calibration_load(index=4)
+
+   # Check what's loaded
+   cam.calibration_active()
+
 Image correction (NUC)
 ----------------------
 
