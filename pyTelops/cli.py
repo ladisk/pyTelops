@@ -64,7 +64,8 @@ def cmd_grab(args):
     if output.endswith(".npy"):
         np.save(output, frame)
     elif output.endswith(".csv"):
-        np.savetxt(output, frame, delimiter=",", fmt="%d")
+        fmt = "%d" if frame.dtype == np.uint16 else "%.4f"
+        np.savetxt(output, frame, delimiter=",", fmt=fmt)
     else:
         np.save(output + ".npy", frame)
         output += ".npy"

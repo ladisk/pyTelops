@@ -291,7 +291,8 @@ class TestCalibrationConversion:
 
         result = cam._apply_calibration(frame)
         assert result.dtype == np.uint16  # no conversion
-        assert result[2, 0] == 5000  # unchanged, headers not stripped by apply_calibration when no conversion
+        assert result.shape == (2, width)  # headers stripped
+        assert result[0, 0] == 5000  # data unchanged
 
 
 class TestCalibrationParsing:

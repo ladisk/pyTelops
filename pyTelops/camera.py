@@ -475,6 +475,10 @@ class Camera:
     def _check_connected(self):
         if not self._connected:
             raise RuntimeError("Camera not connected. Call connect() first.")
+        if self._gvcp and self._gvcp._control_lost:
+            raise RuntimeError(
+                "Camera control was lost (another application took over). "
+                "Call disconnect() then connect() to re-establish.")
 
     def _check_ready(self):
         """If camera is not ready, auto-wait with a status line."""
@@ -881,7 +885,7 @@ class Camera:
             cal_mode = header_bytes[self._HDR_CAL_MODE]
 
             if data_exp == 0 and data_offset == 0:
-                return frame  # NUC/RAW — no conversion
+                return frame[self.HEADER_ROWS:, :]  # strip headers, no conversion
 
             data = frame[self.HEADER_ROWS:, :].astype(np.float32)
             data = data * (2.0 ** data_exp) + data_offset
@@ -1568,25 +1572,22 @@ class Camera:
             "block_timestamp": blk_dt,
         }
 
-        # Find matching collection index and add details
-        for idx, ci in self._calibration_info.items():
-            if ci.get("posix") == col_posix:
-                result["index"] = idx
-                if ci.get("lens"):
-                    result["lens"] = ci["lens"]
-                if ci.get("fw_pos") is not None:
-                    result["fw_position"] = ci["fw_pos"]
-                if ci.get("temp_range"):
-                    result["temp_range"] = ci["temp_range"]
-                break
+        # Match active collection to calibration info
+        if self._calibration_info:
+            active_posix = result.get("collection_posix")
+            for idx, info in self._calibration_info.items():
+                if info.get("posix") == active_posix:
+                    result["index"] = idx
+                    result["lens"] = info.get("lens")
+                    result["fw_position"] = info.get("fw_pos")
+                    result["temp_range"] = info.get("temp_range")
+                    break
 
-        if col_posix and col_posix in {ci.get("posix") for ci in self._calibration_info.values()}:
-            pass  # already matched above
-        elif col_posix:
-            # Check manual names by scanning collections
-            for idx, name in self._calibration_names.items():
-                result.setdefault("name", name)
-                break
+        # Manual names
+        if self._calibration_names:
+            idx = result.get("index")
+            if idx is not None and idx in self._calibration_names:
+                result["name"] = self._calibration_names[idx]
 
         return result
 
@@ -1617,6 +1618,8 @@ class Camera:
             duration: Recording duration per sequence in seconds.
                       Calculates frames_per_seq from current frame_rate.
             frames_per_seq: Frames per sequence slot (alternative to duration).
+                            If neither duration nor frames_per_seq is given,
+                            defaults to 100 frames.
             pre_moi: Frames to keep before the MOI trigger.
             moi_source: "software", "external", or "acquisition_started"
                         (or MemoryBufferMOISource enum).
@@ -2109,9 +2112,15 @@ class Camera:
         """Print data integrity summary after download."""
         n = data.shape[0]
         frame_means = data.mean(axis=tuple(range(1, data.ndim)))
-        zero_frames = int(np.sum(frame_means == 0))
+        if data.dtype == np.float32:
+            zero_frames = 0  # calibrated data — 0.0 is valid temperature
+        else:
+            zero_frames = int(np.sum(frame_means == 0))
         row_sums = data.reshape(n, data.shape[1], -1).sum(axis=2)
-        frames_with_zero_rows = int(np.sum(np.any(row_sums == 0, axis=1)))
+        if data.dtype == np.float32:
+            frames_with_zero_rows = 0  # calibrated data — 0.0 is valid
+        else:
+            frames_with_zero_rows = int(np.sum(np.any(row_sums == 0, axis=1)))
 
         issues = []
         if n < expected:

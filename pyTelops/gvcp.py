@@ -117,83 +117,85 @@ class GVCPClient:
             device_version, serial, user_name, spec_version.
         """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.settimeout(timeout)
-        if interface_ip:
-            sock.bind((interface_ip, 0))
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.settimeout(timeout)
+            if interface_ip:
+                sock.bind((interface_ip, 0))
 
-        pkt = struct.pack(">BBHHH", GVCP_KEY, FLAG_BROADCAST,
-                          CMD_DISCOVERY, 0, 0xFFFF)
+            pkt = struct.pack(">BBHHH", GVCP_KEY, FLAG_BROADCAST,
+                              CMD_DISCOVERY, 0, 0xFFFF)
 
-        # Send to broadcast addresses
-        for dest in ("255.255.255.255",):
-            try:
-                sock.sendto(pkt, (dest, GVCP_PORT))
-            except OSError:
-                pass
-        # Also try subnet broadcast if we have an interface IP
-        if interface_ip:
-            parts = interface_ip.split(".")
-            subnet_broadcast = f"{parts[0]}.{parts[1]}.255.255"
-            try:
-                sock.sendto(pkt, (subnet_broadcast, GVCP_PORT))
-            except OSError:
-                pass
+            # Send to broadcast addresses
+            for dest in ("255.255.255.255",):
+                try:
+                    sock.sendto(pkt, (dest, GVCP_PORT))
+                except OSError:
+                    pass
+            # Also try subnet broadcast if we have an interface IP
+            if interface_ip:
+                parts = interface_ip.split(".")
+                subnet_broadcast = f"{parts[0]}.{parts[1]}.255.255"
+                try:
+                    sock.sendto(pkt, (subnet_broadcast, GVCP_PORT))
+                except OSError:
+                    pass
 
-        cameras = []
-        seen_ips = set()
-        while True:
-            try:
-                data, addr = sock.recvfrom(4096)
-                if addr[0] in seen_ips:
-                    continue
-                seen_ips.add(addr[0])
+            cameras = []
+            seen_ips = set()
+            while True:
+                try:
+                    data, addr = sock.recvfrom(4096)
+                    if addr[0] in seen_ips:
+                        continue
+                    seen_ips.add(addr[0])
 
-                if len(data) < 256:
-                    continue
+                    if len(data) < 256:
+                        continue
 
-                # Parse discovery ACK payload (starts at byte 8)
-                payload = data[8:]
+                    # Parse discovery ACK payload (starts at byte 8)
+                    payload = data[8:]
 
-                def _str(offset, size):
-                    return payload[offset:offset + size].split(b"\x00")[0].decode(
-                        "ascii", errors="replace")
+                    def _str(offset, size):
+                        return payload[offset:offset + size].split(b"\x00")[0].decode(
+                            "ascii", errors="replace")
 
-                # Try extended format first (Telops: +24 bytes before strings)
-                # then fall back to standard offsets
-                mfr_ext = _str(72, 32)
-                mfr_std = _str(48, 32)
+                    # Try extended format first (Telops: +24 bytes before strings)
+                    # then fall back to standard offsets
+                    mfr_ext = _str(72, 32)
+                    mfr_std = _str(48, 32)
 
-                if mfr_ext and not mfr_std:
-                    # Extended discovery format
-                    cameras.append({
-                        "ip": addr[0],
-                        "spec_version": f"{struct.unpack('>H', payload[0:2])[0]}."
-                                        f"{struct.unpack('>H', payload[2:4])[0]}",
-                        "manufacturer": mfr_ext,
-                        "model": _str(104, 32),
-                        "device_version": _str(136, 32),
-                        "manufacturer_info": _str(168, 48),
-                        "serial": _str(216, 16),
-                        "user_name": _str(232, 16),
-                    })
-                else:
-                    # Standard discovery format
-                    cameras.append({
-                        "ip": addr[0],
-                        "spec_version": f"{struct.unpack('>H', payload[0:2])[0]}."
-                                        f"{struct.unpack('>H', payload[2:4])[0]}",
-                        "manufacturer": mfr_std,
-                        "model": _str(80, 32),
-                        "device_version": _str(112, 32),
-                        "manufacturer_info": _str(144, 48),
-                        "serial": _str(192, 16),
-                        "user_name": _str(208, 16),
-                    })
-            except socket.timeout:
-                break
+                    if mfr_ext and not mfr_std:
+                        # Extended discovery format
+                        cameras.append({
+                            "ip": addr[0],
+                            "spec_version": f"{struct.unpack('>H', payload[0:2])[0]}."
+                                            f"{struct.unpack('>H', payload[2:4])[0]}",
+                            "manufacturer": mfr_ext,
+                            "model": _str(104, 32),
+                            "device_version": _str(136, 32),
+                            "manufacturer_info": _str(168, 48),
+                            "serial": _str(216, 16),
+                            "user_name": _str(232, 16),
+                        })
+                    else:
+                        # Standard discovery format
+                        cameras.append({
+                            "ip": addr[0],
+                            "spec_version": f"{struct.unpack('>H', payload[0:2])[0]}."
+                                            f"{struct.unpack('>H', payload[2:4])[0]}",
+                            "manufacturer": mfr_std,
+                            "model": _str(80, 32),
+                            "device_version": _str(112, 32),
+                            "manufacturer_info": _str(144, 48),
+                            "serial": _str(192, 16),
+                            "user_name": _str(208, 16),
+                        })
+                except socket.timeout:
+                    break
+        finally:
+            sock.close()
 
-        sock.close()
         return cameras
 
     # --- Connection ---

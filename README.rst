@@ -129,7 +129,7 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
 
    Downloading: 100%|██████████| 10000/10000 [00:36<00:00, 271.84frame/s]
    Downloaded 10000 frames in 36.8s (271 fps, 44.8 MB/s)
-   Data check: OK — 10000 frames, range [6908–65534], mean 8671
+   Data check: OK — 10000 frames, range [24.9–36.2], mean 28.1
 
 External trigger
 ----------------
@@ -148,6 +148,15 @@ For triggered recording from an external BNC signal:
        cam.buffer_arm()                  # arm and wait for trigger
        cam.buffer_wait(timeout=60.0)     # blocks until recording completes
        data = cam.buffer_download()
+
+For manual control with software MOI (instead of ``buffer_record()``):
+
+.. code-block:: python
+
+   cam.buffer_arm()                      # arm the buffer
+   cam.buffer_fire_moi()                 # software MOI trigger
+   cam.buffer_wait(timeout=30.0)         # wait for recording to finish
+   data = cam.buffer_download()
 
 Camera configuration
 --------------------
@@ -173,7 +182,11 @@ All settings are properties with string enum support:
    cam.trigger_frame_count = 10          # frames per trigger event
    cam.temperature                       # sensor temperature in Celsius
    cam.info                              # dict with all settings
-   cam.state                             # "disconnected", "connected", "streaming"
+   cam.state                             # "disconnected", "connected", "streaming", "standby", "not_ready", "error"
+
+In RT mode, ``grab()``, ``acquire()``, and ``buffer_download()`` automatically
+convert to Celsius (float32). Use ``convert=False`` for raw uint16 values.
+Header rows are stripped by default (``strip_header=True``).
 
 Resolution / subwindow
 ----------------------
