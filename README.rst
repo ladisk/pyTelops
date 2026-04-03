@@ -23,22 +23,11 @@ Features
 --------
 
 - **Auto-discovery** — finds cameras on the network regardless of IP
-- **Live streaming** — real-time frame acquisition via GVSP (up to ~760 fps at full resolution)
-- **Internal buffer** — record at full sensor speed (up to 3100 fps at full frame), download at ~270 fps
-- **Camera control** — integration time, frame rate, calibration mode, trigger, resolution
-- **NUC trigger** — programmatic non-uniformity correction
-- **Diagnostics** — 13 temperature sensors, voltage, current, uptime counters
-- **Time sync** — synchronize camera clock, GEV timestamps
+- **High-speed buffer** — record up to 95k fps, download at ~270 fps
+- **Live streaming** — real-time frame acquisition (up to ~760 fps at full resolution)
 - **Subwindow** — configurable resolution for higher frame rates
-- **Bad pixel replacement** — enabled by default
-- **String enums** — ``cam.calibration_mode = "RT"`` instead of importing enum classes
-- **Auto header stripping** — frames are returned without Telops metadata rows
-- **GUI viewer** — live thermal image display with colormap selection
-- **CLI tools** — ``pytelops discover``, ``pytelops setup``, ``pytelops grab``, ``pytelops live``
-- **Progress bars** — tqdm progress for buffer downloads
-- **Data integrity checks** — automatic diagnostics after download
-- **Robust connection** — auto-recovers from stale sessions, handles ACCESS_DENIED
-- **Pure Python** — only requires numpy and tqdm
+- **Diagnostics** — 13 temperature sensors, NUC trigger, timestamps, voltage/current
+- **GUI viewer & CLI** — live thermal display, ``pytelops discover / grab / live``
 
 Installation
 ------------
@@ -289,6 +278,9 @@ CLI
 
 Network setup
 -------------
+
+The driver auto-recovers from stale sessions (e.g., after a crash or kernel restart)
+and auto-waits if the camera is cooling down.
 
 GigE Vision requires a firewall rule to allow inbound UDP from the camera:
 
