@@ -840,7 +840,7 @@ class Camera:
     # Frame Acquisition
     # ==========================================================
 
-    # RT mode outputs centi-Kelvin as uint16 (e.g., 29315 = 293.15 K = 20 C)
+    # RT mode outputs centi-Celsius as uint16 (e.g., 7051 = 70.51 C)
     RT_SCALE = 100.0
 
     def _strip_headers(self, arr: np.ndarray) -> np.ndarray:
@@ -853,8 +853,8 @@ class Camera:
             return arr[:, self.HEADER_ROWS:, :]
         return arr
 
-    def _to_kelvin(self, arr: np.ndarray) -> np.ndarray:
-        """Convert RT mode centi-Kelvin uint16 to Kelvin float32."""
+    def _to_celsius(self, arr: np.ndarray) -> np.ndarray:
+        """Convert RT mode centi-Celsius uint16 to Celsius float32."""
         return arr.astype(np.float32) / self.RT_SCALE
 
     def _is_rt_mode(self) -> bool:
@@ -874,11 +874,11 @@ class Camera:
         Args:
             timeout: Seconds to wait for a frame.
             strip_header: Remove Telops metadata rows (default True).
-            convert: Convert to Kelvin in RT mode (default True).
+            convert: Convert to Celsius in RT mode (default True).
                      Set False for raw uint16 values.
 
         Returns:
-            2D numpy array (H, W). Float32 Kelvin in RT mode,
+            2D numpy array (H, W). Float32 Celsius in RT mode,
             uint16 raw counts otherwise. None on timeout.
         """
         self._check_ready()
@@ -897,7 +897,7 @@ class Camera:
             if strip_header:
                 frame = self._strip_headers(frame)
             if convert and self._is_rt_mode():
-                frame = self._to_kelvin(frame)
+                frame = self._to_celsius(frame)
         return frame
 
     def acquire(self, n_frames: int, timeout: float = 30.0,
@@ -909,11 +909,11 @@ class Camera:
             n_frames: Number of frames to capture.
             timeout: Total timeout in seconds.
             strip_header: Remove Telops metadata rows (default True).
-            convert: Convert to Kelvin in RT mode (default True).
+            convert: Convert to Celsius in RT mode (default True).
 
         Returns:
             3D numpy array (N, H, W) or None if no frames captured.
-            Float32 Kelvin in RT mode, uint16 raw counts otherwise.
+            Float32 Celsius in RT mode, uint16 raw counts otherwise.
         """
         self._check_ready()
         was_streaming = self._streaming
@@ -941,7 +941,7 @@ class Camera:
         if strip_header:
             result = self._strip_headers(result)
         if convert and self._is_rt_mode():
-            result = self._to_kelvin(result)
+            result = self._to_celsius(result)
         return result
 
     # ==========================================================
@@ -1899,7 +1899,7 @@ class Camera:
                          Try 9000 for faster downloads if your network
                          supports it.
             strip_header: Remove Telops metadata rows (default True).
-            convert: Convert to Kelvin in RT mode (default True).
+            convert: Convert to Celsius in RT mode (default True).
             verbose: Show progress bar/messages (default True).
 
         Returns:
@@ -2060,7 +2060,7 @@ class Camera:
         if strip_header:
             result = self._strip_headers(result)
         if convert and self._is_rt_mode():
-            result = self._to_kelvin(result)
+            result = self._to_celsius(result)
 
         if verbose:
             self._download_diagnostics(result, n_frames)

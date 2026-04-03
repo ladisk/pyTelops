@@ -251,3 +251,86 @@ class TestResolutionValidation:
     def test_minimum_valid_resolution(self):
         cam = Camera()
         assert cam._validate_resolution(64, 6) == (64, 6)
+
+
+class TestCelsiusConversion:
+    """Test _to_celsius centi-Celsius -> Celsius conversion."""
+
+    def test_to_celsius(self):
+        cam = Camera()
+        arr = np.array([[2050, 7051], [10000, 500]], dtype=np.uint16)
+        result = cam._to_celsius(arr)
+        assert result.dtype == np.float32
+        np.testing.assert_allclose(result[0, 0], 20.50, atol=0.01)
+        np.testing.assert_allclose(result[0, 1], 70.51, atol=0.01)
+
+    def test_to_celsius_3d(self):
+        cam = Camera()
+        arr = np.array([[[2500]]], dtype=np.uint16)
+        result = cam._to_celsius(arr)
+        assert result.shape == (1, 1, 1)
+        np.testing.assert_allclose(result[0, 0, 0], 25.0, atol=0.01)
+
+
+class TestCalibrationParsing:
+    """Test load_calibration_info with mock files (no camera needed)."""
+
+    def test_parse_old_format_filename(self, tmp_path):
+        """Old format: TEL08050_TIMESTAMP_EL_MF_FW_IM_SWD.tsco"""
+        (tmp_path / "TEL08050_1625592710_EL08887_MF08573_FW0_IM0_SWD0.tsco").touch()
+        cam = Camera()
+        cam.load_calibration_info(str(tmp_path))
+        # Should parse without error; file info stored for later matching
+        assert hasattr(cam, "_calibration_file_info")
+        assert 1625592710 in cam._calibration_file_info
+
+    def test_parse_new_format_filename(self, tmp_path):
+        """New format: TEL08050_EL_MF_FW_IM_SWD_TIMESTAMP.tsco"""
+        (tmp_path / "TEL08050_EL07938_MF08575_FW0_IM0_SWD0_1741261960.tsco").touch()
+        cam = Camera()
+        cam.load_calibration_info(str(tmp_path))
+        assert hasattr(cam, "_calibration_file_info")
+        assert 1741261960 in cam._calibration_file_info
+
+    def test_parse_exposure_time_file(self, tmp_path):
+        """Exposure time file provides lens name and temp range."""
+        # Create .tsco
+        (tmp_path / "TEL08050_1625592710_EL08887_MF08573_FW0_IM0_SWD0.tsco").touch()
+        # Create exposure time dir and file (FW1 = FW0 in .tsco)
+        et_dir = tmp_path / "estimated_ExposureTimes"
+        et_dir.mkdir()
+        (et_dir / "estimated_ExposureTime_ELSN08887_MF08573_FW1_IM0.txt").write_text(
+            '% Camera model TEL-8050 - lens "MW 50mm" model TEL-8887 - filter wheel position #1\n'
+            '% column #1: temp\n'
+            '0.0;22.7;180.4;370.3\n'
+            '175.0;3.5;27.6;56.7\n'
+        )
+        cam = Camera()
+        cam.load_calibration_info(str(tmp_path))
+        # Lens info should be parsed and merged into tsco records
+        assert hasattr(cam, "_calibration_lens_info")
+        assert len(cam._calibration_lens_info) == 1
+        # Check lens name was parsed from header
+        key = list(cam._calibration_lens_info.keys())[0]
+        assert cam._calibration_lens_info[key]["lens"] == "MW 50mm"
+        # Check temp range was parsed from data rows
+        assert cam._calibration_lens_info[key]["temp_min"] == 0.0
+        assert cam._calibration_lens_info[key]["temp_max"] == 175.0
+
+    def test_nonexistent_path_raises(self):
+        cam = Camera()
+        with pytest.raises(FileNotFoundError):
+            cam.load_calibration_info("/nonexistent/path")
+
+    def test_empty_dir(self, tmp_path):
+        cam = Camera()
+        cam.load_calibration_info(str(tmp_path))
+        # Should not crash; no files parsed
+        assert hasattr(cam, "_calibration_file_info")
+        assert len(cam._calibration_file_info) == 0
+
+    def test_calibration_names_manual(self):
+        cam = Camera()
+        cam.calibration_names = {0: "MW 50mm FW0", 4: "MW 25mm FW0"}
+        assert cam.calibration_names[0] == "MW 50mm FW0"
+        assert cam.calibration_names[4] == "MW 25mm FW0"

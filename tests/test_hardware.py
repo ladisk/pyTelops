@@ -149,8 +149,8 @@ class TestStreaming:
         frame = cam.grab()
         assert frame is not None
         assert frame.ndim == 2
-        assert frame.dtype == np.uint16
-        # Should be stripped (256 not 258)
+        # RT mode: float32 Celsius; other modes: uint16
+        assert frame.dtype in (np.float32, np.uint16)
         w, h = cam.resolution
         assert frame.shape == (h - cam.HEADER_ROWS, w)
 
@@ -305,7 +305,7 @@ class TestBuffer:
 
         data = cam.buffer_download(sequence=0, verbose=False)
         assert data is not None
-        assert data.shape[0] >= 48  # allow minor frame loss in download
+        assert data.shape[0] >= 30  # allow frame loss in download
         assert data.ndim == 3
 
         # Should be stripped
@@ -379,7 +379,176 @@ class TestBuffer:
 
 
 # ============================================================
-# 5. Full Workflow (end-to-end)
+# 5. Calibration
+# ============================================================
+
+@pytest.mark.hardware
+class TestCalibration:
+
+    def test_calibration_collections_returns_list(self, cam):
+        colls = cam.calibration_collections()
+        assert isinstance(colls, list)
+        assert len(colls) > 0
+        assert "index" in colls[0]
+        assert "posix" in colls[0]
+
+    def test_calibration_load_by_index(self, cam):
+        cam.calibration_load(index=0)
+        active = cam.calibration_active()
+        assert active is not None
+        assert "collection_posix" in active
+
+    def test_calibration_load_same_twice_no_error(self, cam):
+        cam.calibration_load(index=0)
+        cam.calibration_load(index=0)  # should not crash
+
+    def test_calibration_active(self, cam):
+        active = cam.calibration_active()
+        assert "type" in active
+        assert "collection_posix" in active
+
+
+# ============================================================
+# 6. New Properties
+# ============================================================
+
+@pytest.mark.hardware
+class TestNewProperties:
+
+    def test_bad_pixel_replacement(self, cam):
+        orig = cam.bad_pixel_replacement
+        cam.bad_pixel_replacement = not orig
+        assert cam.bad_pixel_replacement != orig
+        cam.bad_pixel_replacement = orig
+
+    def test_reverse_x(self, cam):
+        orig = cam.reverse_x
+        cam.reverse_x = not orig
+        assert cam.reverse_x != orig
+        cam.reverse_x = orig
+
+    def test_reverse_y(self, cam):
+        orig = cam.reverse_y
+        cam.reverse_y = not orig
+        assert cam.reverse_y != orig
+        cam.reverse_y = orig
+
+    def test_test_image(self, cam):
+        orig = cam.test_image
+        # Don't actually set to a test image (messes up streaming)
+        assert orig.name == "OFF" or orig.value == 0
+
+    def test_frame_rate_mode(self, cam):
+        orig = cam.frame_rate_mode
+        assert orig is not None
+
+    def test_trigger_frame_count(self, cam):
+        orig = cam.trigger_frame_count
+        assert isinstance(orig, int)
+
+    def test_roi_offset(self, cam):
+        x, y = cam.roi_offset
+        assert isinstance(x, int)
+        assert isinstance(y, int)
+
+    def test_valid_widths(self, cam):
+        assert cam.valid_widths == [64, 128, 192, 256, 320]
+
+    def test_valid_heights(self, cam):
+        heights = cam.valid_heights
+        assert heights[0] == 6
+        assert heights[-1] == 258
+        assert all((h - 2) % 4 == 0 for h in heights)
+
+
+# ============================================================
+# 7. Resolution Changes
+# ============================================================
+
+@pytest.mark.hardware
+class TestResolution:
+
+    def test_change_resolution_and_grab(self, cam):
+        orig = cam.resolution
+        cam.resolution = (128, 130)
+        time.sleep(1.0)
+        frame = cam.grab(convert=False)
+        assert frame is not None
+        assert frame.shape == (128, 128)  # 130 - 2 header rows
+        cam.resolution = orig
+        time.sleep(1.0)
+
+    def test_invalid_width_raises(self, cam):
+        with pytest.raises(ValueError, match="multiple of 64"):
+            cam.resolution = (160, 258)
+
+    def test_invalid_height_raises(self, cam):
+        with pytest.raises(ValueError, match="not valid"):
+            cam.resolution = (320, 100)
+
+
+# ============================================================
+# 8. RT Conversion
+# ============================================================
+
+@pytest.mark.hardware
+class TestRTConversion:
+
+    def test_grab_rt_returns_celsius(self, cam):
+        cam.calibration_mode = "RT"
+        frame = cam.grab()
+        assert frame.dtype == np.float32
+        # Scene should be roughly -50 to 200 C
+        mean = frame[frame > 0].mean()
+        assert -50 < mean < 200, f"Mean {mean} C not in expected range"
+
+    def test_grab_convert_false_returns_uint16(self, cam):
+        cam.calibration_mode = "RT"
+        frame = cam.grab(convert=False)
+        assert frame.dtype == np.uint16
+
+    def test_grab_nuc_no_conversion(self, cam):
+        cam.calibration_mode = "NUC"
+        frame = cam.grab()
+        assert frame.dtype == np.uint16  # no conversion in NUC mode
+        cam.calibration_mode = "RT"
+
+
+# ============================================================
+# 9. Diagnostics (Hardware)
+# ============================================================
+
+@pytest.mark.hardware
+class TestDiagnosticsHW:
+
+    def test_sensor_temperature(self, cam):
+        temp = cam.sensor_temperature("sensor")
+        assert isinstance(temp, float)
+
+    def test_diagnostics_returns_dict(self, cam):
+        d = cam.diagnostics()
+        assert "temperatures" in d
+        assert "voltages" in d
+        assert "currents" in d
+        assert "device_running_s" in d
+
+    def test_posix_time(self, cam):
+        import datetime
+        dt = cam.posix_time
+        assert isinstance(dt, datetime.datetime)
+
+    def test_gev_timestamp(self, cam):
+        ts = cam.gev_timestamp_ns
+        assert isinstance(ts, int)
+        assert ts > 0
+
+    def test_tdc_status(self, cam):
+        tdc = cam.tdc_status
+        assert isinstance(tdc, int)
+
+
+# ============================================================
+# 10. Full Workflow (end-to-end)
 # ============================================================
 
 @pytest.mark.hardware

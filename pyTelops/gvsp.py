@@ -417,7 +417,7 @@ class GVSPReceiver:
         now = time.monotonic()
         to_remove = []
 
-        for block_id, buf in self._frame_buffers.items():
+        for block_id, buf in list(self._frame_buffers.items()):
             age = now - buf.created_at
             since_last = now - buf.last_packet_at
 
