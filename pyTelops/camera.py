@@ -13,6 +13,8 @@ Usage:
         frame = cam.grab()
 """
 
+import os
+import re
 import socket
 import struct
 import time
@@ -225,6 +227,8 @@ class Camera:
         self._connected = False
         self._buffer_n_sequences = 1
         self._buffer_next_sequence = 0
+        self._calibration_info: dict = {}
+        self._calibration_names: dict = {}
 
     def __repr__(self) -> str:
         status = "connected" if self._connected else "disconnected"
@@ -1112,6 +1116,436 @@ class Camera:
         if freq == 0:
             return ticks
         return int(ticks * 1_000_000_000 / freq)
+
+    # ==========================================================
+    # Calibration
+    # ==========================================================
+
+    @property
+    def calibration_names(self) -> dict:
+        """Manual name mapping {index: name} for calibration collections.
+
+        Allows assigning human-readable names to collections without
+        needing the USB calibration data directory.
+
+        Examples:
+            cam.calibration_names = {0: "MW 50mm FW1", 3: "Microscope FW2"}
+        """
+        return self._calibration_names
+
+    @calibration_names.setter
+    def calibration_names(self, names: dict):
+        self._calibration_names = names
+
+    def load_calibration_info(self, path: str) -> None:
+        """Load calibration metadata from USB calibration data directory.
+
+        Parses filenames and exposure time files to map camera collection
+        indices to lens names, filter wheel positions, and temperature ranges.
+
+        This method only reads files and does not require a camera connection.
+        After calling this, ``calibration_collections()`` and
+        ``calibration_load(lens=..., temp=...)`` will include lens/temp info.
+
+        Args:
+            path: Path to the calibration data directory
+                  (e.g., "TEL-8050 Calibration Data/").
+
+        Raises:
+            FileNotFoundError: If the path does not exist.
+        """
+        path = os.path.normpath(path)
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"Calibration directory not found: {path}")
+
+        # --- Step 1: Parse .tsco filenames to build POSIX -> file info map ---
+        # Two filename formats:
+        #   Old: TEL08050_TIMESTAMP_ELXXXXX_MFXXXXX_FWn_IMn_SWDn.tsco
+        #   New: TEL08050_ELXXXXX_MFXXXXX_FWn_IMn_SWDn_TIMESTAMP.tsco
+        tsco_by_posix: dict[int, dict] = {}
+        tsco_by_key: dict[str, dict] = {}
+
+        for fname in os.listdir(path):
+            if not fname.lower().endswith(".tsco"):
+                continue
+
+            parts = fname[:-5].split("_")  # strip .tsco, split on _
+            if len(parts) < 6:
+                continue
+
+            # Detect format by checking if parts[1] is a pure digit timestamp
+            if parts[1].isdigit() and len(parts[1]) >= 9:
+                # Old format: TEL08050_TIMESTAMP_EL_MF_FW_IM_SWD
+                posix_ts = int(parts[1])
+                remaining = parts[2:]
+            elif parts[-1].isdigit() and len(parts[-1]) >= 9:
+                # New format: TEL08050_EL_MF_FW_IM_SWD_TIMESTAMP
+                posix_ts = int(parts[-1])
+                remaining = parts[1:-1]
+            else:
+                continue
+
+            # Extract EL, MF, FW from remaining parts
+            info = {"posix": posix_ts, "filename": fname}
+            for p in remaining:
+                if p.upper().startswith("EL"):
+                    info["el"] = p
+                elif p.upper().startswith("MF"):
+                    info["mf"] = p
+                elif p.upper().startswith("FW"):
+                    info["fw"] = p
+                    try:
+                        info["fw_pos"] = int(p[2:])
+                    except ValueError:
+                        pass
+                elif p.upper().startswith("IM"):
+                    info["im"] = p
+                elif p.upper().startswith("SWD"):
+                    info["swd"] = p
+
+            tsco_by_posix[posix_ts] = info
+
+            # Build a lookup key from EL + FW for matching with exposure files
+            el = info.get("el", "")
+            fw = info.get("fw", "")
+            key = f"{el}_{fw}".upper()
+            tsco_by_key.setdefault(key, []).append(info)
+
+        # --- Step 2: Parse estimated_ExposureTimes/*.txt for lens + temp ---
+        et_dir = os.path.join(path, "estimated_ExposureTimes")
+        lens_info: dict[str, dict] = {}  # key -> {lens_name, fw_pos, temp_min, temp_max}
+
+        if os.path.isdir(et_dir):
+            for fname in os.listdir(et_dir):
+                if not fname.endswith(".txt"):
+                    continue
+                fpath = os.path.join(et_dir, fname)
+                with open(fpath, encoding="utf-8", errors="replace") as f:
+                    header = f.readline()
+
+                    # Extract lens name: lens "MW 50mm"
+                    m = re.search(r'lens "([^"]+)"', header)
+                    lens_name = m.group(1) if m else None
+
+                    # Extract FW position: filter wheel position #1
+                    m = re.search(r'filter wheel position #(\d+)', header)
+                    fw_pos = int(m.group(1)) if m else None
+
+                    # Get temp range from data rows (first column, semicolon-separated)
+                    lines = [line for line in f
+                             if not line.startswith('%') and line.strip()]
+                    temp_min = temp_max = None
+                    if lines:
+                        try:
+                            temp_min = float(lines[0].split(';')[0])
+                            temp_max = float(lines[-1].split(';')[0])
+                        except (ValueError, IndexError):
+                            pass
+
+                # Extract EL/FW from exposure filename for matching
+                # Exposure files use "ELSN08887" while .tsco uses "EL08887"
+                eparts = fname[:-4].split("_")
+                el_et = ""
+                fw_et = ""
+                for p in eparts:
+                    pu = p.upper()
+                    if pu.startswith("ELSN"):
+                        el_et = "EL" + p[4:]  # normalize ELSN -> EL
+                    elif pu.startswith("EL"):
+                        el_et = p
+                    elif pu.startswith("FW"):
+                        # Exposure files are 1-indexed (FW1-FW4),
+                        # .tsco files are 0-indexed (FW0-FW3)
+                        try:
+                            fw_num = int(p[2:]) - 1  # convert to 0-indexed
+                            fw_et = f"FW{fw_num}"
+                        except ValueError:
+                            fw_et = p
+
+                key = f"{el_et}_{fw_et}".upper()
+                lens_info[key] = {
+                    "lens": lens_name,
+                    "fw_pos": fw_pos,
+                    "temp_min": temp_min,
+                    "temp_max": temp_max,
+                }
+
+        # --- Step 3: Merge lens info into tsco records ---
+        for key, info_list in tsco_by_key.items():
+            li = lens_info.get(key)
+            if li is None:
+                continue
+            for info in info_list:
+                info["lens"] = li["lens"]
+                if li["temp_min"] is not None:
+                    info["temp_range"] = (li["temp_min"], li["temp_max"])
+
+        # --- Step 4: Map POSIX timestamps to camera collection indices ---
+        # Read collection count and timestamps from camera if connected,
+        # otherwise store the file-based info for later matching.
+        if self._connected:
+            n_collections = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_COUNT)
+            cal_info = {}
+            for i in range(n_collections):
+                self._gvcp.write_reg(reg.REG_CAL_COLLECTION_SELECTOR, i)
+                posix_ts = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_POSIX)
+                entry = {"index": i, "posix": posix_ts}
+
+                # Match by POSIX timestamp
+                tsco = tsco_by_posix.get(posix_ts)
+                if tsco:
+                    entry["lens"] = tsco.get("lens")
+                    entry["fw_pos"] = tsco.get("fw_pos")
+                    entry["temp_range"] = tsco.get("temp_range")
+                    entry["filename"] = tsco.get("filename")
+
+                cal_info[i] = entry
+
+            self._calibration_info = cal_info
+        else:
+            # Store raw file info; will be matched when camera connects
+            self._calibration_file_info = tsco_by_posix
+            self._calibration_lens_info = lens_info
+            self._calibration_tsco_by_key = tsco_by_key
+
+        print(f"Loaded calibration info: {len(tsco_by_posix)} .tsco files, "
+              f"{len(lens_info)} exposure time files from {path}")
+
+    def calibration_collections(self) -> list[dict]:
+        """List all calibration collections on the camera.
+
+        Returns list of dicts with keys: ``index``, ``timestamp``, ``type``,
+        ``blocks``, and optionally: ``lens``, ``fw_position``, ``temp_range``
+        (if ``load_calibration_info`` was called), ``name``
+        (if ``calibration_names`` was set).
+
+        Returns:
+            List of dicts, one per calibration collection.
+        """
+        self._check_connected()
+        import datetime
+
+        n = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_COUNT)
+        collections = []
+
+        for i in range(n):
+            self._gvcp.write_reg(reg.REG_CAL_COLLECTION_SELECTOR, i)
+            posix_ts = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_POSIX)
+            cal_type = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_TYPE)
+            block_count = self._gvcp.read_reg(reg.REG_CAL_BLOCK_COUNT)
+
+            dt = datetime.datetime.fromtimestamp(
+                posix_ts, tz=datetime.timezone.utc)
+
+            entry = {
+                "index": i,
+                "timestamp": dt,
+                "posix": posix_ts,
+                "type": reg.CalibrationCollectionType(cal_type).name
+                        if cal_type in reg.CalibrationCollectionType.__members__.values()
+                        else cal_type,
+                "blocks": block_count,
+            }
+
+            # Add info from load_calibration_info if available
+            if i in self._calibration_info:
+                ci = self._calibration_info[i]
+                if ci.get("lens"):
+                    entry["lens"] = ci["lens"]
+                if ci.get("fw_pos") is not None:
+                    entry["fw_position"] = ci["fw_pos"]
+                if ci.get("temp_range"):
+                    entry["temp_range"] = ci["temp_range"]
+
+            # Add manual name if set
+            if i in self._calibration_names:
+                entry["name"] = self._calibration_names[i]
+
+            collections.append(entry)
+
+        return collections
+
+    def calibration_load(self, index: int = None, lens: str = None,
+                         temp: float = None) -> dict:
+        """Load a calibration collection and its first block.
+
+        Specify by ``index``, or by ``lens`` name + target ``temp`` to
+        auto-select the matching collection.
+
+        Args:
+            index: Collection index (0-based).
+            lens: Lens name substring (e.g., "50mm", "microscope").
+                  Combined with ``temp`` to find the right collection.
+            temp: Target temperature in Celsius. Selects the collection
+                  whose temperature range includes this value.
+
+        Returns:
+            Dict with loaded collection info.
+
+        Raises:
+            ValueError: If no matching collection is found, or if neither
+                        ``index`` nor ``lens``+``temp`` is provided.
+
+        Examples:
+            cam.calibration_load(index=4)
+            cam.calibration_load(lens="50mm", temp=25)
+            cam.calibration_load(lens="microscope", temp=300)
+        """
+        self._check_connected()
+
+        if index is not None:
+            pass  # use directly
+        elif lens is not None:
+            if not self._calibration_info:
+                raise ValueError(
+                    "No calibration info loaded. Call load_calibration_info() "
+                    "first, or use index= to specify by collection index.")
+
+            # Search for matching lens + temp range
+            candidates = []
+            lens_lower = lens.lower()
+            for idx, ci in self._calibration_info.items():
+                ci_lens = ci.get("lens")
+                if ci_lens is None:
+                    continue
+                if lens_lower not in ci_lens.lower():
+                    continue
+
+                if temp is not None and ci.get("temp_range"):
+                    t_min, t_max = ci["temp_range"]
+                    if t_min <= temp <= t_max:
+                        candidates.append((idx, ci, t_max - t_min))
+                elif temp is None:
+                    candidates.append((idx, ci, float('inf')))
+
+            if not candidates:
+                # Build helpful error message
+                available = []
+                for idx, ci in self._calibration_info.items():
+                    ci_lens = ci.get("lens", "unknown")
+                    tr = ci.get("temp_range")
+                    tr_str = f" ({tr[0]:.0f}-{tr[1]:.0f} C)" if tr else ""
+                    available.append(f"  [{idx}] {ci_lens}{tr_str}")
+                avail_str = "\n".join(available) if available else "  (none)"
+                raise ValueError(
+                    f"No calibration collection matches lens={lens!r}, "
+                    f"temp={temp}.\nAvailable:\n{avail_str}")
+
+            # Prefer narrowest temperature range
+            candidates.sort(key=lambda x: x[2])
+            index = candidates[0][0]
+        else:
+            raise ValueError(
+                "Specify index= or lens= (with optional temp=)")
+
+        # --- Load the collection ---
+        self._gvcp.write_reg(reg.REG_CAL_COLLECTION_SELECTOR, index)
+        self._gvcp.write_reg(reg.REG_CAL_COLLECTION_LOAD, 1)
+        time.sleep(2.0)
+
+        # Load first block
+        self._gvcp.write_reg(reg.REG_CAL_BLOCK_SELECTOR, 0)
+        self._gvcp.write_reg(reg.REG_CAL_BLOCK_LOAD, 1)
+        time.sleep(2.0)
+
+        # Verify active POSIX matches what we selected
+        self._gvcp.write_reg(reg.REG_CAL_COLLECTION_SELECTOR, index)
+        expected_posix = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_POSIX)
+        active_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_POSIX)
+        if active_posix != expected_posix:
+            import warnings
+            warnings.warn(
+                f"Calibration load verification: active POSIX {active_posix} "
+                f"!= expected {expected_posix}. The camera may still be "
+                f"loading.", UserWarning, stacklevel=2)
+
+        # Build result info
+        result = {"index": index, "posix": expected_posix}
+
+        # Add details from calibration info
+        ci = self._calibration_info.get(index, {})
+        lens_name = ci.get("lens")
+        fw_pos = ci.get("fw_pos")
+        temp_range = ci.get("temp_range")
+
+        if lens_name:
+            result["lens"] = lens_name
+        if fw_pos is not None:
+            result["fw_position"] = fw_pos
+        if temp_range:
+            result["temp_range"] = temp_range
+
+        # Add manual name if set
+        if index in self._calibration_names:
+            result["name"] = self._calibration_names[index]
+
+        # Print summary
+        desc_parts = []
+        if lens_name:
+            desc_parts.append(lens_name)
+        elif index in self._calibration_names:
+            desc_parts.append(self._calibration_names[index])
+        else:
+            desc_parts.append(f"Collection {index}")
+        if fw_pos is not None:
+            desc_parts.append(f"FW{fw_pos}")
+        if temp_range:
+            desc_parts.append(f"({temp_range[0]:.0f}-{temp_range[1]:.0f} C)")
+
+        print(f"Loaded: {' '.join(desc_parts)}")
+
+        return result
+
+    def calibration_active(self) -> dict:
+        """Currently loaded calibration collection and block.
+
+        Returns:
+            Dict with keys: ``type``, ``collection_posix``,
+            ``collection_timestamp``, ``block_posix``, ``block_timestamp``.
+        """
+        self._check_connected()
+        import datetime
+
+        cal_type = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_TYPE)
+        col_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_POSIX)
+        blk_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_BLOCK_POSIX)
+
+        col_dt = datetime.datetime.fromtimestamp(
+            col_posix, tz=datetime.timezone.utc) if col_posix else None
+        blk_dt = datetime.datetime.fromtimestamp(
+            blk_posix, tz=datetime.timezone.utc) if blk_posix else None
+
+        result = {
+            "type": reg.CalibrationCollectionType(cal_type).name
+                    if cal_type in reg.CalibrationCollectionType.__members__.values()
+                    else cal_type,
+            "collection_posix": col_posix,
+            "collection_timestamp": col_dt,
+            "block_posix": blk_posix,
+            "block_timestamp": blk_dt,
+        }
+
+        # Find matching collection index and add details
+        for idx, ci in self._calibration_info.items():
+            if ci.get("posix") == col_posix:
+                result["index"] = idx
+                if ci.get("lens"):
+                    result["lens"] = ci["lens"]
+                if ci.get("fw_pos") is not None:
+                    result["fw_position"] = ci["fw_pos"]
+                if ci.get("temp_range"):
+                    result["temp_range"] = ci["temp_range"]
+                break
+
+        if col_posix and col_posix in {ci.get("posix") for ci in self._calibration_info.values()}:
+            pass  # already matched above
+        elif col_posix:
+            # Check manual names by scanning collections
+            for idx, name in self._calibration_names.items():
+                result.setdefault("name", name)
+                break
+
+        return result
 
     # ==========================================================
     # Memory Buffer (16GB onboard)

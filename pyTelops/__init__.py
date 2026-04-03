@@ -21,6 +21,7 @@ from .registers import (
     MemoryBufferMOISource, MemoryBufferStatus,
     FrameRateMode, TestImageSelector, ImageCorrectionMode,
     TemperatureLocation, VoltageLocation, CurrentLocation,
+    CalibrationCollectionType,
 )
 
 # Thermal camera convention alias
@@ -33,5 +34,6 @@ __all__ = [
     "TriggerActivation", "MemoryBufferMOISource", "MemoryBufferStatus",
     "FrameRateMode", "TestImageSelector", "ImageCorrectionMode",
     "TemperatureLocation", "VoltageLocation", "CurrentLocation",
+    "CalibrationCollectionType",
     "__version__",
 ]

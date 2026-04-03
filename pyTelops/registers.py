@@ -181,6 +181,22 @@ REG_POSIX_TIME = 0xE980                   # Int, seconds since epoch (RW)
 REG_SUB_SECOND_TIME = 0xE984              # Int, 100ns ticks (RO)
 
 # ============================================================
+# Calibration Collections
+# ============================================================
+REG_CAL_COLLECTION_COUNT = 0xE870        # Int (RO)
+REG_CAL_COLLECTION_SELECTOR = 0xE874     # Int (RW)
+REG_CAL_COLLECTION_POSIX = 0xE878        # Int (RW) - collection timestamp
+REG_CAL_COLLECTION_TYPE = 0xEB10         # Int (RO) - enum: 0=TelopsFixed
+REG_CAL_COLLECTION_LOAD = 0xE87C         # Command (WO)
+REG_CAL_BLOCK_COUNT = 0xEAFC             # Int (RO)
+REG_CAL_BLOCK_SELECTOR = 0xEB00          # Int (RW)
+REG_CAL_BLOCK_POSIX = 0xEB04             # Int (RW)
+REG_CAL_BLOCK_LOAD = 0xEB08              # Command (WO)
+REG_CAL_ACTIVE_TYPE = 0xEAE4             # Int (RO)
+REG_CAL_ACTIVE_POSIX = 0xE880            # Int (RO)
+REG_CAL_ACTIVE_BLOCK_POSIX = 0xEB0C      # Int (RO)
+
+# ============================================================
 # GEV Timestamps
 # ============================================================
 REG_GEV_TIMESTAMP_TICK_FREQ_HIGH = 0x093C  # Int (RO)
@@ -360,6 +376,10 @@ class CurrentLocation(IntEnum):
     SUPPLY_24V = 1
 
 
+class CalibrationCollectionType(IntEnum):
+    TELOPS_FIXED = 0
+
+
 # ============================================================
 # Register metadata: address -> (name, type, access)
 # ============================================================
@@ -437,6 +457,19 @@ REGISTER_INFO = {
     REG_GEV_TIMESTAMP_VALUE_LOW: ("GevTimestampValueLow", "int", "RO"),
     # Download Speed
     REG_DOWNLOAD_BITRATE_MAX: ("DownloadBitrateMax", "float", "RW"),
+    # Calibration Collections
+    REG_CAL_COLLECTION_COUNT: ("CalCollectionCount", "int", "RO"),
+    REG_CAL_COLLECTION_SELECTOR: ("CalCollectionSelector", "int", "RW"),
+    REG_CAL_COLLECTION_POSIX: ("CalCollectionPosix", "int", "RW"),
+    REG_CAL_COLLECTION_TYPE: ("CalCollectionType", "enum", "RO"),
+    REG_CAL_COLLECTION_LOAD: ("CalCollectionLoad", "cmd", "WO"),
+    REG_CAL_BLOCK_COUNT: ("CalBlockCount", "int", "RO"),
+    REG_CAL_BLOCK_SELECTOR: ("CalBlockSelector", "int", "RW"),
+    REG_CAL_BLOCK_POSIX: ("CalBlockPosix", "int", "RW"),
+    REG_CAL_BLOCK_LOAD: ("CalBlockLoad", "cmd", "WO"),
+    REG_CAL_ACTIVE_TYPE: ("CalActiveType", "int", "RO"),
+    REG_CAL_ACTIVE_POSIX: ("CalActivePosix", "int", "RO"),
+    REG_CAL_ACTIVE_BLOCK_POSIX: ("CalActiveBlockPosix", "int", "RO"),
 }
 
 FEATURE_TO_ADDRESS = {v[0]: k for k, v in REGISTER_INFO.items()}
