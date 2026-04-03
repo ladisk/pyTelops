@@ -1438,15 +1438,21 @@ class Camera:
             raise ValueError(
                 "Specify index= or lens= (with optional temp=)")
 
-        # --- Load the collection ---
+        # --- Load the collection (skip if already active) ---
         self._gvcp.write_reg(reg.REG_CAL_COLLECTION_SELECTOR, index)
-        self._gvcp.write_reg(reg.REG_CAL_COLLECTION_LOAD, 1)
-        time.sleep(2.0)
+        target_posix = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_POSIX)
+        active_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_POSIX)
 
-        # Load first block
-        self._gvcp.write_reg(reg.REG_CAL_BLOCK_SELECTOR, 0)
-        self._gvcp.write_reg(reg.REG_CAL_BLOCK_LOAD, 1)
-        time.sleep(2.0)
+        if target_posix == active_posix:
+            # Already loaded — skip
+            pass
+        else:
+            self._gvcp.write_reg(reg.REG_CAL_COLLECTION_LOAD, 1)
+            time.sleep(2.0)
+
+            self._gvcp.write_reg(reg.REG_CAL_BLOCK_SELECTOR, 0)
+            self._gvcp.write_reg(reg.REG_CAL_BLOCK_LOAD, 1)
+            time.sleep(2.0)
 
         # Verify active POSIX matches what we selected
         self._gvcp.write_reg(reg.REG_CAL_COLLECTION_SELECTOR, index)
