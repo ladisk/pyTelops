@@ -191,49 +191,49 @@ class TestResolutionValidation:
 
     def test_valid_full_frame(self):
         cam = Camera()
-        w, h = cam._validate_resolution(320, 258)
-        assert (w, h) == (320, 258)
+        w, h = cam._validate_resolution(320, 256)
+        assert (w, h) == (320, 256)
 
     def test_valid_subwindow(self):
         cam = Camera()
-        assert cam._validate_resolution(128, 66) == (128, 66)
+        assert cam._validate_resolution(128, 64) == (128, 64)
 
     def test_invalid_width_not_multiple_64(self):
         cam = Camera()
         with pytest.raises(ValueError, match="multiple of 64"):
-            cam._validate_resolution(160, 258)
+            cam._validate_resolution(160, 256)
 
     def test_invalid_width_too_small(self):
         cam = Camera()
         with pytest.raises(ValueError, match="out of range"):
-            cam._validate_resolution(32, 258)
+            cam._validate_resolution(32, 256)
 
     def test_invalid_width_too_large(self):
         cam = Camera()
         with pytest.raises(ValueError, match="out of range"):
-            cam._validate_resolution(384, 258)
+            cam._validate_resolution(384, 256)
 
     def test_invalid_height_wrong_step(self):
         cam = Camera()
         with pytest.raises(ValueError, match="not valid"):
-            cam._validate_resolution(320, 100)
+            cam._validate_resolution(320, 99)
 
     def test_invalid_height_too_small(self):
         cam = Camera()
         with pytest.raises(ValueError, match="out of range"):
-            cam._validate_resolution(320, 4)
+            cam._validate_resolution(320, 2)
 
     def test_invalid_height_too_large(self):
         cam = Camera()
         with pytest.raises(ValueError, match="out of range"):
-            cam._validate_resolution(320, 262)
+            cam._validate_resolution(320, 260)
 
     def test_nearest_height_suggestion(self):
         cam = Camera()
         try:
             cam._validate_resolution(320, 101)
         except ValueError as e:
-            assert "102" in str(e)  # nearest valid to 101 is 102
+            assert "100" in str(e)  # nearest valid to 101 is 100
 
     def test_valid_widths(self):
         cam = Camera()
@@ -242,15 +242,15 @@ class TestResolutionValidation:
     def test_valid_heights_start_and_step(self):
         cam = Camera()
         heights = cam.valid_heights
-        assert heights[0] == 6
-        assert heights[1] == 10
-        assert heights[-1] == 258
-        # All satisfy (h-2) % 4 == 0
-        assert all((h - 2) % 4 == 0 for h in heights)
+        assert heights[0] == 4
+        assert heights[1] == 8
+        assert heights[-1] == 256
+        # All are multiples of 4
+        assert all(h % 4 == 0 for h in heights)
 
     def test_minimum_valid_resolution(self):
         cam = Camera()
-        assert cam._validate_resolution(64, 6) == (64, 6)
+        assert cam._validate_resolution(64, 4) == (64, 4)
 
 
 class TestCalibrationConversion:

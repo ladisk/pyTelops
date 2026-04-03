@@ -171,10 +171,10 @@ All settings are properties with string enum support:
    cam.frame_rate_mode = "fixed"         # "fixed", "fixed_locked", "maximum", "burst"
    cam.calibration_mode = "RT"           # "RT", "NUC", "RAW", "IBR", "IBI"
    cam.integration_time_auto = "continuous"  # "off", "once", "continuous"
-   cam.resolution = (128, 130)            # subwindow for higher fps
+   cam.resolution = (128, 128)            # subwindow for higher fps
    cam.roi_offset = (10, 20)             # subwindow offset (x, y)
    cam.valid_widths                      # [64, 128, 192, 256, 320]
-   cam.valid_heights                     # [6, 10, 14, ..., 254, 258]
+   cam.valid_heights                     # [4, 8, 12, ..., 252, 256]
    cam.bad_pixel_replacement = True      # auto-replace hot pixels (ON by default)
    cam.reverse_x = True                  # horizontal flip
    cam.reverse_y = True                  # vertical flip
@@ -192,29 +192,30 @@ Resolution / subwindow
 ----------------------
 
 Reduce resolution for higher frame rates. Width: step 64 (64-320).
-Height: step 4 (6-258).
+Height: step 4 (4-256). Heights are in usable pixels; the driver adds 2 header
+rows internally.
 
 .. code-block:: python
 
-   cam.resolution = (128, 66)             # 128x64 usable pixels + 2 header rows
+   cam.resolution = (128, 64)             # 128x64 pixels
    cam.roi_offset = (96, 96)              # offset within full sensor
    cam.frame_rate_max                     # check achievable fps
 
    cam.valid_widths                       # [64, 128, 192, 256, 320]
-   cam.valid_heights                      # [6, 10, 14, ..., 254, 258]
+   cam.valid_heights                      # [4, 8, 12, ..., 252, 256]
 
 Example frame rates at different resolutions:
 
 ==========  ==========  =========
 Resolution  Int. time   Max FPS
 ==========  ==========  =========
-320x258     10 us       3,115
-320x130     10 us       5,973
-320x66      10 us       11,034
-128x66      10 us       17,836
-64x34       10 us       36,676
-64x6        10 us       64,491
-64x6        5 us        95,184
+320x256     10 us       3,115
+320x128     10 us       5,973
+320x64      10 us       11,034
+128x64      10 us       17,836
+64x32       10 us       36,676
+64x4        10 us       64,491
+64x4        5 us        95,184
 ==========  ==========  =========
 
 Calibration

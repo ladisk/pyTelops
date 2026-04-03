@@ -77,7 +77,7 @@ class LiveView:
         w, h = self.cam.resolution
         self.width = w
         self.height = h
-        self.img_height = h - camera.HEADER_ROWS
+        self.img_height = h  # resolution already returns usable pixels
 
         self.cmap_name = colormap
         self.lut = build_lut(self.cmap_name)

@@ -152,13 +152,13 @@ class TestStreaming:
         # RT mode: float32 Celsius; other modes: uint16
         assert frame.dtype in (np.float32, np.uint16)
         w, h = cam.resolution
-        assert frame.shape == (h - cam.HEADER_ROWS, w)
+        assert frame.shape == (h, w)
 
     def test_grab_raw_with_headers(self, cam):
         frame = cam.grab(strip_header=False)
         assert frame is not None
         w, h = cam.resolution
-        assert frame.shape == (h, w)
+        assert frame.shape == (h + cam.HEADER_ROWS, w)
 
     def test_grab_has_real_data(self, cam):
         frame = cam.grab()
@@ -174,7 +174,7 @@ class TestStreaming:
     def test_acquire_stripped(self, cam):
         frames = cam.acquire(3, strip_header=True)
         w, h = cam.resolution
-        assert frames.shape[1] == h - cam.HEADER_ROWS
+        assert frames.shape[1] == h
 
     def test_stream_start_stop_restart(self, cam):
         cam.start_stream()
@@ -310,7 +310,7 @@ class TestBuffer:
 
         # Should be stripped
         w, h = cam.resolution
-        assert data.shape[1] == h - cam.HEADER_ROWS
+        assert data.shape[1] == h
 
         cam.buffer_clear()
 
@@ -323,7 +323,7 @@ class TestBuffer:
         data = cam.buffer_download(sequence=0, strip_header=False,
                                    verbose=False)
         w, h = cam.resolution
-        assert data.shape[1] == h  # not stripped
+        assert data.shape[1] == h + cam.HEADER_ROWS  # not stripped
 
         cam.buffer_clear()
 
@@ -456,9 +456,9 @@ class TestNewProperties:
 
     def test_valid_heights(self, cam):
         heights = cam.valid_heights
-        assert heights[0] == 6
-        assert heights[-1] == 258
-        assert all((h - 2) % 4 == 0 for h in heights)
+        assert heights[0] == 4
+        assert heights[-1] == 256
+        assert all(h % 4 == 0 for h in heights)
 
 
 # ============================================================
@@ -470,21 +470,21 @@ class TestResolution:
 
     def test_change_resolution_and_grab(self, cam):
         orig = cam.resolution
-        cam.resolution = (128, 130)
+        cam.resolution = (128, 128)
         time.sleep(1.0)
         frame = cam.grab(convert=False)
         assert frame is not None
-        assert frame.shape == (128, 128)  # 130 - 2 header rows
+        assert frame.shape == (128, 128)  # usable pixels
         cam.resolution = orig
         time.sleep(1.0)
 
     def test_invalid_width_raises(self, cam):
         with pytest.raises(ValueError, match="multiple of 64"):
-            cam.resolution = (160, 258)
+            cam.resolution = (160, 256)
 
     def test_invalid_height_raises(self, cam):
         with pytest.raises(ValueError, match="not valid"):
-            cam.resolution = (320, 100)
+            cam.resolution = (320, 99)
 
 
 # ============================================================
