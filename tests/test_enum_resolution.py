@@ -184,3 +184,70 @@ class TestCameraInit:
         cam = Camera(ip="1.2.3.4")
         assert "1.2.3.4" in repr(cam)
         assert "disconnected" in repr(cam)
+
+
+class TestResolutionValidation:
+    """Test _validate_resolution and valid_widths/valid_heights."""
+
+    def test_valid_full_frame(self):
+        cam = Camera()
+        w, h = cam._validate_resolution(320, 258)
+        assert (w, h) == (320, 258)
+
+    def test_valid_subwindow(self):
+        cam = Camera()
+        assert cam._validate_resolution(128, 66) == (128, 66)
+
+    def test_invalid_width_not_multiple_64(self):
+        cam = Camera()
+        with pytest.raises(ValueError, match="multiple of 64"):
+            cam._validate_resolution(160, 258)
+
+    def test_invalid_width_too_small(self):
+        cam = Camera()
+        with pytest.raises(ValueError, match="out of range"):
+            cam._validate_resolution(32, 258)
+
+    def test_invalid_width_too_large(self):
+        cam = Camera()
+        with pytest.raises(ValueError, match="out of range"):
+            cam._validate_resolution(384, 258)
+
+    def test_invalid_height_wrong_step(self):
+        cam = Camera()
+        with pytest.raises(ValueError, match="not valid"):
+            cam._validate_resolution(320, 100)
+
+    def test_invalid_height_too_small(self):
+        cam = Camera()
+        with pytest.raises(ValueError, match="out of range"):
+            cam._validate_resolution(320, 4)
+
+    def test_invalid_height_too_large(self):
+        cam = Camera()
+        with pytest.raises(ValueError, match="out of range"):
+            cam._validate_resolution(320, 262)
+
+    def test_nearest_height_suggestion(self):
+        cam = Camera()
+        try:
+            cam._validate_resolution(320, 101)
+        except ValueError as e:
+            assert "102" in str(e)  # nearest valid to 101 is 102
+
+    def test_valid_widths(self):
+        cam = Camera()
+        assert cam.valid_widths == [64, 128, 192, 256, 320]
+
+    def test_valid_heights_start_and_step(self):
+        cam = Camera()
+        heights = cam.valid_heights
+        assert heights[0] == 6
+        assert heights[1] == 10
+        assert heights[-1] == 258
+        # All satisfy (h-2) % 4 == 0
+        assert all((h - 2) % 4 == 0 for h in heights)
+
+    def test_minimum_valid_resolution(self):
+        cam = Camera()
+        assert cam._validate_resolution(64, 6) == (64, 6)

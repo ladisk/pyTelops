@@ -29,7 +29,7 @@ Features
 - **NUC trigger** — programmatic non-uniformity correction
 - **Diagnostics** — 13 temperature sensors, voltage, current, uptime counters
 - **Time sync** — synchronize camera clock, GEV timestamps
-- **ROI subwindow** — offset + resolution for higher frame rates
+- **Subwindow** — configurable resolution for higher frame rates
 - **Bad pixel replacement** — enabled by default
 - **String enums** — ``cam.calibration_mode = "RT"`` instead of importing enum classes
 - **Auto header stripping** — frames are returned without Telops metadata rows
@@ -173,8 +173,10 @@ All settings are properties with string enum support:
    cam.frame_rate_mode = "fixed"         # "fixed", "fixed_locked", "maximum", "burst"
    cam.calibration_mode = "RT"           # "RT", "NUC", "RAW", "IBR", "IBI"
    cam.integration_time_auto = "continuous"  # "off", "once", "continuous"
-   cam.resolution                        # (320, 258)
-   cam.roi_offset = (10, 20)             # ROI subwindow offset (x, y)
+   cam.resolution = (128, 130)            # subwindow for higher fps
+   cam.roi_offset = (10, 20)             # subwindow offset (x, y)
+   cam.valid_widths                      # [64, 128, 192, 256, 320]
+   cam.valid_heights                     # [6, 10, 14, ..., 254, 258]
    cam.bad_pixel_replacement = True      # auto-replace hot pixels (ON by default)
    cam.reverse_x = True                  # horizontal flip
    cam.reverse_y = True                  # vertical flip
@@ -183,6 +185,34 @@ All settings are properties with string enum support:
    cam.temperature                       # sensor temperature in Celsius
    cam.info                              # dict with all settings
    cam.state                             # "disconnected", "connected", "streaming"
+
+Resolution / subwindow
+----------------------
+
+Reduce resolution for higher frame rates. Width: step 64 (64-320).
+Height: step 4 (6-258).
+
+.. code-block:: python
+
+   cam.resolution = (128, 66)             # 128x64 usable pixels + 2 header rows
+   cam.roi_offset = (96, 96)              # offset within full sensor
+   cam.frame_rate_max                     # check achievable fps
+
+   cam.valid_widths                       # [64, 128, 192, 256, 320]
+   cam.valid_heights                      # [6, 10, 14, ..., 254, 258]
+
+Example frame rates at different resolutions:
+
+==========  =========
+Resolution  Max FPS
+==========  =========
+320x258     3,115
+320x130     5,973
+320x66      11,034
+128x66      17,836
+64x34       36,676
+320x6       53,688
+==========  =========
 
 Image correction (NUC)
 ----------------------

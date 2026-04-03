@@ -197,6 +197,15 @@ class Camera:
     # Number of metadata rows embedded in each frame by Telops cameras
     HEADER_ROWS = 2
 
+    # Resolution constraints (verified empirically)
+    WIDTH_MIN = 64
+    WIDTH_MAX = 320
+    WIDTH_STEP = 64
+    HEIGHT_MIN = 6
+    HEIGHT_MAX = 258
+    HEIGHT_STEP = 4
+    HEIGHT_OFFSET = 2  # header rows
+
     # Class-level registry of active Camera instances, keyed by camera IP.
     # Used to forcibly disconnect a stale instance when a new Camera
     # connects to the same camera (e.g., after a kernel restart or when
@@ -485,6 +494,53 @@ class Camera:
                 f"{max_hz:.0f} Hz).",
                 UserWarning, stacklevel=3)
 
+    def _validate_resolution(self, w: int, h: int) -> tuple[int, int]:
+        """Validate and snap resolution to valid values.
+
+        Width must be multiple of 64 (64-320).
+        Height must be 2 + multiple of 4 (6-258).
+
+        Raises ValueError with clear message if invalid.
+        """
+        # Width
+        if w < self.WIDTH_MIN or w > self.WIDTH_MAX:
+            raise ValueError(
+                f"Width {w} out of range [{self.WIDTH_MIN}-{self.WIDTH_MAX}]")
+        if w % self.WIDTH_STEP != 0:
+            valid = list(range(self.WIDTH_MIN, self.WIDTH_MAX + 1,
+                               self.WIDTH_STEP))
+            raise ValueError(
+                f"Width must be a multiple of {self.WIDTH_STEP}. "
+                f"Valid widths: {valid}")
+
+        # Height
+        if h < self.HEIGHT_MIN or h > self.HEIGHT_MAX:
+            raise ValueError(
+                f"Height {h} out of range [{self.HEIGHT_MIN}-{self.HEIGHT_MAX}]")
+        if (h - self.HEIGHT_OFFSET) % self.HEIGHT_STEP != 0:
+            # Suggest nearest valid
+            nearest = (round((h - self.HEIGHT_OFFSET) / self.HEIGHT_STEP)
+                       * self.HEIGHT_STEP + self.HEIGHT_OFFSET)
+            nearest = max(self.HEIGHT_MIN, min(self.HEIGHT_MAX, nearest))
+            raise ValueError(
+                f"Height {h} is not valid. "
+                f"Min {self.HEIGHT_MIN}, max {self.HEIGHT_MAX}, step {self.HEIGHT_STEP} "
+                f"(valid: 6, 10, 14, ..., 254, 258). "
+                f"Nearest valid: {nearest}")
+
+        return w, h
+
+    @property
+    def valid_widths(self) -> list[int]:
+        """Valid width values."""
+        return list(range(self.WIDTH_MIN, self.WIDTH_MAX + 1, self.WIDTH_STEP))
+
+    @property
+    def valid_heights(self) -> list[int]:
+        """Valid height values (includes 2 header rows)."""
+        return list(range(self.HEIGHT_MIN, self.HEIGHT_MAX + 1,
+                          self.HEIGHT_STEP))
+
     @property
     def integration_time(self) -> float:
         """Integration time in microseconds."""
@@ -560,7 +616,12 @@ class Camera:
 
     @property
     def resolution(self) -> tuple[int, int]:
-        """Image resolution as (width, height)."""
+        """Image resolution as (width, height).
+
+        Width must be a multiple of 64 (64-320).
+        Height must be 2 + multiple of 4 (6-258).
+        See ``valid_widths`` and ``valid_heights`` for allowed values.
+        """
         self._check_connected()
         w = self._gvcp.read_reg(reg.REG_WIDTH)
         h = self._gvcp.read_reg(reg.REG_HEIGHT)
@@ -569,9 +630,10 @@ class Camera:
     @resolution.setter
     def resolution(self, wh: tuple[int, int]):
         self._check_connected()
+        w, h = self._validate_resolution(wh[0], wh[1])
         fps_before = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
-        self._gvcp.write_reg(reg.REG_WIDTH, wh[0])
-        self._gvcp.write_reg(reg.REG_HEIGHT, wh[1])
+        self._gvcp.write_reg(reg.REG_WIDTH, w)
+        self._gvcp.write_reg(reg.REG_HEIGHT, h)
         self._check_fps_clamped(fps_before)
 
     @property
