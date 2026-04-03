@@ -253,23 +253,45 @@ class TestResolutionValidation:
         assert cam._validate_resolution(64, 6) == (64, 6)
 
 
-class TestCelsiusConversion:
-    """Test _to_celsius centi-Celsius -> Celsius conversion."""
+class TestCalibrationConversion:
+    """Test _apply_calibration reads header and converts to physical units."""
 
-    def test_to_celsius(self):
+    def _make_rt_frame(self, pixel_value, width=20):
+        """Build a fake frame with RT header (DataExp=-8, DataOffset=273.15)."""
+        import struct
+        # Header: 2 rows x width pixels x 2 bytes
+        header = bytearray(2 * width * 2)
+        struct.pack_into('<f', header, 12, 273.15)    # DataOffset
+        struct.pack_into('<b', header, 16, -8)         # DataExp
+        header[28] = 2                                 # CalibrationMode = RT
+
+        header_arr = np.frombuffer(bytes(header), dtype=np.uint16).reshape(2, width)
+        data_arr = np.full((2, width), pixel_value, dtype=np.uint16)
+        return np.vstack([header_arr, data_arr])
+
+    def test_rt_conversion(self):
         cam = Camera()
-        arr = np.array([[2050, 7051], [10000, 500]], dtype=np.uint16)
-        result = cam._to_celsius(arr)
+        # pixel=7424: 7424/256 + 273.15 = 302.15 K -> 29.0 C
+        frame = self._make_rt_frame(7424)
+        result = cam._apply_calibration(frame)
         assert result.dtype == np.float32
-        np.testing.assert_allclose(result[0, 0], 20.50, atol=0.01)
-        np.testing.assert_allclose(result[0, 1], 70.51, atol=0.01)
+        np.testing.assert_allclose(result[0, 0], 29.0, atol=0.1)
 
-    def test_to_celsius_3d(self):
+    def test_nuc_no_conversion(self):
+        """NUC mode: DataExp=0, DataOffset=0 — no conversion."""
+        import struct
         cam = Camera()
-        arr = np.array([[[2500]]], dtype=np.uint16)
-        result = cam._to_celsius(arr)
-        assert result.shape == (1, 1, 1)
-        np.testing.assert_allclose(result[0, 0, 0], 25.0, atol=0.01)
+        width = 20
+        header = bytearray(2 * width * 2)
+        # DataExp=0, DataOffset=0, CalMode=1 (NUC)
+        header[28] = 1
+        header_arr = np.frombuffer(bytes(header), dtype=np.uint16).reshape(2, width)
+        data_arr = np.full((2, width), 5000, dtype=np.uint16)
+        frame = np.vstack([header_arr, data_arr])
+
+        result = cam._apply_calibration(frame)
+        assert result.dtype == np.uint16  # no conversion
+        assert result[2, 0] == 5000  # unchanged, headers not stripped by apply_calibration when no conversion
 
 
 class TestCalibrationParsing:

@@ -840,8 +840,10 @@ class Camera:
     # Frame Acquisition
     # ==========================================================
 
-    # RT mode outputs centi-Celsius as uint16 (e.g., 7051 = 70.51 C)
-    RT_SCALE = 100.0
+    # Header byte offsets for per-frame calibration data
+    _HDR_DATA_OFFSET = 12   # float32: additive offset (273.15 for RT Kelvin)
+    _HDR_DATA_EXP = 16      # int8: exponent (typically -8 for RT)
+    _HDR_CAL_MODE = 28      # uint8: calibration mode (2=RT, 1=NUC, etc.)
 
     def _strip_headers(self, arr: np.ndarray) -> np.ndarray:
         """Strip Telops header rows from a frame or batch of frames."""
@@ -853,16 +855,51 @@ class Camera:
             return arr[:, self.HEADER_ROWS:, :]
         return arr
 
-    def _to_celsius(self, arr: np.ndarray) -> np.ndarray:
-        """Convert RT mode centi-Celsius uint16 to Celsius float32."""
-        return arr.astype(np.float32) / self.RT_SCALE
+    def _apply_calibration(self, frame: np.ndarray) -> np.ndarray:
+        """Apply per-frame calibration using header metadata.
 
-    def _is_rt_mode(self) -> bool:
-        """Check if camera is in radiometric temperature mode."""
-        try:
-            return self._gvcp.read_reg(reg.REG_CALIBRATION_MODE) == reg.CalibrationMode.RT
-        except GVCPError:
-            return False
+        Reads DataExp and DataOffset from the Telops header rows
+        (before they are stripped) and converts pixel values to
+        physical units:
+          - RT mode: Celsius (pixel * 2^DataExp + DataOffset - 273.15)
+          - IBR/IBI: physical units (pixel * 2^DataExp + DataOffset)
+          - NUC/RAW: no conversion (DataExp=0, DataOffset=0)
+
+        Args:
+            frame: Raw frame WITH header rows (not yet stripped).
+
+        Returns:
+            Converted float32 array (same shape), or original if no
+            conversion needed.
+        """
+        if frame.ndim == 2:
+            header_bytes = frame[:self.HEADER_ROWS, :].tobytes()
+            data_exp = struct.unpack('<b', header_bytes[self._HDR_DATA_EXP:
+                                                        self._HDR_DATA_EXP + 1])[0]
+            data_offset = struct.unpack('<f', header_bytes[self._HDR_DATA_OFFSET:
+                                                           self._HDR_DATA_OFFSET + 4])[0]
+            cal_mode = header_bytes[self._HDR_CAL_MODE]
+
+            if data_exp == 0 and data_offset == 0:
+                return frame  # NUC/RAW — no conversion
+
+            data = frame[self.HEADER_ROWS:, :].astype(np.float32)
+            data = data * (2.0 ** data_exp) + data_offset
+
+            # RT mode: convert Kelvin to Celsius
+            if cal_mode == 2:  # RT
+                data -= 273.15
+
+            return data
+
+        elif frame.ndim == 3:
+            # Batch: apply per-frame
+            results = []
+            for i in range(frame.shape[0]):
+                results.append(self._apply_calibration(frame[i]))
+            return np.stack(results)
+
+        return frame
 
     def grab(self, timeout: float = 5.0,
              strip_header: bool = True,
@@ -894,10 +931,10 @@ class Camera:
                 self.stop_stream()
 
         if frame is not None:
-            if strip_header:
+            if convert:
+                frame = self._apply_calibration(frame)
+            elif strip_header:
                 frame = self._strip_headers(frame)
-            if convert and self._is_rt_mode():
-                frame = self._to_celsius(frame)
         return frame
 
     def acquire(self, n_frames: int, timeout: float = 30.0,
@@ -938,10 +975,10 @@ class Camera:
         if not frames:
             return None
         result = np.stack(frames)
-        if strip_header:
+        if convert:
+            result = self._apply_calibration(result)
+        elif strip_header:
             result = self._strip_headers(result)
-        if convert and self._is_rt_mode():
-            result = self._to_celsius(result)
         return result
 
     # ==========================================================
@@ -2057,10 +2094,10 @@ class Camera:
         if not frames:
             return None
         result = np.stack(frames)
-        if strip_header:
+        if convert:
+            result = self._apply_calibration(result)
+        elif strip_header:
             result = self._strip_headers(result)
-        if convert and self._is_rt_mode():
-            result = self._to_celsius(result)
 
         if verbose:
             self._download_diagnostics(result, n_frames)
