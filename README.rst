@@ -349,6 +349,17 @@ frameworks:
 - `openEOL <https://github.com/ladisk/openEOL>`_ — industrial end-of-line testing
 - `LDAQ <https://github.com/ladisk/LDAQ>`_ — lightweight data acquisition
 
+Disclaimer
+----------
+
+pyTelops is an independent, community-developed project. It is not affiliated
+with, endorsed by, or supported by Telops Inc. Register addresses were obtained
+from the camera's standard GenICam XML descriptor and documentation shipped with
+the camera hardware. No Telops proprietary source code was used.
+
+"Telops", "FAST", and "Reveal IR" are trademarks of `Telops Inc. <https://www.telops.com>`_
+All other trademarks are the property of their respective owners.
+
 License
 -------
 
