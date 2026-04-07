@@ -23,7 +23,7 @@ Features
 --------
 
 - **Auto-discovery** — finds cameras on the network regardless of IP
-- **High-speed buffer** — record up to 95k fps, download at ~270 fps
+- **High-speed buffer** — record up to 95k fps, download optimized to saturate GigE bandwidth
 - **Live streaming** — real-time frame acquisition (up to ~760 fps at full resolution)
 - **Subwindow** — configurable resolution for higher frame rates
 - **Diagnostics** — 13 temperature sensors, NUC trigger, timestamps, voltage/current
