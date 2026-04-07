@@ -2036,23 +2036,19 @@ class Camera:
         deadline = time.monotonic() + timeout
 
         try:
+            stall_deadline = time.monotonic() + 10.0
             for i in range(n_frames):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                result = self._gvsp.get_frame(timeout=min(remaining, 10.0))
+                result = self._gvsp.get_frame(timeout=min(remaining, 5.0))
                 if result is not None:
                     frames.append(result)
+                    stall_deadline = time.monotonic() + 10.0
                     if pbar:
                         pbar.update(1)
-                else:
-                    result = self._gvsp.get_frame(timeout=2.0)
-                    if result is not None:
-                        frames.append(result)
-                        if pbar:
-                            pbar.update(1)
-                    else:
-                        break
+                elif time.monotonic() > stall_deadline:
+                    break  # no frames for 10s — stream is dead
         finally:
             if pbar:
                 pbar.close()
