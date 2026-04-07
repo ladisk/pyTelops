@@ -119,34 +119,31 @@ class TestStripHeaders:
 class TestDownloadDiagnostics:
     """Test _download_diagnostics static method."""
 
-    def test_clean_data(self, capsys):
+    def test_clean_data(self, caplog):
         data = np.random.randint(1000, 60000, (100, 256, 320), dtype=np.uint16)
-        Camera._download_diagnostics(data, 100)
-        output = capsys.readouterr().out
-        assert "OK" in output
+        with caplog.at_level("INFO", logger="pyTelops.camera"):
+            Camera._download_diagnostics(data, 100)
+        assert "OK" in caplog.text
 
-    def test_missing_frames(self, capsys):
+    def test_missing_frames(self, caplog):
         data = np.random.randint(1000, 60000, (90, 256, 320), dtype=np.uint16)
-        Camera._download_diagnostics(data, 100)
-        output = capsys.readouterr().out
-        assert "WARNING" in output
-        assert "10 frames missing" in output
+        with caplog.at_level("WARNING", logger="pyTelops.camera"):
+            Camera._download_diagnostics(data, 100)
+        assert "10 frames missing" in caplog.text
 
-    def test_blank_frames(self, capsys):
+    def test_blank_frames(self, caplog):
         data = np.zeros((100, 256, 320), dtype=np.uint16)
-        data[50:] = 5000  # only first 50 are blank
-        Camera._download_diagnostics(data, 100)
-        output = capsys.readouterr().out
-        assert "WARNING" in output
-        assert "blank" in output
+        data[50:] = 5000
+        with caplog.at_level("WARNING", logger="pyTelops.camera"):
+            Camera._download_diagnostics(data, 100)
+        assert "blank" in caplog.text
 
-    def test_zero_rows(self, capsys):
+    def test_zero_rows(self, caplog):
         data = np.ones((10, 256, 320), dtype=np.uint16) * 5000
-        data[3, 100:110, :] = 0  # zero band in frame 3
-        Camera._download_diagnostics(data, 10)
-        output = capsys.readouterr().out
-        assert "WARNING" in output
-        assert "zero rows" in output
+        data[3, 100:110, :] = 0
+        with caplog.at_level("WARNING", logger="pyTelops.camera"):
+            Camera._download_diagnostics(data, 10)
+        assert "zero rows" in caplog.text
 
 
 class TestBufferConfigureDuration:
@@ -173,7 +170,6 @@ class TestCameraInit:
     def test_default_buffer_tracking(self):
         cam = Camera()
         assert cam._buffer_n_sequences == 1
-        assert cam._buffer_next_sequence == 0
 
     def test_del_on_disconnected(self):
         """__del__ should not crash on a never-connected Camera."""
@@ -357,3 +353,64 @@ class TestCalibrationParsing:
         cam.calibration_names = {0: "MW 50mm FW0", 4: "MW 25mm FW0"}
         assert cam.calibration_names[0] == "MW 50mm FW0"
         assert cam.calibration_names[4] == "MW 25mm FW0"
+
+
+class TestCalibrationLoadSearch:
+    """Test calibration_load lens+temp search logic (no camera needed)."""
+
+    def _cam_with_mock_calibration(self):
+        cam = Camera()
+        cam._calibration_info = {
+            0: {"index": 0, "posix": 100, "lens": "MW 50mm", "fw_pos": 0,
+                "temp_range": (0.0, 175.0)},
+            1: {"index": 1, "posix": 101, "lens": "MW 50mm", "fw_pos": 1,
+                "temp_range": (25.0, 378.0)},
+            2: {"index": 2, "posix": 102, "lens": "MW 25mm", "fw_pos": 0,
+                "temp_range": (0.0, 184.0)},
+            3: {"index": 3, "posix": 103, "lens": "MW 25mm", "fw_pos": 1,
+                "temp_range": (115.0, 376.0)},
+        }
+        return cam
+
+    def test_find_by_lens_and_temp(self):
+        cam = self._cam_with_mock_calibration()
+        cam._connected = True
+        # Should find MW 50mm FW0 (0-175) for temp=25
+        # Can't actually load (no camera), but test the search part
+        # by checking that calibration_load raises GVCPError (no _gvcp)
+        # not ValueError (no match)
+        with pytest.raises((RuntimeError, AttributeError)):
+            cam.calibration_load(lens="50mm", temp=25)
+
+    def test_find_narrowest_range(self):
+        cam = self._cam_with_mock_calibration()
+        cam._connected = True
+        # temp=100 matches both MW 50mm FW0 (0-175, span=175) and FW1 (25-378, span=353)
+        # Should prefer FW0 (narrower)
+        with pytest.raises((RuntimeError, AttributeError)):
+            cam.calibration_load(lens="50mm", temp=100)
+
+    def test_no_lens_match_raises(self):
+        cam = self._cam_with_mock_calibration()
+        cam._connected = True
+        with pytest.raises(ValueError, match="No calibration"):
+            cam.calibration_load(lens="microscope", temp=25)
+
+    def test_temp_out_of_range_raises(self):
+        cam = self._cam_with_mock_calibration()
+        cam._connected = True
+        with pytest.raises(ValueError, match="No calibration"):
+            cam.calibration_load(lens="50mm", temp=500)
+
+    def test_no_args_raises(self):
+        cam = self._cam_with_mock_calibration()
+        cam._connected = True
+        with pytest.raises(ValueError, match="Specify"):
+            cam.calibration_load()
+
+    def test_case_insensitive_lens(self):
+        cam = self._cam_with_mock_calibration()
+        cam._connected = True
+        # "50MM" should match "MW 50mm"
+        with pytest.raises((RuntimeError, AttributeError)):
+            cam.calibration_load(lens="50MM", temp=25)

@@ -20,7 +20,6 @@ Features:
   - Min/Max/Mean stats in status bar
 """
 
-import struct
 import time
 from typing import TYPE_CHECKING
 

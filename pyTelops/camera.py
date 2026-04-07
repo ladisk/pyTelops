@@ -13,6 +13,7 @@ Usage:
         frame = cam.grab()
 """
 
+import logging
 import os
 import re
 import socket
@@ -21,6 +22,8 @@ import time
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 from .gvcp import GVCPClient, GVCPError, REG_HEARTBEAT_TIMEOUT
 from .gvsp import GVSPReceiver
@@ -225,7 +228,6 @@ class Camera:
         self._streaming = False
         self._connected = False
         self._buffer_n_sequences = 1
-        self._buffer_next_sequence = 0
         self._calibration_info: dict = {}
         self._calibration_names: dict = {}
 
@@ -281,16 +283,17 @@ class Camera:
                     "  3. No other software has GVCP control\n"
                     "  4. Firewall allows UDP for this python.exe")
             self._camera_ip = cameras[0]["ip"]
-            print(f"Discovered: {cameras[0].get('manufacturer', '')} "
-                  f"{cameras[0].get('model', '')} at {self._camera_ip}")
+            logger.info("Discovered: %s %s at %s",
+                       cameras[0].get('manufacturer', ''),
+                       cameras[0].get('model', ''), self._camera_ip)
 
         # If there's an existing Camera in this process connected to the
         # same camera IP, disconnect it first (handles "forgot to disconnect"
         # and "kernel restart" scenarios within the same process).
         old = Camera._active_cameras.get(self._camera_ip)
         if old is not None and old is not self and old._connected:
-            print(f"Disconnecting previous Camera instance for "
-                  f"{self._camera_ip}...")
+            logger.info("Disconnecting previous Camera instance for %s",
+                       self._camera_ip)
             try:
                 old.disconnect()
             except Exception:
@@ -1347,8 +1350,9 @@ class Camera:
             self._calibration_lens_info = lens_info
             self._calibration_tsco_by_key = tsco_by_key
 
-        print(f"Loaded calibration info: {len(tsco_by_posix)} .tsco files, "
-              f"{len(lens_info)} exposure time files from {path}")
+        logger.info("Loaded calibration info: %d .tsco files, "
+                    "%d exposure time files from %s",
+                    len(tsco_by_posix), len(lens_info), path)
 
     def calibration_collections(self) -> list[dict]:
         """List all calibration collections on the camera.
@@ -1537,7 +1541,7 @@ class Camera:
         if temp_range:
             desc_parts.append(f"({temp_range[0]:.0f}-{temp_range[1]:.0f} C)")
 
-        print(f"Loaded: {' '.join(desc_parts)}")
+        logger.info("Loaded: %s", ' '.join(desc_parts))
 
         return result
 
@@ -1640,7 +1644,6 @@ class Camera:
 
         # Track configured sequence count for buffer_record()
         self._buffer_n_sequences = n_sequences
-        self._buffer_next_sequence = 0
 
         # Try to enable buffer mode; if it fails, clean up stale state
         try:
@@ -1954,7 +1957,7 @@ class Camera:
 
         if n_frames == 0:
             if verbose:
-                print("No frames recorded in buffer")
+                logger.warning("No frames recorded in buffer")
             return None
 
         first_frame_id = self._gvcp.read_reg(
@@ -2085,8 +2088,8 @@ class Camera:
             fps = len(frames) / elapsed if elapsed > 0 else 0
             mbps = len(frames) * self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE) \
                 / elapsed / 1e6 if elapsed > 0 else 0
-            print(f"Downloaded {len(frames)} frames in {elapsed:.1f}s "
-                  f"({fps:.0f} fps, {mbps:.1f} MB/s)")
+            logger.info("Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)",
+                       len(frames), elapsed, fps, mbps)
 
         if not frames:
             return None
@@ -2125,11 +2128,10 @@ class Camera:
             issues.append(f"{frames_with_zero_rows} frames with zero rows")
 
         if issues:
-            print(f"Data check: WARNING — {', '.join(issues)}")
+            logger.warning("Data check: %s", ', '.join(issues))
         else:
-            print(f"Data check: OK — {n} frames, "
-                  f"range [{data.min()}–{data.max()}], "
-                  f"mean {data.mean():.0f}")
+            logger.info("Data check: OK — %d frames, range [%s–%s], mean %.0f",
+                        n, data.min(), data.max(), data.mean())
 
     def buffer_clear(self) -> None:
         """Clear all sequences from the memory buffer."""
