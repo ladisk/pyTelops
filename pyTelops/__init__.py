@@ -12,7 +12,7 @@ Usage:
         frame = cam.grab()
 """
 
-__version__ = "0.1.0"
+__version__ = "0.0.1"
 
 from .camera import Camera, discover
 from .gvcp import GVCPClient, GVCPError

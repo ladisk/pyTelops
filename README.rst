@@ -8,7 +8,7 @@ pyTelops
    :target: https://pypi.org/project/pyTelops/
 
 .. image:: https://img.shields.io/pypi/l/pyTelops.svg
-   :target: https://github.com/jasasonc/pyTelops/blob/main/LICENSE
+   :target: https://github.com/ladisk/pyTelops/blob/main/LICENSE
 
 Pure-Python driver for `Telops <https://www.telops.com/>`_ thermal cameras
 over GigE Vision. No vendor SDK required — communicates directly via GVCP/GVSP

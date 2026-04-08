@@ -6,7 +6,7 @@
 
 - **Camera**: Telops FAST M3k — InSb MWIR detector, 320×256, 25 mK sensitivity, 16 GB internal buffer
 - **Connection**: GigE Vision 1.2 over Ethernet (link-local 169.254.x.x)
-- **Repository**: https://github.com/jasasonc/pyTelops
+- **Repository**: https://github.com/ladisk/pyTelops
 - **Author**: Jaša Šonc, University of Ljubljana
 
 ---
