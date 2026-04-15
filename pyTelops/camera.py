@@ -19,7 +19,8 @@ import re
 import socket
 import struct
 import time
-from typing import Optional
+from contextlib import contextmanager
+from typing import Iterator, Optional
 
 import numpy as np
 
@@ -226,6 +227,7 @@ class Camera:
         self._gvcp: Optional[GVCPClient] = None
         self._gvsp: Optional[GVSPReceiver] = None
         self._streaming = False
+        self._acquiring = False
         self._connected = False
         self._buffer_n_sequences = 1
         self._calibration_info: dict = {}
@@ -464,6 +466,15 @@ class Camera:
     def is_streaming(self) -> bool:
         """Whether GVSP streaming is active."""
         return self._streaming
+
+    @property
+    def is_acquiring(self) -> bool:
+        """Whether continuous frame acquisition is active.
+
+        True between :meth:`acquisition_start` and :meth:`acquisition_stop`
+        (or inside an :meth:`acquisition` context manager).
+        """
+        return self._acquiring
 
     @property
     def camera_ip(self) -> Optional[str]:
@@ -824,14 +835,13 @@ class Camera:
         self._streaming = True
 
     def stop_stream(self) -> None:
-        """Stop acquisition and GVSP receiver."""
+        """Stop acquisition and GVSP receiver, tear down stream channel."""
         if not self._streaming:
             return
 
-        try:
-            self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except GVCPError:
-            pass
+        # If acquisition is still running, stop it first
+        if self._acquiring:
+            self.acquisition_stop()
 
         try:
             self._gvcp.write_reg(reg.REG_SC_HOST_PORT, 0)
@@ -906,12 +916,149 @@ class Camera:
 
         return frame
 
+    # ==========================================================
+    # Continuous Acquisition
+    # ==========================================================
+
+    def acquisition_start(self) -> None:
+        """Start continuous frame acquisition.
+
+        Configures the stream channel (if not already up) and tells
+        the camera to begin sending frames continuously. Frames can
+        then be retrieved one at a time with :meth:`read_frame` in a
+        loop. Idempotent — safe to call when already acquiring.
+
+        Pair with :meth:`acquisition_stop` to halt acquisition. For
+        automatic cleanup on exception, use the :meth:`acquisition`
+        context manager instead::
+
+            with cam.acquisition():
+                while running:
+                    frame = cam.read_frame(timeout=0.1)
+                    if frame is not None:
+                        process(frame)
+
+        Note:
+            Not thread-safe. Acquisition lifecycle calls
+            (``acquisition_start`` / ``acquisition_stop``) must be
+            serialized by the caller. ``read_frame`` IS safe to call
+            concurrently with itself.
+        """
+        self._check_ready()
+        if self._acquiring:
+            return
+        if not self._streaming:
+            self.start_stream()
+        self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        self._acquiring = True
+
+    def acquisition_stop(self) -> None:
+        """Stop continuous frame acquisition.
+
+        Writes the acquisition-stop register but leaves the GVSP
+        stream channel intact, so a subsequent :meth:`acquisition_start`
+        can resume without re-binding sockets. Use :meth:`stop_stream`
+        for full teardown. Idempotent.
+
+        Note:
+            Not thread-safe. Acquisition lifecycle calls
+            (``acquisition_start`` / ``acquisition_stop``) must be
+            serialized by the caller. ``read_frame`` IS safe to call
+            concurrently with itself.
+        """
+        if not self._acquiring:
+            return
+        try:
+            self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        except GVCPError as e:
+            logger.warning("Failed to write REG_ACQUISITION_STOP: %s", e)
+        self._acquiring = False
+
+    @contextmanager
+    def acquisition(self) -> Iterator["Camera"]:
+        """Context manager for continuous frame acquisition.
+
+        Starts acquisition on entry and stops it on exit, even if an
+        exception occurs inside the block. The stream channel is left
+        intact on exit so subsequent acquisitions reuse the same socket.
+
+        Yields:
+            self — for fluent chaining inside the ``with`` block.
+
+        Example::
+
+            with cam.acquisition():
+                for _ in range(100):
+                    frame = cam.read_frame(timeout=0.1)
+                    if frame is not None:
+                        process(frame)
+        """
+        self.acquisition_start()
+        try:
+            yield self
+        finally:
+            self.acquisition_stop()
+
+    def read_frame(self, timeout: float = 0.0,
+                   strip_header: bool = True,
+                   convert: bool = True) -> Optional[np.ndarray]:
+        """Read the next frame from a running acquisition.
+
+        Use after :meth:`acquisition_start` (or inside an
+        :meth:`acquisition` block) to pull frames from a continuously
+        streaming camera. Non-blocking by default.
+
+        Args:
+            timeout: Seconds to wait for a frame. ``0.0`` (default) is
+                non-blocking — returns ``None`` immediately if no frame
+                is ready. Use a small positive value (e.g. ``0.1``) to
+                block briefly.
+            strip_header: Remove Telops metadata rows (default True).
+                When ``convert=True``, the headers are removed by the
+                calibration step regardless of this flag.
+            convert: Convert to Celsius in RT mode (default True).
+                Set False for raw uint16 values.
+
+        Returns:
+            2D numpy array (H, W) — float32 Celsius in RT mode, uint16
+            raw counts otherwise. ``None`` if no frame was available
+            within the timeout.
+
+        Raises:
+            RuntimeError: If acquisition is not currently running.
+
+        Note:
+            Thread-safe — multiple threads may call ``read_frame``
+            concurrently. The underlying GVSP frame queue handles
+            inter-thread coordination.
+        """
+        if not self._acquiring:
+            raise RuntimeError(
+                "Camera acquisition not active. Call cam.acquisition_start() "
+                "or use 'with cam.acquisition():' before read_frame().")
+        frame = self._gvsp.get_frame(timeout=timeout)
+        if frame is None:
+            return None
+        if convert:
+            frame = self._apply_calibration(frame)
+        elif strip_header:
+            frame = self._strip_headers(frame)
+        return frame
+
+    # ==========================================================
+    # Single-shot / Batch Acquisition
+    # ==========================================================
+
     def grab(self, timeout: float = 5.0,
              strip_header: bool = True,
              convert: bool = True) -> Optional[np.ndarray]:
         """Grab a single frame.
 
-        Starts streaming if not already active, grabs one frame.
+        Convenience wrapper for one-shot acquisition. Starts streaming
+        and acquisition if not already active, grabs one frame, and
+        restores the prior state. For repeated frame access in a loop,
+        prefer :meth:`acquisition` + :meth:`read_frame` instead — this
+        method has per-call setup overhead.
 
         Args:
             timeout: Seconds to wait for a frame.
@@ -925,13 +1072,15 @@ class Camera:
         """
         self._check_ready()
         was_streaming = self._streaming
-        if not self._streaming:
-            self.start_stream()
-            self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        was_acquiring = self._acquiring
 
         try:
+            if not self._acquiring:
+                self.acquisition_start()
             frame = self._gvsp.get_frame(timeout=timeout)
         finally:
+            if not was_acquiring:
+                self.acquisition_stop()
             if not was_streaming:
                 self.stop_stream()
 
@@ -947,6 +1096,10 @@ class Camera:
                 convert: bool = True) -> Optional[np.ndarray]:
         """Acquire multiple frames via live streaming.
 
+        Convenience wrapper for batch acquisition. Starts streaming if
+        not already active, captures ``n_frames`` frames, and restores
+        the prior state.
+
         Args:
             n_frames: Number of frames to capture.
             timeout: Total timeout in seconds.
@@ -959,12 +1112,12 @@ class Camera:
         """
         self._check_ready()
         was_streaming = self._streaming
-        if not self._streaming:
-            self.start_stream()
-            self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        was_acquiring = self._acquiring
 
         frames = []
         try:
+            if not self._acquiring:
+                self.acquisition_start()
             deadline = time.monotonic() + timeout
             for i in range(n_frames):
                 remaining = deadline - time.monotonic()
@@ -974,6 +1127,8 @@ class Camera:
                 if result is not None:
                     frames.append(result)
         finally:
+            if not was_acquiring:
+                self.acquisition_stop()
             if not was_streaming:
                 self.stop_stream()
 

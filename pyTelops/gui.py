@@ -37,8 +37,6 @@ try:
 except ImportError:
     HAS_GUI_DEPS = False
 
-from . import registers as reg
-
 COLORMAP_CHOICES = ["inferno", "hot", "plasma", "magma", "viridis", "gray"]
 
 # Colorbar width in pixels
@@ -96,9 +94,8 @@ class LiveView:
         self._mouse_img_x = -1
         self._mouse_img_y = -1
 
-        # Start streaming
-        self.cam.start_stream()
-        self.cam._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        # Start continuous acquisition
+        self.cam.acquisition_start()
 
         # Build GUI
         self.root = tk.Tk()
@@ -187,11 +184,12 @@ class LiveView:
         if not self.running:
             return
 
-        result = self.cam._gvsp.get_frame_with_info(timeout=0.05)
+        # Pull raw frame with headers — the viewer reads cal_mode and
+        # calibration parameters out of the header bytes itself.
+        frame = self.cam.read_frame(timeout=0.05, convert=False,
+                                    strip_header=False)
 
-        if result is not None:
-            frame, info = result
-
+        if frame is not None:
             # Read calibration mode from header
             header_bytes = frame[:self.cam.HEADER_ROWS, :].tobytes()
             cal_mode = header_bytes[self.cam._HDR_CAL_MODE]
@@ -314,6 +312,7 @@ class LiveView:
 
     def on_close(self):
         self.running = False
+        self.cam.acquisition_stop()
         self.cam.stop_stream()
         self.root.destroy()
 
