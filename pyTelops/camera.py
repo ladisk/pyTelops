@@ -230,6 +230,11 @@ class Camera:
         self._acquiring = False
         self._connected = False
         self._buffer_n_sequences = 1
+        # Last-used buffer_configure() kwargs — used by buffer_clear() to
+        # automatically re-apply the partition configuration after the
+        # camera wipes it (REG_MEMORY_BUFFER_CLEAR_ALL clears both data
+        # AND the partition, so the next buffer_record() would fail).
+        self._buffer_config_kwargs: Optional[dict] = None
         self._calibration_info: dict = {}
         self._calibration_names: dict = {}
         # User-set packet delay override. None = use default (force 0 on
@@ -1933,6 +1938,15 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, pre_moi)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE, int(moi))
 
+        # Remember the exact parameters so buffer_clear() can re-apply
+        # them automatically (the camera wipes partition state on clear).
+        self._buffer_config_kwargs = dict(
+            n_sequences=n_sequences,
+            frames_per_seq=frames_per_seq,
+            pre_moi=pre_moi,
+            moi_source=moi_source,
+        )
+
     def buffer_record(self, verbose: bool = True) -> int:
         """Record all configured sequences to the internal buffer.
 
@@ -2393,9 +2407,29 @@ class Camera:
                         n, data.min(), data.max(), data.mean())
 
     def buffer_clear(self) -> None:
-        """Clear all sequences from the memory buffer."""
+        """Clear all sequences from the memory buffer.
+
+        The camera's CLEAR_ALL register wipes both recorded data **and**
+        the partition configuration (sequence count, sequence size, MOI
+        source, etc.). After a bare clear, a subsequent ``buffer_record()``
+        would fire into an unconfigured buffer and the download would
+        hang or return incomplete data.
+
+        To make the natural ``clear → record → download`` pattern work,
+        this method automatically re-applies the last-used
+        :meth:`buffer_configure` parameters after clearing. If no
+        configure call has been made in this session, only the clear is
+        performed.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
+
+        # Re-apply the last-used partition configuration so a subsequent
+        # buffer_record() has a valid partition to record into.
+        if self._buffer_config_kwargs is not None:
+            # Small settle delay after the clear before re-configuring
+            time.sleep(0.1)
+            self.buffer_configure(**self._buffer_config_kwargs)
 
     # ==========================================================
     # GUI

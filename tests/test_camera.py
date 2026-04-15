@@ -277,6 +277,62 @@ class TestAcquisitionAPI:
         assert cam.is_acquiring is False
         assert cam.is_streaming is False
 
+    def test_buffer_clear_reapplies_config(self):
+        """buffer_clear must auto-re-apply the last buffer_configure params
+        so clear → record → download works without a manual re-configure."""
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_float.return_value = 100.0  # fake frame_rate for duration path
+        cam.buffer_configure(n_sequences=2, frames_per_seq=500,
+                             pre_moi=10, moi_source="software")
+        # Verify kwargs were stored
+        assert cam._buffer_config_kwargs == {
+            "n_sequences": 2,
+            "frames_per_seq": 500,
+            "pre_moi": 10,
+            "moi_source": "software",
+        }
+        # Count configure-related register writes after the first configure
+        configure_writes = [
+            call for call in cam._gvcp.write_reg.call_args_list
+            if call.args[0] in (
+                reg.REG_MEMORY_BUFFER_NUM_SEQUENCES,
+                reg.REG_MEMORY_BUFFER_SEQ_SIZE,
+                reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE,
+                reg.REG_MEMORY_BUFFER_MOI_SOURCE,
+            )
+        ]
+        n_before_clear = len(configure_writes)
+        # Clear — should trigger a re-apply of the same config
+        cam.buffer_clear()
+        # CLEAR_ALL was written
+        cam._gvcp.write_reg.assert_any_call(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
+        # And the full configure register block was written again
+        configure_writes_after = [
+            call for call in cam._gvcp.write_reg.call_args_list
+            if call.args[0] in (
+                reg.REG_MEMORY_BUFFER_NUM_SEQUENCES,
+                reg.REG_MEMORY_BUFFER_SEQ_SIZE,
+                reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE,
+                reg.REG_MEMORY_BUFFER_MOI_SOURCE,
+            )
+        ]
+        assert len(configure_writes_after) == n_before_clear + 4, (
+            "buffer_clear must re-apply all 4 configure registers")
+
+    def test_buffer_clear_without_prior_configure_is_plain(self):
+        """If buffer_configure was never called, buffer_clear should only
+        clear and not attempt a re-apply."""
+        cam = _make_fake_connected_camera()
+        assert cam._buffer_config_kwargs is None
+        cam.buffer_clear()
+        cam._gvcp.write_reg.assert_any_call(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
+        # No num-sequences write — no re-apply happened
+        num_seq_writes = [
+            call for call in cam._gvcp.write_reg.call_args_list
+            if call.args[0] == reg.REG_MEMORY_BUFFER_NUM_SEQUENCES
+        ]
+        assert len(num_seq_writes) == 0
+
     def test_roi_offset_rejects_misaligned_x(self):
         """Client-side validation: offset_x must be a multiple of WIDTH_STEP (64)."""
         cam = _make_fake_connected_camera()
