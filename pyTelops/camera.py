@@ -114,33 +114,56 @@ def _resolve_enum(value, enum_cls):
                     f"got {type(value).__name__}")
 
 
-def discover(interface_ip: str = "", timeout: float = 2.0) -> list[dict]:
+#: Manufacturer string Telops cameras advertise in their GVCP discovery
+#: response. Used by :func:`discover` to filter out other GigE Vision
+#: devices (FLIR, Basler, Allied Vision, Micro-Epsilon scanners, etc.)
+#: that may share the network.
+TELOPS_MANUFACTURER = "Telops Inc."
+
+
+def discover(interface_ip: str = "", timeout: float = 2.0,
+             all_vendors: bool = False) -> list[dict]:
     """Discover Telops cameras on the network.
 
-    Sends a GVCP broadcast and collects responses from all GigE Vision
+    Sends a GVCP broadcast and collects responses from GigE Vision
     cameras. If no interface_ip is given, tries the link-local interface
     first, then broadcasts on all interfaces.
+
+    By default only **Telops** cameras are returned — responses from
+    other GigE Vision devices (FLIR, Basler, Allied Vision, laser
+    scanners, etc.) that happen to share the network are filtered out
+    by manufacturer string. Pass ``all_vendors=True`` to get every
+    discovered GigE Vision device regardless of vendor.
 
     Args:
         interface_ip: Local IP to bind to (empty = auto-detect).
         timeout: Seconds to wait for responses.
+        all_vendors: If True, return every GigE Vision camera found,
+            not just Telops ones. Useful for debugging network setup
+            when you want to see what's out there. Defaults to False.
 
     Returns:
         List of dicts with keys: ip, manufacturer, model,
         device_version, serial, user_name.
     """
     if interface_ip:
-        return GVCPClient.discover(interface_ip, timeout)
+        cameras = GVCPClient.discover(interface_ip, timeout)
+    else:
+        # Try link-local first
+        local_ip = _find_link_local_ip()
+        if local_ip:
+            cameras = GVCPClient.discover(local_ip, timeout)
+            if not cameras:
+                # Fallback: broadcast on all interfaces
+                cameras = GVCPClient.discover("", timeout)
+        else:
+            cameras = GVCPClient.discover("", timeout)
 
-    # Try link-local first
-    local_ip = _find_link_local_ip()
-    if local_ip:
-        cameras = GVCPClient.discover(local_ip, timeout)
-        if cameras:
-            return cameras
+    if not all_vendors:
+        cameras = [c for c in cameras
+                   if c.get("manufacturer") == TELOPS_MANUFACTURER]
 
-    # Fallback: broadcast on all interfaces
-    return GVCPClient.discover("", timeout)
+    return cameras
 
 
 def _find_link_local_ip() -> Optional[str]:
@@ -287,6 +310,20 @@ class Camera:
         if self._camera_ip is None:
             cameras = discover(self._local_ip, self._timeout)
             if not cameras:
+                # Nothing Telops found — check if there are other GigE
+                # Vision devices so we can give a more specific error.
+                all_cams = discover(self._local_ip, self._timeout,
+                                    all_vendors=True)
+                if all_cams:
+                    others = ", ".join(
+                        f"{c.get('manufacturer', '?')} "
+                        f"{c.get('model', '?')}"
+                        for c in all_cams)
+                    raise RuntimeError(
+                        f"No Telops camera found, but other GigE Vision "
+                        f"devices are on the network: {others}. "
+                        f"Check that the Telops camera is powered on "
+                        f"and connected to the right Ethernet adapter.")
                 raise RuntimeError(
                     "No Telops camera found. Check:\n"
                     "  1. Camera is powered on\n"

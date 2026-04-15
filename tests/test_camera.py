@@ -484,7 +484,7 @@ class TestDiscover:
     @patch("pyTelops.camera.GVCPClient.discover")
     def test_discover_returns_list(self, mock_disc):
         mock_disc.return_value = [
-            {"ip": "169.254.67.34", "manufacturer": "Telops",
+            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.",
              "model": "FAST M3k"}]
         cameras = discover()
         assert len(cameras) == 1
@@ -495,6 +495,65 @@ class TestDiscover:
         mock_disc.return_value = []
         cameras = discover()
         assert cameras == []
+
+    @patch("pyTelops.camera.GVCPClient.discover")
+    def test_discover_filters_non_telops_by_default(self, mock_disc):
+        """discover() must only return Telops devices by default, even
+        when other GigE Vision cameras are on the same network."""
+        mock_disc.return_value = [
+            {"ip": "192.168.221.198",
+             "manufacturer": "MICRO-EPSILON Optronic GmbH",
+             "model": "scanCONTROL 2500-50"},
+            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.",
+             "model": "TS-IR"},
+            {"ip": "169.254.10.1", "manufacturer": "FLIR Systems",
+             "model": "A50"},
+        ]
+        cameras = discover()
+        assert len(cameras) == 1
+        assert cameras[0]["manufacturer"] == "Telops Inc."
+        assert cameras[0]["ip"] == "169.254.67.34"
+
+    @patch("pyTelops.camera.GVCPClient.discover")
+    def test_discover_all_vendors_returns_everything(self, mock_disc):
+        """all_vendors=True returns every GigE Vision device found."""
+        mock_disc.return_value = [
+            {"ip": "192.168.221.198",
+             "manufacturer": "MICRO-EPSILON Optronic GmbH",
+             "model": "scanCONTROL 2500-50"},
+            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.",
+             "model": "TS-IR"},
+        ]
+        cameras = discover(all_vendors=True)
+        assert len(cameras) == 2
+
+    @patch("pyTelops.camera.GVCPClient.discover")
+    def test_discover_filter_with_interface_ip(self, mock_disc):
+        """Filter also applies when interface_ip is explicitly passed."""
+        mock_disc.return_value = [
+            {"ip": "192.168.1.5", "manufacturer": "Basler",
+             "model": "acA2000"},
+            {"ip": "192.168.1.6", "manufacturer": "Telops Inc.",
+             "model": "FAST M3k"},
+        ]
+        cameras = discover(interface_ip="192.168.1.10")
+        assert len(cameras) == 1
+        assert cameras[0]["manufacturer"] == "Telops Inc."
+
+    @patch("pyTelops.camera.GVCPClient.discover")
+    def test_connect_reports_other_vendors_in_error(self, mock_disc):
+        """connect() should mention detected non-Telops devices when it
+        can't find a Telops camera — makes mixed-vendor setup mistakes
+        obvious."""
+        mock_disc.return_value = [
+            {"ip": "192.168.221.198",
+             "manufacturer": "MICRO-EPSILON Optronic GmbH",
+             "model": "scanCONTROL 2500-50"},
+        ]
+        cam = Camera()
+        with pytest.raises(RuntimeError,
+                            match="MICRO-EPSILON"):
+            cam.connect()
 
 
 # ============================================================
