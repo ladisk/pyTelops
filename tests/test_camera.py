@@ -277,6 +277,46 @@ class TestAcquisitionAPI:
         assert cam.is_acquiring is False
         assert cam.is_streaming is False
 
+    def test_roi_offset_rejects_misaligned_x(self):
+        """Client-side validation: offset_x must be a multiple of WIDTH_STEP (64)."""
+        cam = _make_fake_connected_camera()
+        # Stub resolution so the subwindow fit check doesn't fire first
+        with patch.object(type(cam), "resolution",
+                          new=property(lambda self: (64, 4))):
+            with pytest.raises(ValueError, match="multiple of 64"):
+                cam.roi_offset = (96, 0)
+
+    def test_roi_offset_rejects_misaligned_y(self):
+        """Client-side validation: offset_y must be a multiple of HEIGHT_STEP (4)."""
+        cam = _make_fake_connected_camera()
+        with patch.object(type(cam), "resolution",
+                          new=property(lambda self: (64, 4))):
+            with pytest.raises(ValueError, match="multiple of 4"):
+                cam.roi_offset = (0, 3)
+
+    def test_roi_offset_rejects_negative(self):
+        cam = _make_fake_connected_camera()
+        with patch.object(type(cam), "resolution",
+                          new=property(lambda self: (64, 4))):
+            with pytest.raises(ValueError, match="non-negative"):
+                cam.roi_offset = (-64, 0)
+
+    def test_roi_offset_rejects_out_of_bounds(self):
+        """x + width must fit within sensor width."""
+        cam = _make_fake_connected_camera()
+        with patch.object(type(cam), "resolution",
+                          new=property(lambda self: (128, 64))):
+            with pytest.raises(ValueError, match="exceeds sensor width"):
+                cam.roi_offset = (256, 0)  # 256 + 128 = 384 > 320
+
+    def test_roi_offset_accepts_valid_values(self):
+        cam = _make_fake_connected_camera()
+        with patch.object(type(cam), "resolution",
+                          new=property(lambda self: (128, 64))):
+            cam.roi_offset = (64, 96)
+            cam._gvcp.write_reg.assert_any_call(reg.REG_OFFSET_X, 64)
+            cam._gvcp.write_reg.assert_any_call(reg.REG_OFFSET_Y, 96)
+
     def test_packet_delay_default_is_zero_override_none(self):
         cam = _make_fake_connected_camera()
         # Override flag starts None = "use default 0 in start_stream"

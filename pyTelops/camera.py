@@ -771,8 +771,38 @@ class Camera:
     @roi_offset.setter
     def roi_offset(self, xy: tuple[int, int]):
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_OFFSET_X, xy[0])
-        self._gvcp.write_reg(reg.REG_OFFSET_Y, xy[1])
+        x, y = int(xy[0]), int(xy[1])
+
+        # Validate alignment client-side so users get a clear error
+        # instead of a cryptic GVCP GENERIC_ERROR from the camera.
+        if x < 0 or x % self.WIDTH_STEP != 0:
+            raise ValueError(
+                f"roi_offset x={x} is invalid. Must be a non-negative "
+                f"multiple of {self.WIDTH_STEP} (the width step). "
+                f"Valid values: 0, {self.WIDTH_STEP}, "
+                f"{2 * self.WIDTH_STEP}, ...")
+        if y < 0 or y % self.HEIGHT_STEP != 0:
+            raise ValueError(
+                f"roi_offset y={y} is invalid. Must be a non-negative "
+                f"multiple of {self.HEIGHT_STEP} (the height step). "
+                f"Valid values: 0, {self.HEIGHT_STEP}, "
+                f"{2 * self.HEIGHT_STEP}, ...")
+
+        # Validate that subwindow fits within the sensor
+        w, h = self.resolution
+        if x + w > self.WIDTH_MAX:
+            raise ValueError(
+                f"roi_offset x={x} + width={w} = {x + w} exceeds "
+                f"sensor width {self.WIDTH_MAX}. Reduce resolution or "
+                f"offset.")
+        if y + h > self.HEIGHT_MAX:
+            raise ValueError(
+                f"roi_offset y={y} + height={h} = {y + h} exceeds "
+                f"sensor height {self.HEIGHT_MAX}. Reduce resolution or "
+                f"offset.")
+
+        self._gvcp.write_reg(reg.REG_OFFSET_X, x)
+        self._gvcp.write_reg(reg.REG_OFFSET_Y, y)
 
     @property
     def frame_rate_mode(self):
