@@ -247,6 +247,66 @@ Tkinter-based real-time thermal display with:
 - Colormap selector (inferno, hot, plasma, magma, viridis, gray)
 - Percentile normalization (handles dead pixels)
 
+### Phase 13: Continuous Acquisition API
+
+`grab()` and `acquire(N)` are convenient for single-shot and batch use, but they start and stop the stream on every call. Each cycle is ~5 register writes plus a GVSP receiver thread spawn — roughly 50-200 ms of overhead per call. For live processing loops (LDAQ acquisition sources, live matplotlib plots, real-time ML) this overhead is fatal.
+
+The new public API decouples the stream lifecycle from the frame pull:
+
+```python
+cam.acquisition_start()       # set up stream + write REG_ACQUISITION_START
+with cam.acquisition():       # OR context manager (exception-safe)
+    for _ in range(N):
+        frame = cam.read_frame(timeout=0.0)  # non-blocking pull
+cam.acquisition_stop()
+```
+
+- `acquisition_start/stop` — idempotent lifecycle primitives
+- `acquisition()` — context manager wrapping start/stop
+- `read_frame(timeout, strip_header, convert, latest)` — non-blocking frame pull
+- `is_acquiring` — read-only state flag
+- `grab()` and `acquire()` refactored to use the new primitives internally (same external behavior)
+
+`gui.py` (the Tkinter live viewer) migrated off private register access (`cam._gvcp.write_reg(REG_ACQUISITION_START, 1)` → `cam.acquisition_start()`) and now uses only public API.
+
+**Reviewer-found bug fix:** in the old `grab()`/`acquire()` cleanup, if the `REG_ACQUISITION_START` write raised `GVCPError` after `start_stream()` had already bound the GVSP socket, the socket was leaked. The new implementation wraps `acquisition_start()` inside the try block so cleanup always runs. Regression test included.
+
+### Phase 14: Bounded-latency live display (`latest=True`)
+
+When a live processing loop is slower than the camera frame rate (common with matplotlib redraws, Qt event loop, heavy per-frame computation), frames accumulate in pyTelops's internal GVSP queue. The loop processes them in order, each one staler than the last, and end-to-end latency grows every second.
+
+`read_frame(latest=True)` drains the queue and returns only the most recent frame, discarding intermediate ones. Bounds latency to one frame period + one render regardless of consumer speed.
+
+```python
+with cam.acquisition():
+    while running:
+        frame = cam.read_frame(timeout=0.1, latest=True)
+        if frame is not None:
+            process_and_display(frame)
+```
+
+The trade-off is documented: `latest=True` for live display, `latest=False` (the default) for measurement / logging where every frame matters.
+
+### Phase 15: Configurable `packet_delay`
+
+At the camera's default packet delay of 0, all ~113 packets of a frame are sent back-to-back at GigE line rate — a ~1.4 ms burst. Any host-side hiccup (Python GC, matplotlib redraw, Qt event loop jitter) during the burst can overflow the kernel UDP receive queue and drop packets. At high frame rates, the `"Frame N: X/113 packets unrecoverable"` warnings become a regular occurrence.
+
+New `cam.packet_delay` property maps to `REG_SC_PACKET_DELAY` (8 ns ticks). Setting it to `1000` spreads the 113-packet burst over ~2 ms instead of 1.4 ms, giving the host significantly more slack without measurably affecting frame rate up to ~400 fps.
+
+**Backward compatibility:** an internal `_packet_delay_override` flag tracks whether the user has set a value. `start_stream()` still forces the register to 0 by default (preserving the original "maximum throughput" behavior), and only uses the override when the user has explicitly set one. The override persists across stream restarts.
+
+### Phase 16: `roi_offset` client-side validation
+
+The `roi_offset` setter previously wrote raw values to the camera without checking alignment. Passing an offset that wasn't a multiple of `WIDTH_STEP` (64) or `HEIGHT_STEP` (4), or that pushed the subwindow outside the sensor, returned a cryptic `GENERIC_ERROR` from the camera's register write — frustrating to debug.
+
+The setter now validates client-side: non-negative, proper step alignment, and `x + width <= WIDTH_MAX` / `y + height <= HEIGHT_MAX`. Raises `ValueError` with a specific, actionable message naming the offending value and listing the valid set. Mirrors the existing `_validate_resolution()` defensive pattern.
+
+### Phase 17: `buffer_clear` auto-reapply
+
+The camera's `REG_MEMORY_BUFFER_CLEAR_ALL` register wipes partition configuration in addition to recorded data. After a bare `buffer_clear()`, a subsequent `buffer_record()` fired into an unconfigured buffer and the download silently hung. The natural `record → clear → record → download` workflow failed the second time through.
+
+`buffer_configure()` now stores its kwargs on the Camera instance. `buffer_clear()` automatically re-applies them (with a 100 ms settle delay) so the partition state is restored after the clear. If `buffer_configure()` was never called in the session, `buffer_clear()` is still a plain single-register write.
+
 ---
 
 ## API Design Philosophy
@@ -287,7 +347,12 @@ cam.calibration_load(lens="50mm", temp=25)  # instead of index lookup
 | Camera init, discovery mock, enum resolution | 53 | No |
 | Resolution validation | 12 | No |
 | Calibration file parsing | 6 | No |
-| **Total unit tests** | **116** | **No** |
+| Continuous acquisition API (start/stop, context manager, read_frame, grab/acquire refactor, leak regression) | 18 | No |
+| `read_frame(latest=True)` drain behavior | 4 | No |
+| `packet_delay` property (getter/setter, override persistence, start_stream backward compat) | 9 | No |
+| `roi_offset` client-side validation | 5 | No |
+| `buffer_clear` auto-reapply | 2 | No |
+| **Total unit tests** | **168** | **No** |
 | Discovery, connection, properties | 13 | Yes |
 | Streaming, grab, acquire | 6 | Yes |
 | Buffer configure, record, download | 12 | Yes |
@@ -312,19 +377,23 @@ CI runs unit tests on Python 3.10-3.13, Windows + Linux via GitHub Actions.
 
 ## Current State
 
-The package is fully functional with 116 unit tests and 57 hardware tests. It supports:
+The package is fully functional with 168 unit tests and 57 hardware tests. It supports:
 
 - Auto-discovery, connect/disconnect with context manager
 - All camera settings as properties with string enum support
 - Live streaming (up to ~760 fps theoretical at full resolution)
+- Continuous acquisition API (`acquisition_start/stop`, `acquisition()` context manager, `read_frame`) with bounded-latency `latest=True` mode for live displays
+- Configurable `packet_delay` for host-side UDP buffer relief at high frame rates
 - Buffer recording at up to 95k fps (64×4 at 5 µs integration time)
-- Buffer download at ~270 fps / 45 MB/s
+- Buffer download at ~270 fps / 45 MB/s, tunable `bitrate_mbps` for competing-load scenarios
 - Multi-sequence recording with automatic MOI triggering
+- `buffer_clear` auto-reapplies the last `buffer_configure` so the natural clear → record → download flow works
 - Calibration block selection by lens name and target temperature
 - RT mode auto-conversion to Celsius
 - 13 temperature sensors, voltage/current monitoring
 - NUC trigger, bad pixel replacement, image flip
-- Resolution validation with clear error messages
-- Live thermal viewer with colorbar, cursor readout, and markers
+- Resolution and `roi_offset` validation with clear client-side error messages
+- Live thermal viewer with colorbar, cursor readout, and markers — uses only public acquisition API
 - Robust connection handling (stale sessions, cooling down, control loss)
 - CLI tools: discover, info, grab, live, setup
+- Top-level `TROUBLESHOOTING.rst` covering firewall setup, `packets unrecoverable` warnings, growing-lag live displays, and buffer download failures under competing load
