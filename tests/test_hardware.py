@@ -178,24 +178,29 @@ class TestStreaming:
         assert frames.shape[1] == h
 
     def test_stream_start_stop_restart(self, cam):
+        # Start stream + acquisition via the public API (the old
+        # version of this test used private register writes, which
+        # left the camera's TDC_ACQUISITION_STARTED bit set after
+        # stop_stream because _acquiring was never synced).
         cam.start_stream()
         assert cam.is_streaming
         assert cam.state == "streaming"
 
-        cam._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
-        result = cam._gvsp.get_frame_with_info(timeout=5.0)
-        assert result is not None
+        cam.acquisition_start()
+        frame = cam.read_frame(timeout=5.0)
+        assert frame is not None
 
-        cam.stop_stream()
+        cam.stop_stream()   # cascades through acquisition_stop() properly
         assert not cam.is_streaming
+        assert not cam.is_acquiring
         assert cam.state in ("connected", "standby")
 
-        # Restart
+        # Restart — same lifecycle, verifies repeated start/stop works
         cam.start_stream()
         assert cam.is_streaming
-        cam._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
-        result = cam._gvsp.get_frame_with_info(timeout=5.0)
-        assert result is not None
+        cam.acquisition_start()
+        frame = cam.read_frame(timeout=5.0)
+        assert frame is not None
         cam.stop_stream()
 
 
@@ -205,18 +210,45 @@ class TestStreaming:
 
 @pytest.fixture(autouse=True)
 def reset_buffer(cam, request):
-    """Reset buffer state before each buffer/workflow test."""
-    if request.node.parent and request.node.parent.name in (
-            "TestBuffer", "TestFullWorkflow"):
-        try:
-            cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except (GVCPError, AttributeError):
-            pass
-        try:
-            cam._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, 0)
-        except (GVCPError, AttributeError):
-            pass
-        time.sleep(0.3)
+    """Reset buffer state around buffer/workflow tests.
+
+    Before: stop acquisition and disable buffer mode so each test
+    starts from a clean state.
+
+    After: disable buffer mode again. ``buffer_clear()`` auto-reapplies
+    ``buffer_configure()`` (so ``clear -> record -> download`` works),
+    which leaves ``REG_MEMORY_BUFFER_MODE = ON``. Without this teardown
+    the last TestBuffer test would leave buffer mode enabled, and
+    subsequent classes (TestResolution, TestRTConversion, etc.) would
+    inherit that state.
+    """
+    is_buffer_test = (
+        request.node.parent
+        and request.node.parent.name in ("TestBuffer", "TestFullWorkflow")
+    )
+    if not is_buffer_test:
+        yield
+        return
+
+    try:
+        cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+    except (GVCPError, AttributeError):
+        pass
+    try:
+        cam._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, 0)
+    except (GVCPError, AttributeError):
+        pass
+    time.sleep(0.3)
+    yield
+    try:
+        cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+    except (GVCPError, AttributeError):
+        pass
+    try:
+        cam._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, 0)
+    except (GVCPError, AttributeError):
+        pass
+    time.sleep(0.3)
 
 
 @pytest.mark.hardware
