@@ -232,6 +232,10 @@ class Camera:
         self._buffer_n_sequences = 1
         self._calibration_info: dict = {}
         self._calibration_names: dict = {}
+        # User-set packet delay override. None = use default (force 0 on
+        # start_stream for max throughput). Int = user's chosen value,
+        # preserved across stream restarts.
+        self._packet_delay_override: Optional[int] = None
 
     def __repr__(self) -> str:
         status = "connected" if self._connected else "disconnected"
@@ -793,6 +797,50 @@ class Camera:
         self._check_connected()
         self._gvcp.write_reg(reg.REG_TRIGGER_FRAME_COUNT, count)
 
+    @property
+    def packet_delay(self) -> int:
+        """Inter-packet delay for GVSP streaming, in camera timer ticks.
+
+        Each tick is 8 ns on Telops cameras. The camera inserts this
+        much delay between successive stream packets, which spreads
+        the per-frame burst over time and reduces host-side UDP
+        receive overflow at the cost of slightly lower maximum frame
+        rate.
+
+        Typical values:
+            ``0`` — no delay (default). Maximum throughput. Works on
+                clean networks with a fast receiver. Risk of packet
+                loss if the host has hiccups (GC, display redraws,
+                thread scheduling jitter).
+            ``1000`` — ~8 µs between packets. Spreads a 113-packet
+                frame over ~2 ms. Usable up to ~400 fps. Safe default
+                for live processing loops where the host is doing
+                non-trivial work.
+            ``5000`` — ~40 µs between packets. Very conservative,
+                max ~100 fps. Use only if ``1000`` is not enough.
+
+        Setting this property writes the value to the camera register
+        immediately. The value is also remembered and re-applied on
+        subsequent calls to :meth:`start_stream`, so it survives
+        stream restarts and context-manager re-entry.
+
+        This setting has no effect on buffer recording (which uses
+        the camera's internal memory at full sensor speed) or on
+        buffer download (which uses a separate bitrate register).
+        """
+        self._check_connected()
+        return self._gvcp.read_reg(reg.REG_SC_PACKET_DELAY)
+
+    @packet_delay.setter
+    def packet_delay(self, ticks: int):
+        self._check_connected()
+        ticks = int(ticks)
+        if ticks < 0:
+            raise ValueError(
+                f"packet_delay must be non-negative, got {ticks}")
+        self._gvcp.write_reg(reg.REG_SC_PACKET_DELAY, ticks)
+        self._packet_delay_override = ticks
+
     # ==========================================================
     # Streaming
     # ==========================================================
@@ -815,11 +863,15 @@ class Camera:
 
         self._gvsp._packet_data_size = target_pkt_size - 8
 
-        # Minimize inter-packet delay
+        # Inter-packet delay: respect user override if set, otherwise
+        # force to 0 for maximum throughput (original default behavior).
         try:
-            delay = self._gvcp.read_reg(reg.REG_SC_PACKET_DELAY)
-            if delay != 0:
-                self._gvcp.write_reg(reg.REG_SC_PACKET_DELAY, 0)
+            target_delay = (self._packet_delay_override
+                            if self._packet_delay_override is not None
+                            else 0)
+            current_delay = self._gvcp.read_reg(reg.REG_SC_PACKET_DELAY)
+            if current_delay != target_delay:
+                self._gvcp.write_reg(reg.REG_SC_PACKET_DELAY, target_delay)
         except GVCPError:
             pass
 

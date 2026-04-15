@@ -15,17 +15,22 @@ def _make_fake_connected_camera():
     """Return a Camera wired with mock GVCP/GVSP, bypassing the network.
 
     The mock GVCP returns 0 for any read (so _check_ready treats the
-    camera as ready) and silently accepts writes.
+    camera as ready) and silently accepts writes. The mock GVSP's
+    socket returns a valid IP/port tuple so start_stream() can run
+    end-to-end without real network I/O.
     """
     cam = Camera()
     cam._connected = True
     cam._streaming = False
     cam._acquiring = False
+    cam._local_ip = "169.254.1.1"
     cam._gvcp = MagicMock()
     cam._gvcp.read_reg.return_value = 0
     cam._gvcp._control_lost = False
     cam._gvsp = MagicMock()
     cam._gvsp.get_frame.return_value = None
+    cam._gvsp.port = 3957
+    cam._gvsp._sock.getsockname.return_value = ("169.254.1.1", 3957)
     return cam
 
 
@@ -271,6 +276,89 @@ class TestAcquisitionAPI:
         cam.stop_stream()
         assert cam.is_acquiring is False
         assert cam.is_streaming is False
+
+    def test_packet_delay_default_is_zero_override_none(self):
+        cam = _make_fake_connected_camera()
+        # Override flag starts None = "use default 0 in start_stream"
+        assert cam._packet_delay_override is None
+
+    def test_packet_delay_getter_reads_register(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = 1234
+        assert cam.packet_delay == 1234
+        cam._gvcp.read_reg.assert_called_with(reg.REG_SC_PACKET_DELAY)
+
+    def test_packet_delay_setter_writes_register_and_override(self):
+        cam = _make_fake_connected_camera()
+        cam.packet_delay = 1000
+        cam._gvcp.write_reg.assert_any_call(reg.REG_SC_PACKET_DELAY, 1000)
+        assert cam._packet_delay_override == 1000
+
+    def test_packet_delay_setter_rejects_negative(self):
+        cam = _make_fake_connected_camera()
+        with pytest.raises(ValueError, match="non-negative"):
+            cam.packet_delay = -1
+
+    def test_packet_delay_setter_coerces_int(self):
+        cam = _make_fake_connected_camera()
+        cam.packet_delay = 500.7  # float — should be coerced
+        assert cam._packet_delay_override == 500
+
+    def test_start_stream_forces_zero_when_no_override(self):
+        """Backward compat: unchanged default behavior when user doesn't
+        touch packet_delay. start_stream forces the register to 0."""
+        cam = _make_fake_connected_camera()
+        # Simulate a non-zero persistent camera setting
+        cam._gvcp.read_reg.return_value = 5000
+        cam.start_stream()
+        # Should have written 0 because override is None (default behavior)
+        cam._gvcp.write_reg.assert_any_call(reg.REG_SC_PACKET_DELAY, 0)
+        assert cam._packet_delay_override is None  # still untouched
+
+    def test_start_stream_respects_override(self):
+        """New behavior: if user set packet_delay, start_stream uses it
+        instead of forcing to 0."""
+        cam = _make_fake_connected_camera()
+        cam.packet_delay = 1000  # user sets an override
+        # Simulate register being reset to 0 externally (e.g., after
+        # a previous stop_stream or a camera reset)
+        cam._gvcp.read_reg.return_value = 0
+        cam._gvcp.reset_mock()
+        cam.start_stream()
+        # Should re-apply the user's override, NOT force to 0
+        write_calls = [call for call in cam._gvcp.write_reg.call_args_list
+                       if call.args[0] == reg.REG_SC_PACKET_DELAY]
+        assert len(write_calls) == 1
+        assert write_calls[0].args[1] == 1000
+
+    def test_start_stream_skips_rewrite_if_override_matches(self):
+        """Optimization: don't rewrite register if it's already at the
+        target value (whether override or default 0)."""
+        cam = _make_fake_connected_camera()
+        cam.packet_delay = 1000  # triggers one write in the setter
+        cam._gvcp.reset_mock()
+        # Camera is already at 1000
+        cam._gvcp.read_reg.return_value = 1000
+        cam.start_stream()
+        # start_stream should NOT have written REG_SC_PACKET_DELAY again
+        delay_writes = [call for call in cam._gvcp.write_reg.call_args_list
+                        if call.args[0] == reg.REG_SC_PACKET_DELAY]
+        assert len(delay_writes) == 0
+
+    def test_packet_delay_survives_stream_restart(self):
+        """The user override persists across stop_stream/start_stream."""
+        cam = _make_fake_connected_camera()
+        cam.packet_delay = 1500
+        assert cam._packet_delay_override == 1500
+        # Fake a stop and a new start
+        cam._streaming = False
+        cam._gvcp.read_reg.return_value = 0  # as if register was reset
+        cam._gvcp.reset_mock()
+        cam.start_stream()
+        # Override should have been re-applied
+        cam._gvcp.write_reg.assert_any_call(reg.REG_SC_PACKET_DELAY, 1500)
+        # Override flag is still set for future restarts
+        assert cam._packet_delay_override == 1500
 
     def test_grab_cleans_up_stream_if_acquisition_start_raises(self):
         """Regression test: if write_reg(REG_ACQUISITION_START) raises,
