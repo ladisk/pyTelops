@@ -1001,7 +1001,8 @@ class Camera:
 
     def read_frame(self, timeout: float = 0.0,
                    strip_header: bool = True,
-                   convert: bool = True) -> Optional[np.ndarray]:
+                   convert: bool = True,
+                   latest: bool = False) -> Optional[np.ndarray]:
         """Read the next frame from a running acquisition.
 
         Use after :meth:`acquisition_start` (or inside an
@@ -1018,6 +1019,13 @@ class Camera:
                 calibration step regardless of this flag.
             convert: Convert to Celsius in RT mode (default True).
                 Set False for raw uint16 values.
+            latest: If True, drain the internal frame queue and return
+                only the most recent frame (older queued frames are
+                discarded). Use this in live-display loops to bound
+                end-to-end latency — otherwise a slow consumer causes
+                frames to pile up and the display lags further and
+                further behind real time. Default False preserves
+                every frame in order (use for measurement / logging).
 
         Returns:
             2D numpy array (H, W) — float32 Celsius in RT mode, uint16
@@ -1036,7 +1044,21 @@ class Camera:
             raise RuntimeError(
                 "Camera acquisition not active. Call cam.acquisition_start() "
                 "or use 'with cam.acquisition():' before read_frame().")
-        frame = self._gvsp.get_frame(timeout=timeout)
+
+        if latest:
+            # Drain the queue non-blocking, keeping only the newest frame
+            frame = None
+            while True:
+                newer = self._gvsp.get_frame(timeout=0.0)
+                if newer is None:
+                    break
+                frame = newer
+            # If the queue was empty, block briefly for a fresh frame
+            if frame is None and timeout > 0.0:
+                frame = self._gvsp.get_frame(timeout=timeout)
+        else:
+            frame = self._gvsp.get_frame(timeout=timeout)
+
         if frame is None:
             return None
         if convert:

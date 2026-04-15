@@ -169,6 +169,57 @@ class TestAcquisitionAPI:
         assert result.shape == (4, 8)
         assert (result == 42).all()
 
+    def test_read_frame_latest_drains_queue(self):
+        """latest=True must return the newest frame, discarding older ones."""
+        cam = _make_fake_connected_camera()
+        # Three frames in queue, then None — latest should be frame3
+        frame1 = np.full((6, 8), 10, dtype=np.uint16)
+        frame2 = np.full((6, 8), 20, dtype=np.uint16)
+        frame3 = np.full((6, 8), 30, dtype=np.uint16)
+        cam._gvsp.get_frame.side_effect = [frame1, frame2, frame3, None]
+        with patch.object(cam, "start_stream"):
+            cam.acquisition_start()
+        result = cam.read_frame(latest=True, convert=False, strip_header=False)
+        # All three frames pulled, newest returned
+        assert cam._gvsp.get_frame.call_count == 4  # 3 frames + 1 None
+        assert (result == 30).all()  # newest
+
+    def test_read_frame_latest_blocks_when_queue_empty(self):
+        """latest=True with empty queue should block briefly for a frame
+        if timeout > 0."""
+        cam = _make_fake_connected_camera()
+        fresh = np.full((6, 8), 99, dtype=np.uint16)
+        # First call (drain attempt): None. Second call (blocking): a frame.
+        cam._gvsp.get_frame.side_effect = [None, fresh]
+        with patch.object(cam, "start_stream"):
+            cam.acquisition_start()
+        result = cam.read_frame(latest=True, timeout=0.1,
+                                convert=False, strip_header=False)
+        assert (result == 99).all()
+        assert cam._gvsp.get_frame.call_count == 2
+
+    def test_read_frame_latest_non_blocking_returns_none(self):
+        """latest=True with empty queue and timeout=0 returns None."""
+        cam = _make_fake_connected_camera()
+        cam._gvsp.get_frame.return_value = None
+        with patch.object(cam, "start_stream"):
+            cam.acquisition_start()
+        result = cam.read_frame(latest=True, timeout=0.0)
+        assert result is None
+
+    def test_read_frame_default_preserves_order(self):
+        """Without latest=True, the existing behavior is unchanged: one
+        call to get_frame, returns whatever it returns."""
+        cam = _make_fake_connected_camera()
+        frame1 = np.zeros((6, 8), dtype=np.uint16)
+        cam._gvsp.get_frame.return_value = frame1
+        with patch.object(cam, "start_stream"):
+            cam.acquisition_start()
+        cam._gvsp.get_frame.reset_mock()
+        cam.read_frame(timeout=0.1, convert=False, strip_header=False)
+        # Single call — no drain loop
+        assert cam._gvsp.get_frame.call_count == 1
+
     def test_read_frame_calls_apply_calibration_when_convert_true(self):
         cam = _make_fake_connected_camera()
         fake_raw = np.zeros((6, 8), dtype=np.uint16)
