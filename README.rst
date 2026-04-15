@@ -340,6 +340,14 @@ Or use the built-in setup helper:
 
    pytelops setup
 
+Troubleshooting
+---------------
+
+For common issues — firewall setup, ``packets unrecoverable`` warnings
+at high frame rates, growing lag in live displays, buffer download
+failures, and more — see
+`TROUBLESHOOTING.rst <TROUBLESHOOTING.rst>`_.
+
 Integration
 -----------
 
