@@ -332,6 +332,7 @@ class GVCPClient:
         req_id = self._next_id()
         header = struct.pack(">BBHHH", GVCP_KEY, flag, cmd,
                              len(payload), req_id)
+        hard_deadline = time.monotonic() + 30.0
 
         for attempt in range(self._n_retries):
             self._sock.sendto(header + payload, (self.camera_ip, GVCP_PORT))
@@ -358,7 +359,8 @@ class GVCPClient:
                 if ack_cmd == 0x0089:
                     if len(data) >= 12:
                         pending_ms = struct.unpack(">I", data[8:12])[0]
-                        deadline = time.monotonic() + pending_ms / 1000.0
+                        new_deadline = time.monotonic() + pending_ms / 1000.0
+                        deadline = min(new_deadline, hard_deadline)
                     continue
 
                 # Stale ACK from a previous command — discard

@@ -310,14 +310,18 @@ class GVSPReceiver:
         """Parse a single GVSP packet."""
         status = struct.unpack(">H", data[0:2])[0]
         format_byte = data[4]
-        extended = bool(format_byte & 0x08)
+        # Bit 7 of byte 4 = bit 31 of packet_infos = extended ID flag
+        extended = bool(format_byte & 0x80)
 
         if extended:
+            # Extended header (GigE Vision 2.x):
+            #   [0:2]  status, [2:4] block_id_high, [4:8] packet_infos,
+            #   [8:16] block_id_64, [16:20] packet_id_32
             if len(data) < 20:
                 return
-            block_id = struct.unpack(">Q", data[4:12])[0]
-            packet_format = struct.unpack(">I", data[12:16])[0]
-            packet_type = (packet_format >> 24) & 0x0F
+            packet_infos = struct.unpack(">I", data[4:8])[0]
+            packet_type = (packet_infos >> 24) & 0x0F
+            block_id = struct.unpack(">Q", data[8:16])[0]
             packet_id = struct.unpack(">I", data[16:20])[0]
             header_size = 20
         else:
@@ -350,9 +354,15 @@ class GVSPReceiver:
         buf.setup_buffer(self._packet_data_size)
         self._frame_buffers[block_id] = buf
 
+    _MAX_CONCURRENT_FRAMES = 100
+
     def _handle_data(self, block_id: int, packet_id: int, payload: bytes):
         """Write data packet directly to pre-allocated frame buffer."""
         if block_id not in self._frame_buffers:
+            if len(self._frame_buffers) >= self._MAX_CONCURRENT_FRAMES:
+                oldest = min(self._frame_buffers,
+                             key=lambda k: self._frame_buffers[k].created_at)
+                self._frame_buffers.pop(oldest, None)
             self._frame_buffers[block_id] = _FrameBuffer(block_id)
         self._frame_buffers[block_id].write_packet(packet_id, payload)
 

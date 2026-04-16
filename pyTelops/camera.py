@@ -948,9 +948,10 @@ class Camera:
             pass
 
         # Tell camera where to send stream data
-        ip_bytes = socket.inet_aton(
-            self._gvsp._sock.getsockname()[0] or self._local_ip)
-        ip_int = struct.unpack(">I", ip_bytes)[0]
+        sock_ip = self._gvsp._sock.getsockname()[0]
+        if not sock_ip or sock_ip == "0.0.0.0":
+            sock_ip = self._local_ip
+        ip_int = struct.unpack(">I", socket.inet_aton(sock_ip))[0]
 
         self._gvcp.write_reg(reg.REG_SC_DEST_ADDR, ip_int)
         self._gvcp.write_reg(reg.REG_SC_HOST_PORT, self._gvsp.port)

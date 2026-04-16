@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyTelops"
-version = "0.0.1"
+version = "0.1.0"
 description = "Pure-Python driver for Telops thermal cameras over GigE Vision"
 readme = "README.rst"
 license = "MIT"
@@ -37,6 +37,12 @@ dependencies = [
 gui = ["Pillow", "matplotlib"]
 test = ["pytest", "pytest-cov"]
 dev = ["pytest", "pytest-cov", "flake8", "sphinx", "sphinx-rtd-theme"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "hardware: requires a connected Telops camera",
+]
 
 [project.scripts]
 pytelops = "pyTelops.cli:main"
