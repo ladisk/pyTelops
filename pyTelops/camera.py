@@ -167,14 +167,22 @@ def discover(interface_ip: str = "", timeout: float = 2.0,
 
 
 def _find_link_local_ip() -> Optional[str]:
-    """Find a local link-local (169.254.x.x) interface IP."""
+    """Find a local link-local (169.254.x.x) interface IP.
+
+    Uses the routing table (connected-socket trick) to find the interface
+    that can reach the 169.254.x.x subnet, rather than hostname resolution
+    which often resolves to 127.0.1.1 and misses USB/dongle adapters.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip.startswith("169.254."):
-                return ip
+        s.connect(("169.254.0.1", 1))
+        ip = s.getsockname()[0]
+        if ip.startswith("169.254."):
+            return ip
     except OSError:
         pass
+    finally:
+        s.close()
     return None
 
 
