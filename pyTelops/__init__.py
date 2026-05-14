@@ -15,7 +15,7 @@ Usage:
 __version__ = "0.1.0"
 
 from .camera import Camera, discover
-from .gvcp import GVCPClient, GVCPError
+from pyGigEVision import GVCPClient, GVCPError
 from .registers import (
     CalibrationMode, ExposureAuto, TriggerSource, TriggerActivation,
     MemoryBufferMOISource, MemoryBufferStatus,
