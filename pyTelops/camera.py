@@ -2292,7 +2292,7 @@ class Camera:
 
         # Suppress GVSP "packets unrecoverable" warnings during download
         import logging
-        gvsp_logger = logging.getLogger("pyTelops.gvsp")
+        gvsp_logger = logging.getLogger("pyGigEVision.gvsp")
         old_level = gvsp_logger.level
         gvsp_logger.setLevel(logging.CRITICAL)
 
