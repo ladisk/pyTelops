@@ -459,7 +459,7 @@ class TestAcquisitionAPI:
     def test_grab_cleans_up_stream_if_acquisition_start_raises(self):
         """Regression test: if write_reg(REG_ACQUISITION_START) raises,
         the previously-started stream socket must still be torn down."""
-        from pyTelops.gvcp import GVCPError
+        from pyGigEVision import GVCPError
 
         cam = _make_fake_connected_camera()
         # Make start_stream succeed (sets _streaming=True), but the

@@ -15,7 +15,7 @@ import pytest
 
 from pyTelops import Camera, discover
 from pyTelops import registers as reg
-from pyTelops.gvcp import GVCPError
+from pyGigEVision import GVCPError
 
 
 # ============================================================
