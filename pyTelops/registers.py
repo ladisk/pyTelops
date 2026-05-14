@@ -8,20 +8,6 @@ Floats are big-endian IEEE 754 (>f).
 
 from enum import IntEnum
 
-# ============================================================
-# Stream Channel 0 Registers (GigE Vision standard)
-# ============================================================
-REG_SC_HOST_PORT = 0x0D00
-REG_SC_PACKET_SIZE = 0x0D04
-# SC_PACKET_SIZE register layout (GigE Vision spec):
-#   Bits 15:2 — packet size in bytes
-#   Bit 1     — GevSCPSDoNotFragment (1=don't fragment, 0=allow fragmentation)
-#   Bit 0     — GevSCPSFireTestPacket (write-only trigger)
-SC_PACKET_SIZE_MASK = 0xFFFC       # bits 15:2 (packet size, excludes flag bits)
-SC_SCPS_DO_NOT_FRAGMENT = 1 << 1   # bit 1
-SC_SCPS_FIRE_TEST_PACKET = 1 << 0  # bit 0 (write-only)
-REG_SC_PACKET_DELAY = 0x0D08
-REG_SC_DEST_ADDR = 0x0D18
 
 # ============================================================
 # Image Format
