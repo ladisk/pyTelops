@@ -26,8 +26,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-from .gvcp import GVCPClient, GVCPError, REG_HEARTBEAT_TIMEOUT
-from .gvsp import GVSPReceiver
+from pyGigEVision import GVCPClient, GVCPError, GVSPReceiver
+from pyGigEVision.standard import (
+    REG_HEARTBEAT_TIMEOUT,
+    REG_SC_HOST_PORT, REG_SC_PACKET_SIZE, REG_SC_PACKET_DELAY, REG_SC_DEST_ADDR,
+    SC_PACKET_SIZE_MASK, SC_SCPS_DO_NOT_FRAGMENT,
+)
 from . import registers as reg
 
 # --- Enum string resolution ---
@@ -370,7 +374,7 @@ class Camera:
 
         # Clear stream destination (stop any stale streaming)
         try:
-            self._gvcp.write_reg(reg.REG_SC_HOST_PORT, 0)
+            self._gvcp.write_reg(REG_SC_HOST_PORT, 0)
         except GVCPError:
             pass
 
@@ -901,7 +905,7 @@ class Camera:
         buffer download (which uses a separate bitrate register).
         """
         self._check_connected()
-        return self._gvcp.read_reg(reg.REG_SC_PACKET_DELAY)
+        return self._gvcp.read_reg(REG_SC_PACKET_DELAY)
 
     @packet_delay.setter
     def packet_delay(self, ticks: int):
@@ -910,7 +914,7 @@ class Camera:
         if ticks < 0:
             raise ValueError(
                 f"packet_delay must be non-negative, got {ticks}")
-        self._gvcp.write_reg(reg.REG_SC_PACKET_DELAY, ticks)
+        self._gvcp.write_reg(REG_SC_PACKET_DELAY, ticks)
         self._packet_delay_override = ticks
 
     # ==========================================================
@@ -925,12 +929,12 @@ class Camera:
 
         # Clamp packet size to standard MTU, preserving flag bits
         target_pkt_size = 1500
-        pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
-        current_size = pkt_reg & reg.SC_PACKET_SIZE_MASK
+        pkt_reg = self._gvcp.read_reg(REG_SC_PACKET_SIZE)
+        current_size = pkt_reg & SC_PACKET_SIZE_MASK
         if current_size != target_pkt_size:
             # Preserve upper flags and lower flag bits (DoNotFragment etc.)
-            non_size_bits = pkt_reg & ~reg.SC_PACKET_SIZE_MASK
-            self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE,
+            non_size_bits = pkt_reg & ~SC_PACKET_SIZE_MASK
+            self._gvcp.write_reg(REG_SC_PACKET_SIZE,
                                  non_size_bits | target_pkt_size)
 
         self._gvsp._packet_data_size = target_pkt_size - 8
@@ -941,9 +945,9 @@ class Camera:
             target_delay = (self._packet_delay_override
                             if self._packet_delay_override is not None
                             else 0)
-            current_delay = self._gvcp.read_reg(reg.REG_SC_PACKET_DELAY)
+            current_delay = self._gvcp.read_reg(REG_SC_PACKET_DELAY)
             if current_delay != target_delay:
-                self._gvcp.write_reg(reg.REG_SC_PACKET_DELAY, target_delay)
+                self._gvcp.write_reg(REG_SC_PACKET_DELAY, target_delay)
         except GVCPError:
             pass
 
@@ -953,8 +957,8 @@ class Camera:
             sock_ip = self._local_ip
         ip_int = struct.unpack(">I", socket.inet_aton(sock_ip))[0]
 
-        self._gvcp.write_reg(reg.REG_SC_DEST_ADDR, ip_int)
-        self._gvcp.write_reg(reg.REG_SC_HOST_PORT, self._gvsp.port)
+        self._gvcp.write_reg(REG_SC_DEST_ADDR, ip_int)
+        self._gvcp.write_reg(REG_SC_HOST_PORT, self._gvsp.port)
 
         self._gvsp.start()
         self._streaming = True
@@ -969,7 +973,7 @@ class Camera:
             self.acquisition_stop()
 
         try:
-            self._gvcp.write_reg(reg.REG_SC_HOST_PORT, 0)
+            self._gvcp.write_reg(REG_SC_HOST_PORT, 0)
         except GVCPError:
             pass
 
@@ -2332,13 +2336,13 @@ class Camera:
         # value afterwards.
         old_pkt_reg = None
         if packet_size != 1500:
-            old_pkt_reg = self._gvcp.read_reg(reg.REG_SC_PACKET_SIZE)
+            old_pkt_reg = self._gvcp.read_reg(REG_SC_PACKET_SIZE)
             upper_flags = old_pkt_reg & 0xFFFF0000
-            new_pkt_reg = upper_flags | (packet_size & reg.SC_PACKET_SIZE_MASK)
+            new_pkt_reg = upper_flags | (packet_size & SC_PACKET_SIZE_MASK)
             if packet_size > 1500:
                 # Allow IP fragmentation for large packets
-                new_pkt_reg &= ~reg.SC_SCPS_DO_NOT_FRAGMENT
-            self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE, new_pkt_reg)
+                new_pkt_reg &= ~SC_SCPS_DO_NOT_FRAGMENT
+            self._gvcp.write_reg(REG_SC_PACKET_SIZE, new_pkt_reg)
             self._gvsp._packet_data_size = packet_size - 8
 
         # Start download stream
@@ -2386,8 +2390,8 @@ class Camera:
                 try:
                     # Restore original register value (size + flags incl.
                     # DoNotFragment) exactly as it was before download.
-                    self._gvcp.write_reg(reg.REG_SC_PACKET_SIZE, old_pkt_reg)
-                    self._gvsp._packet_data_size = (old_pkt_reg & reg.SC_PACKET_SIZE_MASK) - 8
+                    self._gvcp.write_reg(REG_SC_PACKET_SIZE, old_pkt_reg)
+                    self._gvsp._packet_data_size = (old_pkt_reg & SC_PACKET_SIZE_MASK) - 8
                 except GVCPError:
                     pass
             self._gvsp.resend_enabled = True
