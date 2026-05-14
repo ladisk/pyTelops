@@ -1,9 +1,12 @@
 name: Publish to PyPI
 
+# Manual-only — pyTelops stays private until the Telops collaboration
+# terms are locked in. When ready to publish publicly, the dependency
+# pin in pyproject.toml needs to switch from `git+ssh://...@v0.1.0` to
+# a PyPI version of pyGigEVision (also currently private). Then this
+# workflow can be re-armed for tag pushes.
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_dispatch:
 
 jobs:
   publish:

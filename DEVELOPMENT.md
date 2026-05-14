@@ -27,21 +27,35 @@ The goal was a standalone Python package that could:
 
 ## Architecture
 
-The driver has four layers:
+As of v0.2.0 the GigE Vision protocol layer (GVCP, GVSP, standard
+register constants, GenICam XML download helper) lives in a separate
+package, **pyGigEVision**, which pyTelops depends on. pyTelops keeps
+only the Telops-specific parts (vendor register map, calibration
+loading, RT-mode Celsius conversion, 16 GB onboard buffer recording,
+2-row image header handling). Lorenzo's open-flir driver will rebase
+onto the same pyGigEVision base.
 
 ```
 ┌──────────────────────────────────────┐
-│  Camera class (camera.py)            │  User-facing API: properties,
+│  pyTelops.Camera (camera.py)         │  User-facing API: properties,
 │  - Properties, context manager       │  context manager, auto-discovery
-│  - Buffer recording, calibration     │
+│  - Buffer recording, calibration     │  Vendor-specific behaviour
+│  - RT-mode Celsius, header strip     │
+├──────────────────────────────────────┤
+│  pyTelops.registers                  │  Telops-specific addresses
+│  16 IntEnum classes                  │  (Width, ExposureTime, MemoryBuffer
+│  ~70 vendor register addresses       │   regs, calibration regs, ...)
+├──────────────────────────────────────┤   ← pyTelops
+                                          ─── pyGigEVision (separate package)
 ├──────────────┬───────────────────────┤
 │  GVCPClient  │  GVSPReceiver         │
-│  (gvcp.py)   │  (gvsp.py)           │
+│  (gvcp.py)   │  (gvsp.py)            │
 │  Control     │  Streaming            │
 │  UDP :3956   │  UDP dynamic port     │
 ├──────────────┴───────────────────────┤
-│  registers.py                        │  65+ register addresses,
-│  16 IntEnum classes                  │  parsed from GenICam XML
+│  pyGigEVision.standard               │  GigE Vision spec registers
+│  bootstrap, fetch_genicam_xml        │  (CCP, heartbeat, SC channel,
+│                                      │   FIRST_URL — same on every camera)
 └──────────────────────────────────────┘
 ```
 
@@ -307,6 +321,39 @@ The camera's `REG_MEMORY_BUFFER_CLEAR_ALL` register wipes partition configuratio
 
 `buffer_configure()` now stores its kwargs on the Camera instance. `buffer_clear()` automatically re-applies them (with a 100 ms settle delay) so the partition state is restored after the clear. If `buffer_configure()` was never called in the session, `buffer_clear()` is still a plain single-register write.
 
+### Phase 18: Split out pyGigEVision (v0.2.0, 2026-05-13)
+
+**Why.** With Lorenzo (LolloCappo) starting an open-flir driver from the same protocol primitives, the GigE Vision protocol code in pyTelops became something both drivers needed. Rather than have each vendor driver vendorize a copy of `gvcp.py`/`gvsp.py`, we extracted them into a standalone package that both depend on. The market survey from April 2026 (see `py-gigevision-opportunity.md`) confirmed no other pure-Python, no-SDK, no-GenTL GigE Vision library exists, so the split is also a small contribution to the broader ecosystem (eventually).
+
+**What moved (to `pyGigEVision`).** Everything that worked unchanged on any GigE Vision camera, regardless of vendor:
+
+- `gvcp.py` — discovery, register read/write, memory access, heartbeat (lifted verbatim — only logger name changes and one Telops-named comment genericized).
+- `gvsp.py` — packet reassembly, gap detection, resend, payload-size auto-detection (already had a `byte_order` parameter for non-Telops cameras).
+- GigE Vision spec register addresses — `REG_CCP`, `REG_HEARTBEAT_TIMEOUT`, `REG_FIRST_URL`, `REG_SC_HOST_PORT`, `REG_SC_PACKET_SIZE`, `REG_SC_PACKET_DELAY`, `REG_SC_DEST_ADDR`, plus the `SC_PACKET_SIZE_MASK` / `SC_SCPS_*` flag bits — collected into a new `pyGigEVision.standard` module.
+- New `pyGigEVision.genicam` — fetches the GenICam XML descriptor from a connected camera (the `Local:foo.xml;0xADDR;0xSIZE` URL parsing + zip decompression that every driver was inlining).
+- New `pyGigEVision.bootstrap` — convenience helper that opens GVCP, takes control privilege, starts the heartbeat, and returns the GenICam XML in one call.
+
+**What stayed (in `pyTelops`).** Everything Telops-specific:
+
+- `Camera` (the user-facing class) — connect with cooldown wait, calibration loading from `.tsco`/`.tsbl` files, RT-mode Celsius conversion via per-frame DataExp/DataOffset, 16 GB onboard buffer record/download, 2-row image header strip, Telops resolution constraints (64-step width, 4-step height), Telops manufacturer filter on `discover()`.
+- `registers.py` — Telops-specific addresses (Width, Height, ExposureTime, MemoryBuffer registers, Calibration registers, all 16 IntEnums). The standard SC block was removed in this phase; everything else is unchanged.
+- `cli.py`, `gui.py` — unchanged.
+
+**API impact (back-compat preserved).** `pyTelops`'s public surface is unchanged for users:
+
+- `from pyTelops import Camera` — still works the same.
+- `from pyTelops import GVCPClient, GVCPError` — still works; `__init__.py` re-exports them from `pyGigEVision`. `pyTelops.GVCPClient is pyGigEVision.GVCPClient` (same class object).
+- `from pyTelops.gvcp import GVCPClient` — broken (the file is gone). Anyone importing internal modules directly needs to update to `from pyGigEVision import GVCPClient`. No production user is known to do this.
+- `pyTelops.registers.REG_SC_*` — broken (the constants moved). Internal callers in `camera.py` were already updated to import from `pyGigEVision.standard`. External callers should do the same.
+
+**Why no `BaseCamera` class in pyGigEVision.** The standard rule is to extract abstractions at three implementations, not one. With only `Camera` (Telops) as a real example and open-flir not yet shipping, designing a `BaseCamera` now would almost certainly bake in Telops-specific assumptions (cooldown wait, 2-row header) that don't generalize. Phase 2 of the pyGigEVision design is intentionally undecided — `BaseCamera` will only land if the same lifecycle pattern actually repeats across Telops, FLIR, and a third vendor.
+
+**Versioning and dependency.** `pyTelops 0.2.0` declares `pyGigEVision >= 0.1.0` as a dependency, pinned to the private `git+ssh://git@github.com/ladisk/pyGigEVision.git@v0.1.0` URL while both repos are private. Switches to a normal PyPI version pin when both go public.
+
+**CI.** `pyGigEVision` has its own GitHub Actions matrix (Python 3.10–3.13 × Ubuntu + Windows). pyTelops's automated tests workflow is currently `workflow_dispatch`-only — automated CI on private repos with private git+ssh dependencies needs deploy keys or PAT secrets, not yet wired up.
+
+**Spec and plan.** Full design and implementation plan are committed in this repo at `docs/superpowers/specs/2026-05-13-pygigevision-extraction-design.md` and `docs/superpowers/plans/2026-05-13-pygigevision-extraction.md`.
+
 ---
 
 ## API Design Philosophy
@@ -339,11 +386,13 @@ cam.calibration_load(lens="50mm", temp=25)  # instead of index lookup
 
 ## Test Suite
 
+GVCP and GVSP protocol tests now live in **pyGigEVision**'s own suite —
+they were lifted with the code in v0.2.0. The numbers below are pyTelops's
+remaining vendor-layer coverage.
+
 | Category | Count | Requires Camera |
 |---|---|---|
-| GVCP protocol (packet format, ACK validation, retries) | 29 | No |
-| GVSP frame assembly (pre-allocated buffers, ordering) | 14 | No |
-| Register addresses and enum values | 12 | No |
+| Telops register addresses and enum values | 11 | No |
 | Camera init, discovery mock, enum resolution | 53 | No |
 | Resolution validation | 12 | No |
 | Calibration file parsing | 6 | No |
@@ -352,7 +401,8 @@ cam.calibration_load(lens="50mm", temp=25)  # instead of index lookup
 | `packet_delay` property (getter/setter, override persistence, start_stream backward compat) | 9 | No |
 | `roi_offset` client-side validation | 5 | No |
 | `buffer_clear` auto-reapply | 2 | No |
-| **Total unit tests** | **168** | **No** |
+| **Total unit tests (pyTelops)** | **127** | **No** |
+| _Plus, in pyGigEVision: GVCP (29) + GVSP (15) + standard regs (3) + GenICam XML helper (4) + bootstrap (1)_ | _52_ | _No_ |
 | Discovery, connection, properties | 13 | Yes |
 | Streaming, grab, acquire | 6 | Yes |
 | Buffer configure, record, download | 12 | Yes |
@@ -360,7 +410,11 @@ cam.calibration_load(lens="50mm", temp=25)  # instead of index lookup
 | Full workflow end-to-end | 2 | Yes |
 | **Total hardware tests** | **57** | **Yes** |
 
-CI runs unit tests on Python 3.10-3.13, Windows + Linux via GitHub Actions.
+pyGigEVision's tests auto-run on every push and PR via its own GitHub
+Actions matrix (Python 3.10–3.13 × Ubuntu + Windows). pyTelops's tests
+are wired up but currently `workflow_dispatch`-only — automated CI on a
+private repo with a private `git+ssh` dependency needs deploy keys or a
+PAT secret in the workflow, not yet configured.
 
 ---
 
@@ -377,7 +431,10 @@ CI runs unit tests on Python 3.10-3.13, Windows + Linux via GitHub Actions.
 
 ## Current State
 
-The package is fully functional with 168 unit tests and 57 hardware tests. It supports:
+Currently at v0.2.0 (depends on pyGigEVision v0.1.0). The package is
+fully functional with 127 vendor-layer unit tests in pyTelops, 52
+protocol-layer unit tests in pyGigEVision, and 57 hardware tests in
+pyTelops. It supports:
 
 - Auto-discovery, connect/disconnect with context manager
 - All camera settings as properties with string enum support

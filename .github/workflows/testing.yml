@@ -1,10 +1,11 @@
 name: Tests
 
+# Manual-only while pyTelops depends on the private pyGigEVision repo via
+# git+ssh — automated CI on private GitHub repos needs deploy keys or PAT
+# secrets configured. Re-enable push/pull_request triggers when those are
+# in place (or when both repos go public and pyGigEVision is on PyPI).
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 jobs:
   test:
