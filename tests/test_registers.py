@@ -17,11 +17,6 @@ class TestRegisterAddresses:
         assert reg.REG_EXPOSURE_TIME == 0xE808
         assert reg.REG_EXPOSURE_AUTO == 0xE82C
 
-    def test_stream_channel_registers(self):
-        assert reg.REG_SC_HOST_PORT == 0x0D00
-        assert reg.REG_SC_PACKET_SIZE == 0x0D04
-        assert reg.REG_SC_DEST_ADDR == 0x0D18
-
     def test_buffer_download_mode_before_frame_id(self):
         """Download mode register exists (must be written before frame ID)."""
         assert reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE == 0xE93C

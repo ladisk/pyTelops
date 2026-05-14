@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 from pyTelops.camera import Camera, discover, _find_link_local_ip
 from pyTelops import registers as reg
+from pyGigEVision.standard import REG_SC_PACKET_DELAY
 
 
 def _make_fake_connected_camera():
@@ -382,12 +383,12 @@ class TestAcquisitionAPI:
         cam = _make_fake_connected_camera()
         cam._gvcp.read_reg.return_value = 1234
         assert cam.packet_delay == 1234
-        cam._gvcp.read_reg.assert_called_with(reg.REG_SC_PACKET_DELAY)
+        cam._gvcp.read_reg.assert_called_with(REG_SC_PACKET_DELAY)
 
     def test_packet_delay_setter_writes_register_and_override(self):
         cam = _make_fake_connected_camera()
         cam.packet_delay = 1000
-        cam._gvcp.write_reg.assert_any_call(reg.REG_SC_PACKET_DELAY, 1000)
+        cam._gvcp.write_reg.assert_any_call(REG_SC_PACKET_DELAY, 1000)
         assert cam._packet_delay_override == 1000
 
     def test_packet_delay_setter_rejects_negative(self):
@@ -408,7 +409,7 @@ class TestAcquisitionAPI:
         cam._gvcp.read_reg.return_value = 5000
         cam.start_stream()
         # Should have written 0 because override is None (default behavior)
-        cam._gvcp.write_reg.assert_any_call(reg.REG_SC_PACKET_DELAY, 0)
+        cam._gvcp.write_reg.assert_any_call(REG_SC_PACKET_DELAY, 0)
         assert cam._packet_delay_override is None  # still untouched
 
     def test_start_stream_respects_override(self):
@@ -423,7 +424,7 @@ class TestAcquisitionAPI:
         cam.start_stream()
         # Should re-apply the user's override, NOT force to 0
         write_calls = [call for call in cam._gvcp.write_reg.call_args_list
-                       if call.args[0] == reg.REG_SC_PACKET_DELAY]
+                       if call.args[0] == REG_SC_PACKET_DELAY]
         assert len(write_calls) == 1
         assert write_calls[0].args[1] == 1000
 
@@ -438,7 +439,7 @@ class TestAcquisitionAPI:
         cam.start_stream()
         # start_stream should NOT have written REG_SC_PACKET_DELAY again
         delay_writes = [call for call in cam._gvcp.write_reg.call_args_list
-                        if call.args[0] == reg.REG_SC_PACKET_DELAY]
+                        if call.args[0] == REG_SC_PACKET_DELAY]
         assert len(delay_writes) == 0
 
     def test_packet_delay_survives_stream_restart(self):
@@ -452,7 +453,7 @@ class TestAcquisitionAPI:
         cam._gvcp.reset_mock()
         cam.start_stream()
         # Override should have been re-applied
-        cam._gvcp.write_reg.assert_any_call(reg.REG_SC_PACKET_DELAY, 1500)
+        cam._gvcp.write_reg.assert_any_call(REG_SC_PACKET_DELAY, 1500)
         # Override flag is still set for future restarts
         assert cam._packet_delay_override == 1500
 
