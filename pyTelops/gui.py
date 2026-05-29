@@ -198,7 +198,7 @@ class LiveView:
         if not self.running:
             return
 
-        # Pull raw frame with headers — the viewer reads cal_mode and
+        # Pull raw frame with headers - the viewer reads cal_mode and
         # calibration parameters out of the header bytes itself.
         frame = self.cam.read_frame(timeout=0.05, convert=False, strip_header=False)
 

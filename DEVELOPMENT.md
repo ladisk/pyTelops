@@ -1,13 +1,13 @@
-# pyTelops — Development Report
+# pyTelops - Development Report
 
 > For the contributor workflow (setup, tests, style, release), see CONTRIBUTING.rst.
 > This file holds deeper architecture and internals notes.
 
 ## Overview
 
-**pyTelops** is a pure-Python driver for Telops FAST-series MWIR thermal cameras over GigE Vision. It communicates directly via GVCP/GVSP protocols over UDP — no vendor SDK, no compiled extensions.
+**pyTelops** is a pure-Python driver for Telops FAST-series MWIR thermal cameras over GigE Vision. It communicates directly via GVCP/GVSP protocols over UDP; no vendor SDK, no compiled extensions.
 
-- **Camera**: Telops FAST M3k — InSb MWIR detector, 320×256, 25 mK sensitivity, 16 GB internal buffer
+- **Camera**: Telops FAST M3k (InSb MWIR detector, 320×256, 25 mK sensitivity, 16 GB internal buffer)
 - **Connection**: GigE Vision 1.2 over Ethernet (link-local 169.254.x.x)
 - **Repository**: https://github.com/ladisk/pyTelops
 - **Author**: Jaša Šonc, University of Ljubljana
@@ -58,7 +58,7 @@ onto the same pyGigEVision base.
 ├──────────────┴───────────────────────┤
 │  pyGigEVision.standard               │  GigE Vision spec registers
 │  bootstrap, fetch_genicam_xml        │  (CCP, heartbeat, SC channel,
-│                                      │   FIRST_URL — same on every camera)
+│                                      │   FIRST_URL - same on every camera)
 └──────────────────────────────────────┘
 ```
 
@@ -97,33 +97,33 @@ A background thread receives packets, assembles frames into pre-allocated numpy 
 
 ### Phase 1: Protocol Implementation
 
-Built the GVCP client from the GigE Vision specification — discovery broadcast, register read/write, memory read, heartbeat keepalive. Then built the GVSP receiver — UDP frame reassembly from Leader/Data/Trailer packets.
+Built the GVCP client from the GigE Vision specification: discovery broadcast, register read/write, memory read, heartbeat keepalive. Then built the GVSP receiver: UDP frame reassembly from Leader/Data/Trailer packets.
 
 **8 bugs found and fixed during initial development:**
 
-1. **GVCP req_id wrong size** — packed as 4 bytes instead of 2, causing all reads to return PACKET_REMOVED
-2. **ExposureTime locked by AEC** — Auto Exposure Control locks the register; driver auto-disables AEC before writing
-3. **Discovery string offsets wrong** — Telops uses extended discovery format with +24 byte offset vs standard spec
-4. **GVSP packet type in wrong bits** — type is in lower 3 bits of format byte, not upper nibble
-5. **Packet size exceeds MTU** — camera default 8228 bytes, network MTU 1500; auto-clamped on stream start
-6. **Buffer download register order** — DownloadMode must be set BEFORE FrameID/FrameCount (GenICam pIsLocked dependency)
-7. **IOBase compatibility** — logger_name required, state is read-only
-8. **GVSP byteswap wrong** — Telops sends little-endian (unusual for GigE Vision); removed incorrect byteswap
+1. **GVCP req_id wrong size**: packed as 4 bytes instead of 2, causing all reads to return PACKET_REMOVED
+2. **ExposureTime locked by AEC**: Auto Exposure Control locks the register; driver auto-disables AEC before writing
+3. **Discovery string offsets wrong**: Telops uses extended discovery format with +24 byte offset vs standard spec
+4. **GVSP packet type in wrong bits**: type is in lower 3 bits of format byte, not upper nibble
+5. **Packet size exceeds MTU**: camera default 8228 bytes, network MTU 1500; auto-clamped on stream start
+6. **Buffer download register order**: DownloadMode must be set BEFORE FrameID/FrameCount (GenICam pIsLocked dependency)
+7. **IOBase compatibility**: logger_name required, state is read-only
+8. **GVSP byteswap wrong**: Telops sends little-endian (unusual for GigE Vision); removed incorrect byteswap
 
 ### Phase 2: Standalone Package
 
 Extracted the driver from the openEOL workspace into a standalone package following ladisk group conventions (flat layout, hatchling build, MIT license, RST README). Key design decisions:
 
-- **No openeol/LDAQ dependency** — standalone, frameworks wrap it externally
-- **Context manager** — `with Camera() as cam:` for reliable connect/disconnect
-- **Auto-discovery** — finds cameras on any link-local interface
+- **No openeol/LDAQ dependency**: standalone, frameworks wrap it externally
+- **Context manager**: `with Camera() as cam:` for reliable connect/disconnect
+- **Auto-discovery**: finds cameras on any link-local interface
 - **Properties** for all camera settings instead of getter/setter methods
 
 ### Phase 3: Buffer Download Speed Optimization
 
 Initial buffer download: **15 fps / 2.5 MB/s** (10 frames in 1.7s).
 
-**Root cause discovered**: The `DownloadBitrateMax` register (0xEAD4) defaults to 20 Mbps. Maximum allowed: 1000 Mbps. But the register is **locked when DownloadMode = OFF** — must set mode to SEQUENCE first.
+**Root cause discovered**: The `DownloadBitrateMax` register (0xEAD4) defaults to 20 Mbps. Maximum allowed: 1000 Mbps. But the register is **locked when DownloadMode = OFF**; must set mode to SEQUENCE first.
 
 Also tested packet sizes: 1500 → 3000 → 6000 → 9000 bytes.
 
@@ -157,26 +157,26 @@ Default is 1500B packet size (safe on all networks). Large packets use IP fragme
 
 Studied the aravis open-source GigE Vision library to improve protocol robustness:
 
-- **ACK ID validation** — discards stale packets from previous commands, loops until correct response
+- **ACK ID validation**: discards stale packets from previous commands, loops until correct response
 - **3 retries with command resend** on timeout (was single receive retry)
-- **PENDING_ACK handling** — camera sends 0x0089 when it needs more time; extends deadline
-- **Control loss detection** — heartbeat checks if CCP bits cleared, sets `_control_lost` flag
+- **PENDING_ACK handling**: camera sends 0x0089 when it needs more time; extends deadline
+- **Control loss detection**: heartbeat checks if CCP bits cleared, sets `_control_lost` flag
 
 ### Phase 6: GVSP Rewrite (Aravis-Inspired)
 
 Complete rewrite of the streaming receiver:
 
-- **Pre-allocated frame buffers** — `write_packet()` copies data directly to the correct byte offset in a pre-allocated bytearray, instead of storing in a dict and sorting+joining at assembly time
-- **Payload size auto-detection** — the camera's actual GVSP data payload (1464 bytes) differs from the assumed `packet_size - 8` (1492 bytes) due to extended headers. Auto-detected from the first received packet.
-- **Direct packet resend** — sends PACKETRESEND directly from the GVSP stream socket to the camera's GVCP port, avoiding the GVCP client lock
-- **Real-time gap detection** — checks for missing packets on every received packet, not just at trailer time
-- **Three-tier timeouts** — 5ms initial grace, 20ms resend interval, 200ms frame retention (was single 5s timeout)
+- **Pre-allocated frame buffers**: `write_packet()` copies data directly to the correct byte offset in a pre-allocated bytearray, instead of storing in a dict and sorting+joining at assembly time
+- **Payload size auto-detection**: the camera's actual GVSP data payload (1464 bytes) differs from the assumed `packet_size - 8` (1492 bytes) due to extended headers. Auto-detected from the first received packet.
+- **Direct packet resend**: sends PACKETRESEND directly from the GVSP stream socket to the camera's GVCP port, avoiding the GVCP client lock
+- **Real-time gap detection**: checks for missing packets on every received packet, not just at trailer time
+- **Three-tier timeouts**: 5ms initial grace, 20ms resend interval, 200ms frame retention (was single 5s timeout)
 
 **Critical bug found during rewrite**: The pre-allocated buffer used `packet_size - 8 = 1492` as the offset stride, but actual payloads were 1464 bytes (36-byte GVSP header, not 8). This 28-byte accumulated offset per packet caused a **diagonal pixel shift pattern** visible in the image. Fixed by auto-detecting payload size from the first data packet.
 
 ### Phase 7: Camera Features
 
-**GenICam XML deep dive** — analyzed all 387 registers to discover undocumented features:
+**GenICam XML deep dive**: analyzed all 387 registers to discover undocumented features:
 
 | Feature | What it does |
 |---|---|
@@ -199,7 +199,7 @@ Complete rewrite of the streaming receiver:
 
 **Solution discovered from GenICam XML**: `MemoryBufferSequenceCount` register (0xE914) increments as each sequence completes. Poll this instead of `buffer_status()` for per-sequence completion detection.
 
-`buffer_record()` now handles multi-sequence automatically — arms once, fires MOI for each sequence, polls SEQ_COUNT between sequences, stops acquisition after the last.
+`buffer_record()` now handles multi-sequence automatically: arms once, fires MOI for each sequence, polls SEQ_COUNT between sequences, stops acquisition after the last.
 
 ### Phase 9: Resolution Constraints
 
@@ -207,7 +207,7 @@ Complete rewrite of the streaming receiver:
 - **Width**: must be multiple of 64. Valid: 64, 128, 192, 256, 320
 - **Height**: must be multiple of 4. Valid: 4, 8, 12, ..., 252, 256 (usable pixels)
 - Camera registers accept any value, but only these produce GVSP frames
-- Resolution is presented to the user in **usable pixels** — the 2 header rows are added internally
+- Resolution is presented to the user in **usable pixels** (the 2 header rows are added internally)
 
 RevealIR enforces the same constraints in its UI (step=64 for width, step=4 for height).
 
@@ -236,7 +236,7 @@ cam.calibration_load(lens="50mm", temp=25)   # auto-selects right collection
 **Gotchas discovered**:
 - `.tsco` files use 0-indexed FW positions (FW0-FW3), exposure files use 1-indexed (FW1-FW4)
 - `.tsco` uses `EL08887`, exposure files use `ELSN08887`
-- Loading the same collection twice fails with GENERIC_ERROR — driver skips if already active
+- Loading the same collection twice fails with GENERIC_ERROR; driver skips if already active
 
 ### Phase 11: RT Mode Temperature Conversion
 
@@ -244,7 +244,7 @@ cam.calibration_load(lens="50mm", temp=25)   # auto-selects right collection
 
 **Investigation**: Brute-forced every power of 2 as a scaling factor. Found `pixel * 2^(-8) + 273.15 = Kelvin`. Confirmed by pointing camera at a hand (28.9°C).
 
-**Key discovery**: The conversion parameters `DataExp` and `DataOffset` are stored in each frame's **2-row Telops header** — the same header rows we strip. The driver now reads these values from the header before stripping it.
+**Key discovery**: The conversion parameters `DataExp` and `DataOffset` are stored in each frame's **2-row Telops header** (the same header rows we strip). The driver now reads these values from the header before stripping it.
 
 ```
 T_kelvin = pixel × 2^DataExp + DataOffset    (DataExp=-8, DataOffset=273.15)
@@ -266,7 +266,7 @@ Tkinter-based real-time thermal display with:
 
 ### Phase 13: Continuous Acquisition API
 
-`grab()` and `acquire(N)` are convenient for single-shot and batch use, but they start and stop the stream on every call. Each cycle is ~5 register writes plus a GVSP receiver thread spawn — roughly 50-200 ms of overhead per call. For live processing loops (LDAQ acquisition sources, live matplotlib plots, real-time ML) this overhead is fatal.
+`grab()` and `acquire(N)` are convenient for single-shot and batch use, but they start and stop the stream on every call. Each cycle is ~5 register writes plus a GVSP receiver thread spawn (roughly 50-200 ms of overhead per call). For live processing loops (LDAQ acquisition sources, live matplotlib plots, real-time ML) this overhead is fatal.
 
 The new public API decouples the stream lifecycle from the frame pull:
 
@@ -278,10 +278,10 @@ with cam.acquisition():       # OR context manager (exception-safe)
 cam.acquisition_stop()
 ```
 
-- `acquisition_start/stop` — idempotent lifecycle primitives
-- `acquisition()` — context manager wrapping start/stop
-- `read_frame(timeout, strip_header, convert, latest)` — non-blocking frame pull
-- `is_acquiring` — read-only state flag
+- `acquisition_start/stop` - idempotent lifecycle primitives
+- `acquisition()` - context manager wrapping start/stop
+- `read_frame(timeout, strip_header, convert, latest)` - non-blocking frame pull
+- `is_acquiring` - read-only state flag
 - `grab()` and `acquire()` refactored to use the new primitives internally (same external behavior)
 
 `gui.py` (the Tkinter live viewer) migrated off private register access (`cam._gvcp.write_reg(REG_ACQUISITION_START, 1)` → `cam.acquisition_start()`) and now uses only public API.
@@ -306,7 +306,7 @@ The trade-off is documented: `latest=True` for live display, `latest=False` (the
 
 ### Phase 15: Configurable `packet_delay`
 
-At the camera's default packet delay of 0, all ~113 packets of a frame are sent back-to-back at GigE line rate — a ~1.4 ms burst. Any host-side hiccup (Python GC, matplotlib redraw, Qt event loop jitter) during the burst can overflow the kernel UDP receive queue and drop packets. At high frame rates, the `"Frame N: X/113 packets unrecoverable"` warnings become a regular occurrence.
+At the camera's default packet delay of 0, all ~113 packets of a frame are sent back-to-back at GigE line rate, a ~1.4 ms burst. Any host-side hiccup (Python GC, matplotlib redraw, Qt event loop jitter) during the burst can overflow the kernel UDP receive queue and drop packets. At high frame rates, the `"Frame N: X/113 packets unrecoverable"` warnings become a regular occurrence.
 
 New `cam.packet_delay` property maps to `REG_SC_PACKET_DELAY` (8 ns ticks). Setting it to `1000` spreads the 113-packet burst over ~2 ms instead of 1.4 ms, giving the host significantly more slack without measurably affecting frame rate up to ~400 fps.
 
@@ -314,7 +314,7 @@ New `cam.packet_delay` property maps to `REG_SC_PACKET_DELAY` (8 ns ticks). Sett
 
 ### Phase 16: `roi_offset` client-side validation
 
-The `roi_offset` setter previously wrote raw values to the camera without checking alignment. Passing an offset that wasn't a multiple of `WIDTH_STEP` (64) or `HEIGHT_STEP` (4), or that pushed the subwindow outside the sensor, returned a cryptic `GENERIC_ERROR` from the camera's register write — frustrating to debug.
+The `roi_offset` setter previously wrote raw values to the camera without checking alignment. Passing an offset that wasn't a multiple of `WIDTH_STEP` (64) or `HEIGHT_STEP` (4), or that pushed the subwindow outside the sensor, returned a cryptic `GENERIC_ERROR` from the camera's register write, which was frustrating to debug.
 
 The setter now validates client-side: non-negative, proper step alignment, and `x + width <= WIDTH_MAX` / `y + height <= HEIGHT_MAX`. Raises `ValueError` with a specific, actionable message naming the offending value and listing the valid set. Mirrors the existing `_validate_resolution()` defensive pattern.
 
@@ -330,30 +330,30 @@ The camera's `REG_MEMORY_BUFFER_CLEAR_ALL` register wipes partition configuratio
 
 **What moved (to `pyGigEVision`).** Everything that worked unchanged on any GigE Vision camera, regardless of vendor:
 
-- `gvcp.py` — discovery, register read/write, memory access, heartbeat (lifted verbatim — only logger name changes and one Telops-named comment genericized).
-- `gvsp.py` — packet reassembly, gap detection, resend, payload-size auto-detection (already had a `byte_order` parameter for non-Telops cameras).
-- GigE Vision spec register addresses — `REG_CCP`, `REG_HEARTBEAT_TIMEOUT`, `REG_FIRST_URL`, `REG_SC_HOST_PORT`, `REG_SC_PACKET_SIZE`, `REG_SC_PACKET_DELAY`, `REG_SC_DEST_ADDR`, plus the `SC_PACKET_SIZE_MASK` / `SC_SCPS_*` flag bits — collected into a new `pyGigEVision.standard` module.
-- New `pyGigEVision.genicam` — fetches the GenICam XML descriptor from a connected camera (the `Local:foo.xml;0xADDR;0xSIZE` URL parsing + zip decompression that every driver was inlining).
-- New `pyGigEVision.bootstrap` — convenience helper that opens GVCP, takes control privilege, starts the heartbeat, and returns the GenICam XML in one call.
+- `gvcp.py` - discovery, register read/write, memory access, heartbeat (lifted verbatim; only logger name changes and one Telops-named comment genericized).
+- `gvsp.py` - packet reassembly, gap detection, resend, payload-size auto-detection (already had a `byte_order` parameter for non-Telops cameras).
+- GigE Vision spec register addresses (`REG_CCP`, `REG_HEARTBEAT_TIMEOUT`, `REG_FIRST_URL`, `REG_SC_HOST_PORT`, `REG_SC_PACKET_SIZE`, `REG_SC_PACKET_DELAY`, `REG_SC_DEST_ADDR`, plus the `SC_PACKET_SIZE_MASK` / `SC_SCPS_*` flag bits) - collected into a new `pyGigEVision.standard` module.
+- New `pyGigEVision.genicam` - fetches the GenICam XML descriptor from a connected camera (the `Local:foo.xml;0xADDR;0xSIZE` URL parsing + zip decompression that every driver was inlining).
+- New `pyGigEVision.bootstrap` - convenience helper that opens GVCP, takes control privilege, starts the heartbeat, and returns the GenICam XML in one call.
 
 **What stayed (in `pyTelops`).** Everything Telops-specific:
 
-- `Camera` (the user-facing class) — connect with cooldown wait, calibration loading from `.tsco`/`.tsbl` files, RT-mode Celsius conversion via per-frame DataExp/DataOffset, 16 GB onboard buffer record/download, 2-row image header strip, Telops resolution constraints (64-step width, 4-step height), Telops manufacturer filter on `discover()`.
-- `registers.py` — Telops-specific addresses (Width, Height, ExposureTime, MemoryBuffer registers, Calibration registers, all 16 IntEnums). The standard SC block was removed in this phase; everything else is unchanged.
-- `cli.py`, `gui.py` — unchanged.
+- `Camera` (the user-facing class) - connect with cooldown wait, calibration loading from `.tsco`/`.tsbl` files, RT-mode Celsius conversion via per-frame DataExp/DataOffset, 16 GB onboard buffer record/download, 2-row image header strip, Telops resolution constraints (64-step width, 4-step height), Telops manufacturer filter on `discover()`.
+- `registers.py` - Telops-specific addresses (Width, Height, ExposureTime, MemoryBuffer registers, Calibration registers, all 16 IntEnums). The standard SC block was removed in this phase; everything else is unchanged.
+- `cli.py`, `gui.py` - unchanged.
 
 **API impact (back-compat preserved).** `pyTelops`'s public surface is unchanged for users:
 
-- `from pyTelops import Camera` — still works the same.
-- `from pyTelops import GVCPClient, GVCPError` — still works; `__init__.py` re-exports them from `pyGigEVision`. `pyTelops.GVCPClient is pyGigEVision.GVCPClient` (same class object).
-- `from pyTelops.gvcp import GVCPClient` — broken (the file is gone). Anyone importing internal modules directly needs to update to `from pyGigEVision import GVCPClient`. No production user is known to do this.
-- `pyTelops.registers.REG_SC_*` — broken (the constants moved). Internal callers in `camera.py` were already updated to import from `pyGigEVision.standard`. External callers should do the same.
+- `from pyTelops import Camera` - still works the same.
+- `from pyTelops import GVCPClient, GVCPError` - still works; `__init__.py` re-exports them from `pyGigEVision`. `pyTelops.GVCPClient is pyGigEVision.GVCPClient` (same class object).
+- `from pyTelops.gvcp import GVCPClient` - broken (the file is gone). Anyone importing internal modules directly needs to update to `from pyGigEVision import GVCPClient`. No production user is known to do this.
+- `pyTelops.registers.REG_SC_*` - broken (the constants moved). Internal callers in `camera.py` were already updated to import from `pyGigEVision.standard`. External callers should do the same.
 
-**Why no `BaseCamera` class in pyGigEVision.** The standard rule is to extract abstractions at three implementations, not one. With only `Camera` (Telops) as a real example and open-flir not yet shipping, designing a `BaseCamera` now would almost certainly bake in Telops-specific assumptions (cooldown wait, 2-row header) that don't generalize. Phase 2 of the pyGigEVision design is intentionally undecided — `BaseCamera` will only land if the same lifecycle pattern actually repeats across Telops, FLIR, and a third vendor.
+**Why no `BaseCamera` class in pyGigEVision.** The standard rule is to extract abstractions at three implementations, not one. With only `Camera` (Telops) as a real example and open-flir not yet shipping, designing a `BaseCamera` now would almost certainly bake in Telops-specific assumptions (cooldown wait, 2-row header) that don't generalize. Phase 2 of the pyGigEVision design is intentionally undecided; `BaseCamera` will only land if the same lifecycle pattern actually repeats across Telops, FLIR, and a third vendor.
 
 **Versioning and dependency.** `pyTelops 0.2.0` declares `pyGigEVision >= 0.1.0` as a dependency, pinned to the private `git+ssh://git@github.com/ladisk/pyGigEVision.git@v0.1.0` URL while both repos are private. Switches to a normal PyPI version pin when both go public.
 
-**CI.** `pyGigEVision` has its own GitHub Actions matrix (Python 3.10–3.13 × Ubuntu + Windows). pyTelops's automated tests workflow is currently `workflow_dispatch`-only — automated CI on private repos with private git+ssh dependencies needs deploy keys or PAT secrets, not yet wired up.
+**CI.** `pyGigEVision` has its own GitHub Actions matrix (Python 3.10–3.13 × Ubuntu + Windows). pyTelops's automated tests workflow is currently `workflow_dispatch`-only; automated CI on private repos with private git+ssh dependencies needs deploy keys or PAT secrets, not yet wired up.
 
 **Spec and plan.** Full design and implementation plan are committed in this repo at `docs/superpowers/specs/2026-05-13-pygigevision-extraction-design.md` and `docs/superpowers/plans/2026-05-13-pygigevision-extraction.md`.
 
@@ -389,7 +389,7 @@ cam.calibration_load(lens="50mm", temp=25)  # instead of index lookup
 
 ## Test Suite
 
-GVCP and GVSP protocol tests now live in **pyGigEVision**'s own suite —
+GVCP and GVSP protocol tests now live in **pyGigEVision**'s own suite;
 they were lifted with the code in v0.2.0. The numbers below are pyTelops's
 remaining vendor-layer coverage.
 
@@ -415,7 +415,7 @@ remaining vendor-layer coverage.
 
 pyGigEVision's tests auto-run on every push and PR via its own GitHub
 Actions matrix (Python 3.10–3.13 × Ubuntu + Windows). pyTelops's tests
-are wired up but currently `workflow_dispatch`-only — automated CI on a
+are wired up but currently `workflow_dispatch`-only; automated CI on a
 private repo with a private `git+ssh` dependency needs deploy keys or a
 PAT secret in the workflow, not yet configured.
 
@@ -423,12 +423,12 @@ PAT secret in the workflow, not yet configured.
 
 ## Technologies & References
 
-- **GigE Vision 1.2 specification** — GVCP/GVSP protocols
-- **GenICam Standard Features Naming Convention** — register naming
-- **aravis** (open-source GigE Vision library) — studied for GVCP ACK handling, GVSP resend architecture, pre-allocated buffers
-- **fasthcc** — Telops HCC file format reader/writer (companion package)
-- **TelopsToolbox** — reference for temperature conversion formula
-- **HCC Header Reference v13.4** — per-frame DataExp/DataOffset fields
+- **GigE Vision 1.2 specification**: GVCP/GVSP protocols
+- **GenICam Standard Features Naming Convention**: register naming
+- **aravis** (open-source GigE Vision library): studied for GVCP ACK handling, GVSP resend architecture, pre-allocated buffers
+- **fasthcc**: Telops HCC file format reader/writer (companion package)
+- **TelopsToolbox**: reference for temperature conversion formula
+- **HCC Header Reference v13.4**: per-frame DataExp/DataOffset fields
 
 ---
 
@@ -453,7 +453,7 @@ pyTelops. It supports:
 - 13 temperature sensors, voltage/current monitoring
 - NUC trigger, bad pixel replacement, image flip
 - Resolution and `roi_offset` validation with clear client-side error messages
-- Live thermal viewer with colorbar, cursor readout, and markers — uses only public acquisition API
+- Live thermal viewer with colorbar, cursor readout, and markers (uses only public acquisition API)
 - Robust connection handling (stale sessions, cooling down, control loss)
 - CLI tools: discover, info, grab, live, setup
 - Top-level `TROUBLESHOOTING.rst` covering firewall setup, `packets unrecoverable` warnings, growing-lag live displays, and buffer download failures under competing load

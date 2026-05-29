@@ -300,7 +300,7 @@ class Camera:
     # Number of metadata rows embedded in each frame by Telops cameras
     HEADER_ROWS = 2
 
-    # Resolution constraints — usable pixels (excludes 2 header rows)
+    # Resolution constraints - usable pixels (excludes 2 header rows)
     WIDTH_MIN = 64
     WIDTH_MAX = 320
     WIDTH_STEP = 64
@@ -345,7 +345,7 @@ class Camera:
         self._acquiring = False
         self._connected = False
         self._buffer_n_sequences = 1
-        # Last-used buffer_configure() kwargs — used by buffer_clear() to
+        # Last-used buffer_configure() kwargs - used by buffer_clear() to
         # automatically re-apply the partition configuration after the
         # camera wipes it (REG_MEMORY_BUFFER_CLEAR_ALL clears both data
         # AND the partition, so the next buffer_record() would fail).
@@ -421,7 +421,7 @@ class Camera:
         if self._camera_ip is None:
             cameras = discover(self._local_ip, self._timeout)
             if not cameras:
-                # Nothing Telops found — check if there are other GigE
+                # Nothing Telops found - check if there are other GigE
                 # Vision devices so we can give a more specific error.
                 all_cams = discover(self._local_ip, self._timeout, all_vendors=True)
                 if all_cams:
@@ -714,7 +714,7 @@ class Camera:
         """Validate resolution in usable pixels.
 
         Width must be multiple of 64 (64-320).
-        Height must be multiple of 4 (4-256) — usable pixels only.
+        Height must be multiple of 4 (4-256), usable pixels only.
 
         Raises ValueError with clear message if invalid.
         """
@@ -727,7 +727,7 @@ class Camera:
                 f"Width must be a multiple of {self.WIDTH_STEP}. Valid widths: {valid}"
             )
 
-        # Height (usable pixels — multiples of 4)
+        # Height (usable pixels, multiples of 4)
         if h < self.HEIGHT_MIN or h > self.HEIGHT_MAX:
             raise ValueError(f"Height {h} out of range [{self.HEIGHT_MIN}-{self.HEIGHT_MAX}]")
         if h % self.HEIGHT_STEP != 0:
@@ -2915,7 +2915,7 @@ class Camera:
         active_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_POSIX)
 
         if target_posix == active_posix:
-            # Already loaded — skip
+            # Already loaded - skip
             pass
         else:
             self._gvcp.write_reg(reg.REG_CAL_COLLECTION_LOAD, 1)
@@ -3668,7 +3668,7 @@ class Camera:
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         time.sleep(0.2)
 
-        # Configure download — mode MUST be set before other registers
+        # Configure download - mode MUST be set before other registers
         # (they are locked when mode == OFF)
         self._gvcp.write_reg(
             reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE, reg.MemoryBufferDownloadMode.SEQUENCE
@@ -3729,7 +3729,7 @@ class Camera:
                     if pbar:
                         pbar.update(1)
                 elif time.monotonic() > stall_deadline:
-                    break  # no frames for 10s — stream is dead
+                    break  # no frames for 10s - stream is dead
         finally:
             if pbar:
                 pbar.close()
@@ -3783,7 +3783,7 @@ class Camera:
         """Print data integrity summary after download."""
         n = data.shape[0]
         frame_means = data.mean(axis=tuple(range(1, data.ndim)))
-        # For calibrated (float32) data, 0.0 is a valid temperature — skip blank-frame check.
+        # For calibrated (float32) data, 0.0 is a valid temperature - skip blank-frame check.
         zero_frames = 0 if data.dtype == np.float32 else int(np.sum(frame_means == 0))
         row_sums = data.reshape(n, data.shape[1], -1).sum(axis=2)
         # Same rationale for zero-row check.
@@ -3803,7 +3803,7 @@ class Camera:
             logger.warning("Data check: %s", ", ".join(issues))
         else:
             logger.info(
-                "Data check: OK — %d frames, range [%s–%s], mean %.0f",
+                "Data check: OK - %d frames, range [%s-%s], mean %.0f",
                 n,
                 data.min(),
                 data.max(),

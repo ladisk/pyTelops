@@ -1,5 +1,5 @@
 .. image:: banner.png
-   :alt: pyTelops — Pure-Python Telops Thermal Camera Driver
+   :alt: pyTelops - Pure-Python Telops Thermal Camera Driver
 
 pyTelops
 ========
@@ -19,7 +19,7 @@ pyTelops
    :target: https://github.com/ladisk/pyTelops/blob/main/LICENSE
 
 Pure-Python driver for `Telops <https://www.telops.com/>`_ thermal cameras
-over GigE Vision. No vendor SDK required — communicates directly via GVCP/GVSP
+over GigE Vision. No vendor SDK required; communicates directly via GVCP/GVSP
 protocols over UDP.
 
 Supported cameras:
@@ -30,12 +30,12 @@ Supported cameras:
 Features
 --------
 
-- **Auto-discovery** — finds cameras on the network regardless of IP
-- **High-speed buffer** — record up to 95k fps, download optimized to saturate GigE bandwidth
-- **Live streaming** — real-time frame acquisition (up to ~760 fps at full resolution)
-- **Subwindow** — configurable resolution for higher frame rates
-- **Diagnostics** — 13 temperature sensors, NUC trigger, timestamps, voltage/current
-- **GUI viewer & CLI** — live thermal display, ``pytelops discover / grab / live``
+- **Auto-discovery**: finds cameras on the network regardless of IP
+- **High-speed buffer**: record up to 95k fps, download optimized to saturate GigE bandwidth
+- **Live streaming**: real-time frame acquisition (up to ~760 fps at full resolution)
+- **Subwindow**: configurable resolution for higher frame rates
+- **Diagnostics**: 13 temperature sensors, NUC trigger, timestamps, voltage/current
+- **GUI viewer & CLI**: live thermal display, ``pytelops discover / grab / live``
 
 Installation
 ------------
@@ -77,7 +77,7 @@ Streaming vs buffer
 
 pyTelops supports two acquisition modes:
 
-**Live streaming** — frames stream directly to PC over Ethernet.
+**Live streaming**: frames stream directly to PC over Ethernet.
 Limited by GigE bandwidth (~125 MB/s); up to ~760 fps at full frame (320×256):
 
 .. code-block:: python
@@ -85,7 +85,7 @@ Limited by GigE bandwidth (~125 MB/s); up to ~760 fps at full frame (320×256):
    frame = cam.grab()             # single frame
    frames = cam.acquire(100)      # 100 frames
 
-**Buffer recording** — the camera records to its internal 16 GB memory at full
+**Buffer recording**: the camera records to its internal 16 GB memory at full
 sensor speed (up to 3100 fps at full frame), then downloads to PC:
 
 .. code-block:: python
@@ -142,7 +142,7 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
 
    Downloading: 100%|██████████| 10000/10000 [00:36<00:00, 271.84frame/s]
    Downloaded 10000 frames in 36.8s (271 fps, 44.8 MB/s)
-   Data check: OK — 10000 frames, range [24.9–36.2], mean 28.1
+   Data check: OK - 10000 frames, range [24.9-36.2], mean 28.1
 
 External trigger
 ----------------
@@ -367,8 +367,8 @@ Integration
 pyTelops is designed to be used standalone or as a backend for data acquisition
 frameworks:
 
-- `openEOL <https://github.com/ladisk/openEOL>`_ — industrial end-of-line testing
-- `LDAQ <https://github.com/ladisk/LDAQ>`_ — lightweight data acquisition
+- `openEOL <https://github.com/ladisk/openEOL>`_: industrial end-of-line testing
+- `LDAQ <https://github.com/ladisk/LDAQ>`_: lightweight data acquisition
 
 Disclaimer
 ----------
