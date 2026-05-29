@@ -4,17 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyTelops"
-version = "0.2.0"
+version = "0.2.1"
 description = "Pure-Python driver for Telops thermal cameras over GigE Vision"
-readme = "README.rst"
+readme = "PYPI_README.rst"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    {name = "Jaša Šonc"},
+    { name = "Jaša Šonc", email = "jasa.sonc@fs.uni-lj.si" },
+    { name = "Janko Slavič", email = "janko.slavic@fs.uni-lj.si" },
 ]
 keywords = ["telops", "thermal", "camera", "gige", "vision", "infrared", "MWIR"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Operating System :: Microsoft :: Windows",
@@ -36,13 +37,16 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["Pillow", "matplotlib"]
-test = ["pytest", "pytest-cov"]
-dev = ["pytest", "pytest-cov", "flake8", "sphinx", "sphinx-rtd-theme"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-markers = [
-    "hardware: requires a connected Telops camera",
+dev = [
+    "sphinx",
+    "sphinx-book-theme",
+    "sphinx-copybutton>=0.5.2",
+    "pytest",
+    "pytest-cov",
+    "build",
+    "twine",
+    "wheel",
+    "ruff",
 ]
 
 [project.scripts]
@@ -50,5 +54,46 @@ pytelops = "pyTelops.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/ladisk/pyTelops"
+Documentation = "https://pytelops.readthedocs.io"
 Repository = "https://github.com/ladisk/pyTelops"
 Issues = "https://github.com/ladisk/pyTelops/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "hardware: requires a connected Telops camera",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "pyTelops/",
+    "tests/",
+    "docs/",
+    "examples/",
+    "README.rst",
+    "PYPI_README.rst",
+    "LICENSE",
+    "CONTRIBUTING.rst",
+    "DEVELOPMENT.md",
+    "pyproject.toml",
+    "requirements.txt",
+    "requirements.dev.txt",
+    "sync_version.py",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pyTelops"]
