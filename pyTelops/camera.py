@@ -3076,31 +3076,70 @@ class Camera:
         duration: float | None = None,
         frames_per_seq: int | None = None,
         pre_moi: int = 0,
-        moi_source="software",
+        moi_source: str | reg.MemoryBufferMOISource = "software",
     ) -> None:
         """Configure the internal memory buffer for recording.
 
-        The camera has a 16GB ring buffer that records at full sensor speed
+        The camera has a 16 GB ring buffer that records at full sensor speed
         (up to 3100 fps at full frame), independent of the Ethernet link.
-        The buffer must be partitioned into fixed-size sequence slots
-        before recording.
+        The buffer is partitioned into fixed-size sequence slots; each slot
+        holds exactly *frames_per_seq* frames. The MOI (Moment of Interest)
+        trigger marks the transition from pre-trigger to post-trigger frames
+        within each slot.
 
-        Specify either ``duration`` (seconds, uses current frame_rate to
-        calculate frame count) or ``frames_per_seq`` (exact frame count).
+        Specify either *duration* (seconds; the current frame rate is used to
+        calculate the frame count) or *frames_per_seq* (exact frame count).
+        If neither is given, 100 frames per sequence is used.
 
-        If the buffer already has data or is in an incompatible state,
-        this method automatically clears it before applying the configuration.
+        If the buffer is already active or in an incompatible state, the
+        method automatically stops acquisition, clears the buffer, and
+        re-enables buffer mode before writing the new parameters.
 
-        Args:
-            n_sequences: Number of recording sequence slots to allocate.
-            duration: Recording duration per sequence in seconds.
-                      Calculates frames_per_seq from current frame_rate.
-            frames_per_seq: Frames per sequence slot (alternative to duration).
-                            If neither duration nor frames_per_seq is given,
-                            defaults to 100 frames.
-            pre_moi: Frames to keep before the MOI trigger.
-            moi_source: "software", "external", or "acquisition_started"
-                        (or MemoryBufferMOISource enum).
+        Parameters
+        ----------
+        n_sequences : int, optional
+            Number of sequence slots to allocate in the buffer.  Default 1.
+        duration : float or None, optional
+            Recording duration per sequence in seconds.  The frame count is
+            derived from the current :attr:`frame_rate`.  Mutually exclusive
+            with *frames_per_seq*.
+        frames_per_seq : int or None, optional
+            Exact number of frames per sequence slot.  Mutually exclusive
+            with *duration*.  Defaults to 100 when neither argument is given.
+        pre_moi : int, optional
+            Number of frames to preserve before the MOI trigger event.
+            These frames are the "pre-trigger" portion of each slot.
+            Default 0 (all frames are post-MOI).
+        moi_source : str or reg.MemoryBufferMOISource, optional
+            Source of the MOI trigger.  Accepted strings (case-insensitive):
+            ``"software"`` -- fire via :meth:`buffer_fire_moi` (default),
+            ``"external"`` -- hardware signal on the BNC connector,
+            ``"acquisition_started"`` -- MOI fires automatically when
+            acquisition begins,
+            ``"none"`` -- no MOI (record-until-full).  Also accepts the
+            :class:`reg.MemoryBufferMOISource` enum or its integer value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If both *duration* and *frames_per_seq* are specified, or if
+            *duration* results in zero frames at the current frame rate.
+
+        Examples
+        --------
+        Record 200 frames split into two sequences with a software MOI:
+
+        >>> cam.buffer_configure(n_sequences=2, frames_per_seq=100)
+
+        Record 0.5 s at current frame rate with 50 pre-trigger frames:
+
+        >>> cam.buffer_configure(duration=0.5, pre_moi=50)
+
+        Configure for external hardware trigger:
+
+        >>> cam.buffer_configure(frames_per_seq=500, moi_source="external")
         """
         self._check_connected()
         moi = _resolve_enum(moi_source, reg.MemoryBufferMOISource)
@@ -3154,38 +3193,56 @@ class Camera:
     def buffer_record(self, verbose: bool = True) -> int:
         """Record all configured sequences to the internal buffer.
 
-        Supports both single-sequence and multi-sequence recordings.
-        For each sequence, arms (first only), fires a software MOI, and
-        waits for the sequence to complete by polling the
-        ``MemoryBufferSequenceCount`` register (0xE914).
+        Arms the camera on the first sequence and fires a software MOI for
+        each sequence in turn.  After firing the MOI, the method polls
+        ``REG_MEMORY_BUFFER_SEQ_COUNT`` (0xE914) to detect per-sequence
+        completion rather than waiting for the overall buffer status to
+        leave RECORDING.  Acquisition is stopped after the final sequence.
 
-        Single-sequence example::
+        The per-sequence timeout is derived automatically from the configured
+        frame count and current frame rate (at least 30 s overhead, minimum
+        45 s total).
 
-            cam.buffer_configure(n_sequences=1, frames_per_seq=100)
-            n = cam.buffer_record()  # -> 100
-
-        Multi-sequence example::
-
-            cam.buffer_configure(n_sequences=3, frames_per_seq=50)
-            n = cam.buffer_record()  # records all 3, returns total
-
-        For external-trigger workflows where the MOI comes from an
-        outside signal, use the manual flow instead::
+        For external-trigger workflows where the MOI comes from a hardware
+        signal, use the manual flow instead::
 
             cam.buffer_configure(n_sequences=3, moi_source="external")
             cam.buffer_arm()
             # ... external trigger fires 3 times ...
             cam.buffer_wait()       # waits for HOLDING/IDLE
 
-        Args:
-            verbose: Print status messages (default True).
+        Parameters
+        ----------
+        verbose : bool, optional
+            Print per-sequence progress messages to stdout.  Default ``True``.
 
-        Returns:
-            Total number of frames recorded across all sequences.
+        Returns
+        -------
+        int
+            Total number of frames recorded across all sequences, read
+            from the camera registers after acquisition stops.
 
-        Raises:
-            TimeoutError: If a sequence doesn't finish within the
-                safety timeout.
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected or not ready.
+        TimeoutError
+            If a sequence does not complete within the computed safety
+            timeout.
+
+        Examples
+        --------
+        Record a single sequence:
+
+        >>> cam.buffer_configure(n_sequences=1, frames_per_seq=100)
+        >>> n = cam.buffer_record()
+        >>> print(n)  # 100
+
+        Record three sequences back-to-back:
+
+        >>> cam.buffer_configure(n_sequences=3, frames_per_seq=50)
+        >>> n = cam.buffer_record()
+        >>> print(n)  # 150
         """
         self._check_ready()
         n_seq = getattr(self, "_buffer_n_sequences", 1)
@@ -3250,17 +3307,39 @@ class Camera:
     def buffer_arm(self) -> None:
         """Arm the camera and start acquisition for buffer recording.
 
-        Use this for external trigger workflows where you need to arm
-        the camera and wait for an external MOI signal. After the
-        trigger fires, call buffer_wait() to block until recording
-        completes.
+        Writes ``REG_ACQUISITION_ARM`` then ``REG_ACQUISITION_START``.
+        Use this as the first step of the manual external-trigger workflow::
+
+            cam.buffer_configure(n_sequences=1, moi_source="external")
+            cam.buffer_arm()
+            # ... external MOI signal fires ...
+            cam.buffer_wait()
+
+        To fire the MOI in software instead, call :meth:`buffer_fire_moi`
+        after arming.  For fully automated software-MOI recordings, prefer
+        :meth:`buffer_record`.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
         self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
 
     def buffer_fire_moi(self) -> None:
-        """Fire software MOI (Moment of Interest) trigger."""
+        """Fire a software MOI (Moment of Interest) trigger.
+
+        Writes ``1`` to ``REG_MEMORY_BUFFER_MOI_SOFTWARE``.  Only has effect
+        when :meth:`buffer_arm` has been called and
+        ``moi_source`` was set to ``"software"`` in :meth:`buffer_configure`.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
@@ -3269,17 +3348,30 @@ class Camera:
     ) -> reg.MemoryBufferStatus:
         """Wait for buffer recording to complete.
 
-        Polls buffer_status() until HOLDING or IDLE.
+        Polls :meth:`buffer_status` at *poll_interval* second intervals
+        until the status is ``HOLDING`` or ``IDLE``, indicating that all
+        configured sequences have finished recording.
 
-        Args:
-            timeout: Max seconds to wait.
-            poll_interval: Seconds between status polls.
+        Parameters
+        ----------
+        timeout : float, optional
+            Maximum number of seconds to wait.  Default 30.0.
+        poll_interval : float, optional
+            Seconds between consecutive status reads.  Default 0.5.
 
-        Returns:
-            Final MemoryBufferStatus.
+        Returns
+        -------
+        reg.MemoryBufferStatus
+            The final buffer status (``HOLDING`` or ``IDLE``) when
+            recording completes.
 
-        Raises:
-            TimeoutError: If not complete within timeout.
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        TimeoutError
+            If the buffer does not reach ``HOLDING`` or ``IDLE`` within
+            *timeout* seconds.
         """
         self._check_connected()
         status = self.buffer_status()
@@ -3326,11 +3418,36 @@ class Camera:
         )
 
     def buffer_info(self) -> dict:
-        """Summary of buffer state and recorded sequences.
+        """Return a summary of buffer state and recorded sequences.
 
-        Returns:
-            Dict with keys: status, n_sequences, recorded (list of
-            frame counts per sequence), total_bytes, free_bytes.
+        Reads the buffer status register, iterates over configured sequence
+        slots to collect per-sequence frame counts, and reads the 64-bit
+        total/free space registers (split across two 32-bit hi/lo registers).
+
+        Returns
+        -------
+        dict
+            A dict with the following keys:
+
+            ``"status"`` : str
+                Name of the current :class:`reg.MemoryBufferStatus` value
+                (e.g. ``"IDLE"``, ``"HOLDING"``, ``"RECORDING"``).
+            ``"n_sequences"`` : int
+                Number of sequence slots configured via
+                :meth:`buffer_configure`.
+            ``"recorded"`` : list[int]
+                Frame count for each sequence slot (0-based index).
+                Entries may be 0 if a slot has not been used or if the
+                camera returns a :class:`GVCPError` for that slot.
+            ``"total_bytes"`` : int
+                Total capacity of the onboard buffer in bytes.
+            ``"free_bytes"`` : int
+                Remaining free space in the buffer in bytes.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
         status = self.buffer_status()
@@ -3359,11 +3476,24 @@ class Camera:
         }
 
     def buffer_status(self) -> reg.MemoryBufferStatus:
-        """Read memory buffer status.
+        """Read the current memory buffer status.
 
-        Returns:
-            MemoryBufferStatus enum (DEACTIVATED, IDLE, HOLDING,
-            RECORDING, UPDATING, TRANSMITTING, DEFRAGGING).
+        Writes the ``REFRESH`` sentinel to ``REG_MEMORY_BUFFER_STATUS`` to
+        force the camera to update the register, then reads and returns the
+        result.  The refresh write is silently ignored on cameras that do not
+        support it.
+
+        Returns
+        -------
+        reg.MemoryBufferStatus
+            Current buffer status.  Possible values:
+            ``DEACTIVATED``, ``IDLE``, ``HOLDING``, ``RECORDING``,
+            ``UPDATING``, ``TRANSMITTING``, ``DEFRAGGING``.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
         with suppress(GVCPError):
@@ -3372,16 +3502,28 @@ class Camera:
         return reg.MemoryBufferStatus(val)
 
     def buffer_recorded_frames(self, sequence: int = 0) -> int:
-        """Get number of recorded frames in a sequence.
+        """Return the number of frames recorded in a sequence slot.
 
-        Args:
-            sequence: Sequence index (0-based).
+        Writes the sequence selector register then reads
+        ``REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE``.
 
-        Returns:
-            Number of frames recorded.
+        Parameters
+        ----------
+        sequence : int, optional
+            0-based sequence slot index.  Default 0.
 
-        Note:
-            May raise GVCPError while buffer is actively recording.
+        Returns
+        -------
+        int
+            Number of frames recorded in the selected sequence slot.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        GVCPError
+            If the camera rejects the register access, for example while
+            the buffer is actively recording.
         """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
@@ -3399,23 +3541,87 @@ class Camera:
         convert: bool = True,
         verbose: bool = True,
     ) -> np.ndarray | None:
-        """Download frames from the internal memory buffer.
+        """Download frames from the internal memory buffer over Ethernet.
 
-        Args:
-            sequence: Sequence index to download.
-            start_frame: Starting frame ID (None = first recorded).
-            n_frames: Number of frames (0 = all recorded).
-            timeout: Total timeout in seconds (0 = auto-calculate).
-            bitrate_mbps: Max download bitrate in Mbps (default 1000).
-            packet_size: GVSP packet size in bytes (default 1500).
-                         Try 9000 for faster downloads if your network
-                         supports it.
-            strip_header: Remove Telops metadata rows (default True).
-            convert: Convert to Celsius in RT mode (default True).
-            verbose: Show progress bar/messages (default True).
+        Sets the download mode to ``SEQUENCE``, configures frame range and
+        packet size, starts an acquisition stream, and collects frames via
+        :class:`pyGigEVision.GVSPReceiver`.  The bitrate cap register is
+        temporarily raised to *bitrate_mbps* to saturate the link, then
+        restored on exit.  Packet size and DoNotFragment flags are also
+        restored after the transfer.
 
-        Returns:
-            numpy array (N, H, W) or None on failure.
+        When *convert* is ``True`` and calibration mode is ``"RT"``, each
+        frame is converted to degrees Celsius using the per-frame header's
+        ``DataExp`` and ``DataOffset`` fields (same path as :meth:`grab`).
+
+        *bitrate_mbps* can be lowered (e.g. to ``300``) to reduce host
+        network contention on machines running video-conferencing software
+        (Teams, Zoom) during long transfers.
+
+        Parameters
+        ----------
+        sequence : int, optional
+            0-based sequence slot index to download.  Default 0.
+        start_frame : int or None, optional
+            First frame ID to request.  ``None`` (default) starts from the
+            first recorded frame in the slot.
+        n_frames : int, optional
+            Number of frames to download.  ``0`` (default) downloads all
+            recorded frames in the slot.
+        timeout : float, optional
+            Total download timeout in seconds.  ``0`` (default) uses an
+            auto-calculated value based on frame count (1.5x the expected
+            transfer time, minimum 10 s).
+        bitrate_mbps : float, optional
+            Maximum download bitrate in Mbit/s written to the camera's
+            ``REG_DOWNLOAD_BITRATE_MAX`` register.  Default 1000.0.
+            Reduce to around 300 when network contention is a concern.
+        packet_size : int, optional
+            GVSP UDP payload size in bytes.  Default 1500 (standard
+            Ethernet MTU).  Use 9000 on a jumbo-frame network for faster
+            downloads; the driver clears the DoNotFragment flag
+            automatically when *packet_size* > 1500.
+        strip_header : bool, optional
+            Strip the two Telops metadata rows from each frame.  Default
+            ``True``.  Ignored when *convert* is ``True`` (stripping is
+            implicit in the calibration path).
+        convert : bool, optional
+            Apply calibration (strip headers and convert to Celsius in RT
+            mode).  Default ``True``.
+        verbose : bool, optional
+            Show a ``tqdm`` progress bar and log a transfer summary.
+            Default ``True``.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Array of shape ``(N, H, W)`` where ``N`` is the number of
+            frames received, ``H`` and ``W`` are the usable pixel dimensions.
+            ``dtype`` is ``float32`` when *convert* is ``True`` and RT mode
+            is active; otherwise ``uint16``.  Returns ``None`` when no
+            frames were recorded in the slot or no frames were received
+            within the timeout.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+
+        Examples
+        --------
+        Download all frames from sequence 0 (default):
+
+        >>> frames = cam.buffer_download()
+        >>> frames.shape
+        (100, 254, 320)
+
+        Download a specific sequence with jumbo frames:
+
+        >>> frames = cam.buffer_download(sequence=1, packet_size=9000)
+
+        Throttle transfer rate to reduce network contention:
+
+        >>> frames = cam.buffer_download(bitrate_mbps=300.0)
         """
         self._check_connected()
 
@@ -3599,19 +3805,23 @@ class Camera:
             )
 
     def buffer_clear(self) -> None:
-        """Clear all sequences from the memory buffer.
+        """Clear all recorded sequences from the memory buffer.
 
-        The camera's CLEAR_ALL register wipes both recorded data **and**
-        the partition configuration (sequence count, sequence size, MOI
-        source, etc.). After a bare clear, a subsequent ``buffer_record()``
-        would fire into an unconfigured buffer and the download would
-        hang or return incomplete data.
+        Writes ``1`` to ``REG_MEMORY_BUFFER_CLEAR_ALL``.  The camera wipes
+        both the recorded frame data and the partition configuration
+        (sequence count, sequence size, pre-MOI count, MOI source) as a
+        side effect of the clear.
 
-        To make the natural ``clear → record → download`` pattern work,
+        To keep the natural ``clear -> record -> download`` cycle working,
         this method automatically re-applies the last-used
-        :meth:`buffer_configure` parameters after clearing. If no
-        configure call has been made in this session, only the clear is
-        performed.
+        :meth:`buffer_configure` parameters (with a short settle delay)
+        after clearing.  If :meth:`buffer_configure` has not been called in
+        this session, only the clear register write is performed.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
@@ -3630,11 +3840,30 @@ class Camera:
     def live_view(self, colormap: str = "inferno", scale: int = 2) -> None:
         """Open a live thermal image viewer window.
 
-        Requires the 'gui' extra: ``pip install pyTelops[gui]``
+        Launches the :class:`pyTelops.gui.LiveView` Tk-based viewer, which
+        grabs frames from the camera and displays them in real time using the
+        specified colormap.  The call blocks until the viewer window is
+        closed.
 
-        Args:
-            colormap: Matplotlib colormap name.
-            scale: Display upscale factor (2 = double size).
+        Requires the ``gui`` optional dependency group::
+
+            pip install pyTelops[gui]
+
+        Parameters
+        ----------
+        colormap : str, optional
+            Matplotlib colormap name applied to the thermal image.
+            Default ``"inferno"``.
+        scale : int, optional
+            Integer upscale factor applied to each dimension of the displayed
+            image.  ``2`` (default) doubles the width and height.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ImportError
+            If the ``gui`` extra is not installed.
         """
         from .gui import LiveView
 
@@ -3646,21 +3875,107 @@ class Camera:
     # ==========================================================
 
     def read_register(self, addr: int) -> int:
-        """Read a raw 32-bit register value."""
+        """Read a raw 32-bit integer register value.
+
+        Low-level escape hatch that issues a GVCP ``ReadReg`` command
+        directly for a given register address.  Prefer the typed properties
+        (e.g. :attr:`frame_rate`, :attr:`integration_time`) for routine use.
+
+        Parameters
+        ----------
+        addr : int
+            32-bit register address (byte offset from the GVCP bootstrap
+            base, as defined in :mod:`pyTelops.registers`).
+
+        Returns
+        -------
+        int
+            The 32-bit unsigned integer value read from the register.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        GVCPError
+            If the camera returns an error response for the address.
+        """
         self._check_connected()
         return self._gvcp.read_reg(addr)
 
     def write_register(self, addr: int, value: int) -> None:
-        """Write a raw 32-bit register value."""
+        """Write a raw 32-bit integer value to a register.
+
+        Low-level escape hatch that issues a GVCP ``WriteReg`` command
+        directly.  Prefer the typed properties for routine use.
+
+        Parameters
+        ----------
+        addr : int
+            32-bit register address (byte offset from the GVCP bootstrap
+            base, as defined in :mod:`pyTelops.registers`).
+        value : int
+            32-bit unsigned integer value to write.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        GVCPError
+            If the camera returns an error response for the address.
+        """
         self._check_connected()
         self._gvcp.write_reg(addr, value)
 
     def read_float_register(self, addr: int) -> float:
-        """Read a register as IEEE 754 float."""
+        """Read a register and interpret its bits as an IEEE 754 float.
+
+        Uses :meth:`pyGigEVision.GVCPClient.read_float` to reinterpret
+        the raw 32-bit register value as a single-precision float via
+        ``struct.unpack``.  Use for camera registers that store floating-
+        point values (e.g. frame rate, temperature setpoints).
+
+        Parameters
+        ----------
+        addr : int
+            32-bit register address (byte offset from the GVCP bootstrap
+            base, as defined in :mod:`pyTelops.registers`).
+
+        Returns
+        -------
+        float
+            The register value interpreted as an IEEE 754 single-precision
+            float.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        GVCPError
+            If the camera returns an error response for the address.
+        """
         self._check_connected()
         return self._gvcp.read_float(addr)
 
     def write_float_register(self, addr: int, value: float) -> None:
-        """Write a register as IEEE 754 float."""
+        """Write a float value to a register as IEEE 754 bits.
+
+        Uses :meth:`pyGigEVision.GVCPClient.write_float` to pack *value*
+        as a single-precision float via ``struct.pack`` before writing.
+
+        Parameters
+        ----------
+        addr : int
+            32-bit register address (byte offset from the GVCP bootstrap
+            base, as defined in :mod:`pyTelops.registers`).
+        value : float
+            Value to write, encoded as an IEEE 754 single-precision float.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        GVCPError
+            If the camera returns an error response for the address.
+        """
         self._check_connected()
         self._gvcp.write_float(addr, value)
