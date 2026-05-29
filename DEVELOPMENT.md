@@ -1,5 +1,8 @@
 # pyTelops — Development Report
 
+> For the contributor workflow (setup, tests, style, release), see CONTRIBUTING.rst.
+> This file holds deeper architecture and internals notes.
+
 ## Overview
 
 **pyTelops** is a pure-Python driver for Telops FAST-series MWIR thermal cameras over GigE Vision. It communicates directly via GVCP/GVSP protocols over UDP — no vendor SDK, no compiled extensions.
