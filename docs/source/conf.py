@@ -11,7 +11,6 @@ project = "pyTelops"
 author = "Jaša Šonc, Janko Slavič"
 copyright = "2026, Jaša Šonc and Ladisk group, University of Ljubljana"
 release = "0.2.1"
-
 # -- General configuration ---------------------------------------------------
 extensions = [
     "sphinx.ext.autodoc",
