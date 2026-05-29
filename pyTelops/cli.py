@@ -1,7 +1,11 @@
 """
 Command-line interface for pyTelops.
 
-Usage:
+Entry point registered as the ``pytelops`` console script. Each sub-command
+maps to a handler function in this module and returns an integer exit code.
+
+Usage::
+
     pytelops discover     Find cameras on the network
     pytelops info         Show camera configuration
     pytelops grab         Grab a single frame and save to file
@@ -9,12 +13,14 @@ Usage:
     pytelops setup        Configure OS (firewall rules, MTU)
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 
 
-def cmd_discover(args):
-    """Find cameras on the network."""
+def cmd_discover(args: argparse.Namespace) -> int:
+    """Find cameras on the network and print a summary table."""
     from .camera import discover
 
     cameras = discover(timeout=args.timeout)
@@ -32,8 +38,8 @@ def cmd_discover(args):
     return 0
 
 
-def cmd_info(args):
-    """Show camera configuration."""
+def cmd_info(args: argparse.Namespace) -> int:
+    """Connect to a camera and print its current configuration."""
     from .camera import Camera
 
     with Camera(ip=args.ip) as cam:
@@ -43,8 +49,8 @@ def cmd_info(args):
     return 0
 
 
-def cmd_grab(args):
-    """Grab a single frame and save."""
+def cmd_grab(args: argparse.Namespace) -> int:
+    """Grab a single frame from the camera and save it to a file."""
     import numpy as np
 
     from .camera import Camera
@@ -72,8 +78,8 @@ def cmd_grab(args):
     return 0
 
 
-def cmd_live(args):
-    """Open live viewer."""
+def cmd_live(args: argparse.Namespace) -> int:
+    """Open the live thermal viewer window (requires the gui extra)."""
     from .camera import Camera
 
     with Camera(ip=args.ip) as cam:
@@ -81,8 +87,8 @@ def cmd_live(args):
     return 0
 
 
-def cmd_setup(args):
-    """Configure OS for GigE Vision camera use."""
+def cmd_setup(args: argparse.Namespace) -> int:
+    """Print OS-specific setup instructions for GigE Vision camera use."""
     import platform
 
     system = platform.system()
@@ -143,8 +149,8 @@ def cmd_setup(args):
     return 0
 
 
-def main(argv: list[str] | None = None):
-    """Main entry point for the CLI."""
+def main(argv: list[str] | None = None) -> int:
+    """Parse arguments and dispatch to the appropriate sub-command handler."""
     parser = argparse.ArgumentParser(
         prog="pytelops", description="pyTelops — Telops thermal camera driver"
     )

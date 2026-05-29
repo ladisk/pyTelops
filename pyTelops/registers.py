@@ -1,13 +1,15 @@
 """
-Telops FAST M3k register addresses and enum mappings.
+Telops-specific register addresses and IntEnum value mappings for the FAST M3k camera.
 
-Source: GenICam XML (CommonTEL2000LibProject.xml v12.7.1) downloaded from camera.
-Register values are 4 bytes. Integers are big-endian uint32 (>I).
-Floats are big-endian IEEE 754 (>f).
+All constants are derived from the camera's GenICam XML descriptor
+(CommonTEL2000LibProject.xml v12.7.1, downloaded directly from the camera).
+Register values are 4 bytes each; integers use big-endian uint32 (>I) encoding
+and floats use big-endian IEEE 754 (>f) encoding.
 """
 
-from enum import IntEnum
+from __future__ import annotations
 
+from enum import IntEnum
 
 # ============================================================
 # Image Format
@@ -120,81 +122,81 @@ TDC_WAITING_FOR_FLASH_SETTINGS = 0x10000
 # ============================================================
 # Image Processing
 # ============================================================
-REG_IMAGE_CORRECTION = 0xE888          # Command (WO) - trigger NUC
-REG_IMAGE_CORRECTION_MODE = 0xE884     # Enum: ImageCorrectionMode
-REG_EXTERNAL_BLACKBODY_TEMP = 0xE944   # Float, Celsius (-273.15 to 1500)
-REG_BAD_PIXEL_REPLACEMENT = 0xEB60     # Bool (RW)
-REG_REVERSE_X = 0xE8D4                # Bool (RW)
-REG_REVERSE_Y = 0xE8D8                # Bool (RW)
-REG_TEST_IMAGE_SELECTOR = 0xEACC      # Enum: TestImageSelector
+REG_IMAGE_CORRECTION = 0xE888  # Command (WO) - trigger NUC
+REG_IMAGE_CORRECTION_MODE = 0xE884  # Enum: ImageCorrectionMode
+REG_EXTERNAL_BLACKBODY_TEMP = 0xE944  # Float, Celsius (-273.15 to 1500)
+REG_BAD_PIXEL_REPLACEMENT = 0xEB60  # Bool (RW)
+REG_REVERSE_X = 0xE8D4  # Bool (RW)
+REG_REVERSE_Y = 0xE8D8  # Bool (RW)
+REG_TEST_IMAGE_SELECTOR = 0xEACC  # Enum: TestImageSelector
 
 # ============================================================
 # ROI / Subwindow
 # ============================================================
-REG_OFFSET_X = 0xEB44                  # Int (RW)
-REG_OFFSET_Y = 0xEB48                  # Int (RW)
-REG_CENTER_IMAGE = 0xE8E8              # Bool (RW)
+REG_OFFSET_X = 0xEB44  # Int (RW)
+REG_OFFSET_Y = 0xEB48  # Int (RW)
+REG_CENTER_IMAGE = 0xE8E8  # Bool (RW)
 
 # ============================================================
 # Frame Rate (extended)
 # ============================================================
-REG_FRAME_RATE_MODE = 0xE818           # Enum: FrameRateMode
-REG_FRAME_RATE_MAX_FG = 0xE81C         # Float, Hz (RW) - frame grabber limit
-REG_FRAME_RATE_MAX = 0xEAB4            # Float, Hz (RO) - camera max
-REG_TRIGGER_FRAME_COUNT = 0xEAD0       # Int (RW), 1 to 2^32-1
+REG_FRAME_RATE_MODE = 0xE818  # Enum: FrameRateMode
+REG_FRAME_RATE_MAX_FG = 0xE81C  # Float, Hz (RW) - frame grabber limit
+REG_FRAME_RATE_MAX = 0xEAB4  # Float, Hz (RO) - camera max
+REG_TRIGGER_FRAME_COUNT = 0xEAD0  # Int (RW), 1 to 2^32-1
 
 # ============================================================
 # Diagnostics
 # ============================================================
 REG_DEVICE_TEMPERATURE_SELECTOR = 0xEA6C  # Enum: TemperatureLocation
-REG_DEVICE_TEMPERATURE_READOUT = 0xEA70   # Float, Celsius (RO)
-REG_DEVICE_VOLTAGE_SELECTOR = 0xEA88      # Enum: VoltageLocation
-REG_DEVICE_VOLTAGE_READOUT = 0xEA8C       # Float, Volts (RO)
-REG_DEVICE_CURRENT_SELECTOR = 0xEA90      # Enum: CurrentLocation
-REG_DEVICE_CURRENT_READOUT = 0xEA94       # Float, Amps (RO)
-REG_DEVICE_RUNNING_TIME = 0xEA98          # Int, seconds (RO)
-REG_DEVICE_COOLER_RUNNING_TIME = 0xEA9C   # Int, seconds (RO)
-REG_DEVICE_POWER_ON_CYCLES = 0xEAA0       # Int, count (RO)
-REG_DEVICE_COOLER_POWER_ON_CYCLES = 0xEAA4 # Int, count (RO)
+REG_DEVICE_TEMPERATURE_READOUT = 0xEA70  # Float, Celsius (RO)
+REG_DEVICE_VOLTAGE_SELECTOR = 0xEA88  # Enum: VoltageLocation
+REG_DEVICE_VOLTAGE_READOUT = 0xEA8C  # Float, Volts (RO)
+REG_DEVICE_CURRENT_SELECTOR = 0xEA90  # Enum: CurrentLocation
+REG_DEVICE_CURRENT_READOUT = 0xEA94  # Float, Amps (RO)
+REG_DEVICE_RUNNING_TIME = 0xEA98  # Int, seconds (RO)
+REG_DEVICE_COOLER_RUNNING_TIME = 0xEA9C  # Int, seconds (RO)
+REG_DEVICE_POWER_ON_CYCLES = 0xEAA0  # Int, count (RO)
+REG_DEVICE_COOLER_POWER_ON_CYCLES = 0xEAA4  # Int, count (RO)
 
 # ============================================================
 # Device Management (extended)
 # ============================================================
-REG_SAVE_CONFIGURATION = 0xEC34           # Command (WO)
-REG_LOAD_CONFIG_ON_STARTUP = 0xEC30       # Bool (RW)
-REG_ACQ_START_ON_STARTUP = 0xE8E4         # Bool (RW)
-REG_POSIX_TIME = 0xE980                   # Int, seconds since epoch (RW)
-REG_SUB_SECOND_TIME = 0xE984              # Int, 100ns ticks (RO)
+REG_SAVE_CONFIGURATION = 0xEC34  # Command (WO)
+REG_LOAD_CONFIG_ON_STARTUP = 0xEC30  # Bool (RW)
+REG_ACQ_START_ON_STARTUP = 0xE8E4  # Bool (RW)
+REG_POSIX_TIME = 0xE980  # Int, seconds since epoch (RW)
+REG_SUB_SECOND_TIME = 0xE984  # Int, 100ns ticks (RO)
 
 # ============================================================
 # Calibration Collections
 # ============================================================
-REG_CAL_COLLECTION_COUNT = 0xE870        # Int (RO)
-REG_CAL_COLLECTION_SELECTOR = 0xE874     # Int (RW)
-REG_CAL_COLLECTION_POSIX = 0xE878        # Int (RW) - collection timestamp
-REG_CAL_COLLECTION_TYPE = 0xEB10         # Int (RO) - enum: 0=TelopsFixed
-REG_CAL_COLLECTION_LOAD = 0xE87C         # Command (WO)
-REG_CAL_BLOCK_COUNT = 0xEAFC             # Int (RO)
-REG_CAL_BLOCK_SELECTOR = 0xEB00          # Int (RW)
-REG_CAL_BLOCK_POSIX = 0xEB04             # Int (RW)
-REG_CAL_BLOCK_LOAD = 0xEB08              # Command (WO)
-REG_CAL_ACTIVE_TYPE = 0xEAE4             # Int (RO)
-REG_CAL_ACTIVE_POSIX = 0xE880            # Int (RO)
-REG_CAL_ACTIVE_BLOCK_POSIX = 0xEB0C      # Int (RO)
+REG_CAL_COLLECTION_COUNT = 0xE870  # Int (RO)
+REG_CAL_COLLECTION_SELECTOR = 0xE874  # Int (RW)
+REG_CAL_COLLECTION_POSIX = 0xE878  # Int (RW) - collection timestamp
+REG_CAL_COLLECTION_TYPE = 0xEB10  # Int (RO) - enum: 0=TelopsFixed
+REG_CAL_COLLECTION_LOAD = 0xE87C  # Command (WO)
+REG_CAL_BLOCK_COUNT = 0xEAFC  # Int (RO)
+REG_CAL_BLOCK_SELECTOR = 0xEB00  # Int (RW)
+REG_CAL_BLOCK_POSIX = 0xEB04  # Int (RW)
+REG_CAL_BLOCK_LOAD = 0xEB08  # Command (WO)
+REG_CAL_ACTIVE_TYPE = 0xEAE4  # Int (RO)
+REG_CAL_ACTIVE_POSIX = 0xE880  # Int (RO)
+REG_CAL_ACTIVE_BLOCK_POSIX = 0xEB0C  # Int (RO)
 
 # ============================================================
 # GEV Timestamps
 # ============================================================
 REG_GEV_TIMESTAMP_TICK_FREQ_HIGH = 0x093C  # Int (RO)
-REG_GEV_TIMESTAMP_TICK_FREQ_LOW = 0x0940   # Int (RO)
-REG_GEV_TIMESTAMP_CONTROL = 0x0944         # Command: 1=reset, 2=latch
-REG_GEV_TIMESTAMP_VALUE_HIGH = 0x0948      # Int (RO)
-REG_GEV_TIMESTAMP_VALUE_LOW = 0x094C       # Int (RO)
+REG_GEV_TIMESTAMP_TICK_FREQ_LOW = 0x0940  # Int (RO)
+REG_GEV_TIMESTAMP_CONTROL = 0x0944  # Command: 1=reset, 2=latch
+REG_GEV_TIMESTAMP_VALUE_HIGH = 0x0948  # Int (RO)
+REG_GEV_TIMESTAMP_VALUE_LOW = 0x094C  # Int (RO)
 
 # ============================================================
 # Download Speed
 # ============================================================
-REG_DOWNLOAD_BITRATE_MAX = 0xEAD4          # Float, Mbps (RW, locked when DownloadMode=OFF)
+REG_DOWNLOAD_BITRATE_MAX = 0xEAD4  # Float, Mbps (RW, locked when DownloadMode=OFF)
 
 # ============================================================
 # Enumerations
@@ -202,21 +204,27 @@ REG_DOWNLOAD_BITRATE_MAX = 0xEAD4          # Float, Mbps (RW, locked when Downlo
 
 
 class CalibrationMode(IntEnum):
+    """Output calibration applied to each frame (RAW, NUC, radiometric temperature, radiance)."""
+
     RAW0 = 0
     RAW = 255
     NUC = 1
-    RT = 2       # Radiometric temperature (Celsius)
-    IBR = 3      # In-band radiance
-    IBI = 4      # In-band irradiance
+    RT = 2  # Radiometric temperature (Celsius)
+    IBR = 3  # In-band radiance
+    IBI = 4  # In-band irradiance
 
 
 class ExposureAuto(IntEnum):
+    """Automatic exposure control mode (off, single-shot, or continuous)."""
+
     OFF = 0
     ONCE = 1
     CONTINUOUS = 2
 
 
 class ExposureMode(IntEnum):
+    """How the sensor integration time is determined (timed, trigger-width, etc.)."""
+
     OFF = 0
     TIMED = 1
     TRIGGER_WIDTH = 2
@@ -224,28 +232,38 @@ class ExposureMode(IntEnum):
 
 
 class AcquisitionMode(IntEnum):
+    """Frame acquisition mode (continuous, single, or multi-frame burst)."""
+
     CONTINUOUS = 0
     SINGLE_FRAME = 1
     MULTI_FRAME = 2
 
 
 class TriggerSelector(IntEnum):
+    """Which trigger function is targeted by TriggerMode/TriggerSource settings."""
+
     ACQUISITION_START = 0
     FLAGGING = 1
     GATING = 2
 
 
 class TriggerMode(IntEnum):
+    """Enable or disable the selected trigger function."""
+
     OFF = 0
     ON = 1
 
 
 class TriggerSource(IntEnum):
+    """Signal source for the selected trigger (software command or BNC external input)."""
+
     SOFTWARE = 0
     EXTERNAL_SIGNAL = 48  # BNC connector
 
 
 class TriggerActivation(IntEnum):
+    """Edge or level polarity that activates the selected trigger."""
+
     RISING_EDGE = 0
     FALLING_EDGE = 1
     ANY_EDGE = 2
@@ -254,11 +272,15 @@ class TriggerActivation(IntEnum):
 
 
 class MemoryBufferMode(IntEnum):
+    """Enable or disable the onboard 16 GB memory buffer."""
+
     OFF = 0
     ON = 1
 
 
 class MemoryBufferStatus(IntEnum):
+    """Current operational state of the onboard memory buffer."""
+
     DEACTIVATED = 0
     IDLE = 1
     HOLDING = 2
@@ -270,12 +292,16 @@ class MemoryBufferStatus(IntEnum):
 
 
 class MemoryBufferDownloadMode(IntEnum):
+    """Unit of download from the onboard buffer (off, full sequence, or single image)."""
+
     OFF = 0
     SEQUENCE = 1
     IMAGE = 2
 
 
 class MemoryBufferMOISource(IntEnum):
+    """Event source that marks the moment-of-interest (MOI) in a buffer recording."""
+
     ACQUISITION_STARTED = 0
     SOFTWARE = 1
     EXTERNAL_SIGNAL = 2
@@ -283,33 +309,45 @@ class MemoryBufferMOISource(IntEnum):
 
 
 class MemoryBufferMOIActivation(IntEnum):
+    """Edge polarity used to detect the moment-of-interest signal."""
+
     RISING_EDGE = 0
     FALLING_EDGE = 1
     ANY_EDGE = 2
 
 
 class IntegrationMode(IntEnum):
+    """Timing relationship between sensor integration and readout phases."""
+
     INTEGRATE_THEN_READ = 0
     INTEGRATE_WHILE_READ = 1
 
 
 class DetectorMode(IntEnum):
+    """Detector operating mode (normal continuous or high-speed burst)."""
+
     NORMAL = 0
     BURST = 1
 
 
 class SensorWellDepth(IntEnum):
+    """Detector well-depth selection, trading dynamic range for gain."""
+
     LOW_GAIN = 0
     HIGH_GAIN = 1
 
 
 class DevicePowerState(IntEnum):
+    """Camera power state (standby, fully on, or transitioning between states)."""
+
     STANDBY = 0
     ON = 1
     IN_TRANSITION = 2
 
 
 class PixelFormat(IntEnum):
+    """GigE Vision pixel format codes for the camera output stream."""
+
     MONO8 = 0x01080001
     MONO16 = 0x01100007
     MONO10 = 0x01100003
@@ -318,11 +356,15 @@ class PixelFormat(IntEnum):
 
 
 class ImageCorrectionMode(IntEnum):
+    """Reference source used when performing non-uniformity correction (NUC)."""
+
     BLACK_BODY = 0
     ICU = 1
 
 
 class TestImageSelector(IntEnum):
+    """Built-in test pattern injected instead of live sensor data."""
+
     OFF = 0
     STATIC_SHADE = 30
     DYNAMIC_SHADE = 31
@@ -330,6 +372,8 @@ class TestImageSelector(IntEnum):
 
 
 class FrameRateMode(IntEnum):
+    """Frame rate control strategy (fixed, locked to trigger, maximum, or burst)."""
+
     FIXED_LOCKED = 0
     FIXED = 1
     MAXIMUM = 2
@@ -337,6 +381,8 @@ class FrameRateMode(IntEnum):
 
 
 class TemperatureLocation(IntEnum):
+    """Selects which internal sensor reports its temperature via the diagnostic register."""
+
     SENSOR = 0
     MAINBOARD = 1
     INTERNAL_LENS = 2
@@ -353,16 +399,22 @@ class TemperatureLocation(IntEnum):
 
 
 class VoltageLocation(IntEnum):
+    """Selects which power rail is read by the voltage diagnostic register."""
+
     COOLER = 10
     SUPPLY_24V = 11
 
 
 class CurrentLocation(IntEnum):
+    """Selects which current measurement is read by the current diagnostic register."""
+
     COOLER = 0
     SUPPLY_24V = 1
 
 
 class CalibrationCollectionType(IntEnum):
+    """Type identifier for a stored calibration collection (currently only Telops-fixed)."""
+
     TELOPS_FIXED = 0
 
 

@@ -1,7 +1,9 @@
 """
 Live thermal image viewer for Telops cameras.
 
-Requires the 'gui' extra: pip install pyTelops[gui]
+Requires the ``gui`` extra::
+
+    pip install pyTelops[gui]
 
 Can be used from code::
 
@@ -13,12 +15,15 @@ Or from the CLI::
     pytelops live
 
 Features:
-  - Real-time thermal display with colormap selection
-  - Colorbar showing temperature scale
-  - Cursor temperature readout in status bar
-  - Click to place persistent marker with temperature
-  - Min/Max/Mean stats in status bar
+
+- Real-time thermal display with colormap selection
+- Colorbar showing temperature scale
+- Cursor temperature readout in status bar
+- Click to place persistent marker with temperature
+- Min/Max/Mean stats in status bar
 """
+
+from __future__ import annotations
 
 import time
 from typing import TYPE_CHECKING
@@ -45,7 +50,8 @@ COLORMAP_CHOICES = ["inferno", "hot", "plasma", "magma", "viridis", "gray"]
 COLORBAR_WIDTH = 60
 
 
-def _check_gui_deps():
+def _check_gui_deps() -> None:
+    """Raise ImportError if optional GUI dependencies (tkinter, matplotlib, Pillow) are absent."""
     if not HAS_GUI_DEPS:
         raise ImportError("GUI dependencies not installed. Run:\n  pip install pyTelops[gui]")
 
@@ -66,7 +72,7 @@ class LiveView:
         scale: Display upscale factor.
     """
 
-    def __init__(self, camera: "Camera", colormap: str = "inferno", scale: int = 2):
+    def __init__(self, camera: Camera, colormap: str = "inferno", scale: int = 2):
         _check_gui_deps()
 
         self.cam = camera
@@ -156,7 +162,8 @@ class LiveView:
 
         self.root.after(1, self.update)
 
-    def _on_cmap_change(self, event=None):
+    def _on_cmap_change(self, event: object = None) -> None:
+        """Rebuild the LUT when the user selects a different colormap."""
         self.cmap_name = self.cmap_var.get()
         self.lut = build_lut(self.cmap_name)
 
@@ -186,7 +193,8 @@ class LiveView:
             return self._current_temp[iy, ix]
         return None
 
-    def update(self):
+    def update(self) -> None:
+        """Fetch the next frame, update the canvas, and schedule the next tick."""
         if not self.running:
             return
 
@@ -313,7 +321,8 @@ class LiveView:
         self.cbar_canvas.delete("all")
         self.cbar_canvas.create_image(0, 0, anchor="nw", image=self.cbar_photo)
 
-    def on_close(self):
+    def on_close(self) -> None:
+        """Handle window close: stop acquisition, release stream, destroy the Tk root."""
         self.running = False
         self.cam.acquisition_stop()
         self.cam.stop_stream()

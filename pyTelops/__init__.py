@@ -1,39 +1,62 @@
 """
-pyTelops — Pure-Python driver for Telops thermal cameras over GigE Vision.
+pyTelops -- Pure-Python driver for Telops thermal cameras over GigE Vision.
 
-Usage:
+Usage::
+
     from pyTelops import Camera, discover
 
-    # Find cameras
+    # Find cameras on the local network
     cameras = discover()
 
-    # Connect and grab
+    # Connect and grab a single frame
     with Camera() as cam:
         frame = cam.grab()
 """
 
+from __future__ import annotations
+
 __version__ = "0.2.0"
 
-from .camera import Camera, discover
 from pyGigEVision import GVCPClient, GVCPError
+
+from .camera import Camera, discover
 from .registers import (
-    CalibrationMode, ExposureAuto, TriggerSource, TriggerActivation,
-    MemoryBufferMOISource, MemoryBufferStatus,
-    FrameRateMode, TestImageSelector, ImageCorrectionMode,
-    TemperatureLocation, VoltageLocation, CurrentLocation,
     CalibrationCollectionType,
+    CalibrationMode,
+    CurrentLocation,
+    ExposureAuto,
+    FrameRateMode,
+    ImageCorrectionMode,
+    MemoryBufferMOISource,
+    MemoryBufferStatus,
+    TemperatureLocation,
+    TestImageSelector,
+    TriggerActivation,
+    TriggerSource,
+    VoltageLocation,
 )
 
 # Thermal camera convention alias
 IntegrationTimeAuto = ExposureAuto
 
 __all__ = [
-    "Camera", "discover", "GVCPClient", "GVCPError",
-    "CalibrationMode", "ExposureAuto", "IntegrationTimeAuto",
+    "Camera",
+    "discover",
+    "GVCPClient",
+    "GVCPError",
+    "CalibrationMode",
+    "ExposureAuto",
+    "IntegrationTimeAuto",
     "TriggerSource",
-    "TriggerActivation", "MemoryBufferMOISource", "MemoryBufferStatus",
-    "FrameRateMode", "TestImageSelector", "ImageCorrectionMode",
-    "TemperatureLocation", "VoltageLocation", "CurrentLocation",
+    "TriggerActivation",
+    "MemoryBufferMOISource",
+    "MemoryBufferStatus",
+    "FrameRateMode",
+    "TestImageSelector",
+    "ImageCorrectionMode",
+    "TemperatureLocation",
+    "VoltageLocation",
+    "CurrentLocation",
     "CalibrationCollectionType",
     "__version__",
 ]
