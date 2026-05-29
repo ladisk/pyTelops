@@ -9,18 +9,20 @@ Connection lifecycle tests run first and manage their own instances.
 Total runtime: ~2-3 minutes depending on buffer sizes.
 """
 
+import contextlib
 import time
+
 import numpy as np
 import pytest
+from pyGigEVision import GVCPError
 
 from pyTelops import Camera, discover
 from pyTelops import registers as reg
-from pyGigEVision import GVCPError
-
 
 # ============================================================
 # Fixtures
 # ============================================================
+
 
 @pytest.fixture(scope="module")
 def cam():
@@ -35,9 +37,9 @@ def cam():
 # 1. Discovery & Connection (uses cam fixture — single connection)
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestDiscovery:
-
     def test_discover_finds_camera(self):
         cameras = discover(timeout=3.0)
         assert len(cameras) > 0
@@ -63,9 +65,9 @@ class TestDiscovery:
 # 2. Camera Info & Properties
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestProperties:
-
     def test_info(self, cam):
         info = cam.info
         assert info["width"] > 0
@@ -101,6 +103,7 @@ class TestProperties:
     def test_frame_rate_clamped(self, cam):
         """Setting fps above max should clamp and warn."""
         import warnings
+
         max_fps = cam.frame_rate_max
         orig = cam.frame_rate
 
@@ -142,9 +145,9 @@ class TestProperties:
 # 3. Live Streaming
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestStreaming:
-
     def test_grab_single_frame(self, cam):
         frame = cam.grab()
         assert frame is not None
@@ -190,7 +193,7 @@ class TestStreaming:
         frame = cam.read_frame(timeout=5.0)
         assert frame is not None
 
-        cam.stop_stream()   # cascades through acquisition_stop() properly
+        cam.stop_stream()  # cascades through acquisition_stop() properly
         assert not cam.is_streaming
         assert not cam.is_acquiring
         assert cam.state in ("connected", "standby")
@@ -208,6 +211,7 @@ class TestStreaming:
 # 4. Buffer Recording
 # ============================================================
 
+
 @pytest.fixture(autouse=True)
 def reset_buffer(cam, request):
     """Reset buffer state around buffer/workflow tests.
@@ -222,41 +226,31 @@ def reset_buffer(cam, request):
     subsequent classes (TestResolution, TestRTConversion, etc.) would
     inherit that state.
     """
-    is_buffer_test = (
-        request.node.parent
-        and request.node.parent.name in ("TestBuffer", "TestFullWorkflow")
+    is_buffer_test = request.node.parent and request.node.parent.name in (
+        "TestBuffer",
+        "TestFullWorkflow",
     )
     if not is_buffer_test:
         yield
         return
 
-    try:
+    with contextlib.suppress(GVCPError, AttributeError):
         cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-    except (GVCPError, AttributeError):
-        pass
-    try:
+    with contextlib.suppress(GVCPError, AttributeError):
         cam._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, 0)
-    except (GVCPError, AttributeError):
-        pass
     time.sleep(0.3)
     yield
-    try:
+    with contextlib.suppress(GVCPError, AttributeError):
         cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-    except (GVCPError, AttributeError):
-        pass
-    try:
+    with contextlib.suppress(GVCPError, AttributeError):
         cam._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, 0)
-    except (GVCPError, AttributeError):
-        pass
     time.sleep(0.3)
 
 
 @pytest.mark.hardware
 class TestBuffer:
-
     def test_buffer_configure_with_frames(self, cam):
-        cam.buffer_configure(n_sequences=1, frames_per_seq=50,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, frames_per_seq=50, moi_source="software")
         info = cam.buffer_info()
         assert info["n_sequences"] == 1
         cam.buffer_clear()
@@ -264,8 +258,7 @@ class TestBuffer:
     def test_buffer_configure_with_duration(self, cam):
         orig_fps = cam.frame_rate
         cam.frame_rate = 1000.0
-        cam.buffer_configure(n_sequences=1, duration=0.1,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, duration=0.1, moi_source="software")
         info = cam.buffer_info()
         assert info["n_sequences"] == 1
         cam.buffer_clear()
@@ -278,8 +271,7 @@ class TestBuffer:
     def test_buffer_record_and_info(self, cam):
         cam.integration_time = 30.0
         cam.frame_rate = 2000.0
-        cam.buffer_configure(n_sequences=1, frames_per_seq=50,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, frames_per_seq=50, moi_source="software")
 
         recorded = cam.buffer_record(verbose=False)
         assert recorded == 50
@@ -292,8 +284,7 @@ class TestBuffer:
         """buffer_record() handles multi-sequence automatically."""
         cam.integration_time = 30.0
         cam.frame_rate = 2000.0
-        cam.buffer_configure(n_sequences=3, frames_per_seq=50,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=3, frames_per_seq=50, moi_source="software")
 
         total = cam.buffer_record(verbose=False)
         assert total == 150  # 3 x 50
@@ -307,8 +298,7 @@ class TestBuffer:
         """Manual multi-sequence: arm + fire_moi + poll seq count."""
         cam.integration_time = 30.0
         cam.frame_rate = 2000.0
-        cam.buffer_configure(n_sequences=3, frames_per_seq=50,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=3, frames_per_seq=50, moi_source="software")
 
         cam.buffer_arm()
         time.sleep(1.0)
@@ -318,10 +308,8 @@ class TestBuffer:
             # Poll sequence count register until this seq completes
             cam._buffer_wait_sequence(i + 1, timeout=30.0)
 
-        try:
+        with contextlib.suppress(GVCPError):
             cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except GVCPError:
-            pass
         time.sleep(0.3)
 
         info = cam.buffer_info()
@@ -332,8 +320,7 @@ class TestBuffer:
     def test_buffer_download(self, cam):
         cam.integration_time = 30.0
         cam.frame_rate = 2000.0
-        cam.buffer_configure(n_sequences=1, frames_per_seq=50,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, frames_per_seq=50, moi_source="software")
         cam.buffer_record(verbose=False)
 
         data = cam.buffer_download(sequence=0, verbose=False)
@@ -349,12 +336,10 @@ class TestBuffer:
 
     def test_buffer_download_raw(self, cam):
         cam.frame_rate = 1000.0
-        cam.buffer_configure(n_sequences=1, frames_per_seq=20,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, frames_per_seq=20, moi_source="software")
         cam.buffer_record(verbose=False)
 
-        data = cam.buffer_download(sequence=0, strip_header=False,
-                                   convert=False, verbose=False)
+        data = cam.buffer_download(sequence=0, strip_header=False, convert=False, verbose=False)
         w, h = cam.resolution
         assert data.shape[1] == h + cam.HEADER_ROWS  # not stripped
         assert data.dtype == np.uint16
@@ -364,8 +349,7 @@ class TestBuffer:
     def test_buffer_download_data_integrity(self, cam):
         """Downloaded data should have real thermal content."""
         cam.frame_rate = 1000.0
-        cam.buffer_configure(n_sequences=1, frames_per_seq=50,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, frames_per_seq=50, moi_source="software")
         cam.buffer_record(verbose=False)
 
         data = cam.buffer_download(sequence=0, verbose=False)
@@ -384,8 +368,7 @@ class TestBuffer:
         """buffer_wait should raise TimeoutError."""
         cam.integration_time = 30.0
         cam.frame_rate = 100.0
-        cam.buffer_configure(n_sequences=1, frames_per_seq=10000,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, frames_per_seq=10000, moi_source="software")
 
         cam.buffer_arm()
         time.sleep(0.5)  # let camera enter RECORDING state
@@ -395,10 +378,8 @@ class TestBuffer:
             cam.buffer_wait(timeout=3.0)
 
         # Clean up
-        try:
+        with contextlib.suppress(GVCPError):
             cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except GVCPError:
-            pass
         cam.buffer_clear()
 
     def test_buffer_status(self, cam):
@@ -416,9 +397,9 @@ class TestBuffer:
 # 5. Calibration
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestCalibration:
-
     def test_calibration_collections_returns_list(self, cam):
         colls = cam.calibration_collections()
         assert isinstance(colls, list)
@@ -446,9 +427,9 @@ class TestCalibration:
 # 6. New Properties
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestNewProperties:
-
     def test_bad_pixel_replacement(self, cam):
         orig = cam.bad_pixel_replacement
         cam.bad_pixel_replacement = not orig
@@ -499,9 +480,9 @@ class TestNewProperties:
 # 7. Resolution Changes
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestResolution:
-
     def test_change_resolution_and_grab(self, cam):
         orig = cam.resolution
         cam.integration_time = 10.0
@@ -526,9 +507,9 @@ class TestResolution:
 # 8. RT Conversion
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestRTConversion:
-
     def test_grab_rt_returns_celsius(self, cam):
         cam.calibration_mode = "RT"
         frame = cam.grab()
@@ -553,9 +534,9 @@ class TestRTConversion:
 # 9. Diagnostics (Hardware)
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestDiagnosticsHW:
-
     def test_sensor_temperature(self, cam):
         temp = cam.sensor_temperature("sensor")
         assert isinstance(temp, float)
@@ -569,6 +550,7 @@ class TestDiagnosticsHW:
 
     def test_posix_time(self, cam):
         import datetime
+
         dt = cam.posix_time
         assert isinstance(dt, datetime.datetime)
 
@@ -586,9 +568,9 @@ class TestDiagnosticsHW:
 # 10. Full Workflow (end-to-end)
 # ============================================================
 
+
 @pytest.mark.hardware
 class TestFullWorkflow:
-
     def test_complete_measurement(self, cam):
         """Full workflow: configure → record → download → verify."""
         # Configure
@@ -597,8 +579,7 @@ class TestFullWorkflow:
         cam.calibration_mode = "RT"
 
         # Buffer: 100 frames
-        cam.buffer_configure(n_sequences=1, frames_per_seq=100,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=1, frames_per_seq=100, moi_source="software")
 
         # Record
         recorded = cam.buffer_record(verbose=False)
@@ -623,8 +604,7 @@ class TestFullWorkflow:
         """Record 3 sequences, download only the second one."""
         cam.integration_time = 30.0
         cam.frame_rate = 2000.0
-        cam.buffer_configure(n_sequences=3, frames_per_seq=30,
-                             moi_source="software")
+        cam.buffer_configure(n_sequences=3, frames_per_seq=30, moi_source="software")
 
         total = cam.buffer_record(verbose=False)
         assert total == 90  # 3 x 30

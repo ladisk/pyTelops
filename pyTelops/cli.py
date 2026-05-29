@@ -10,9 +10,7 @@ Usage:
 """
 
 import argparse
-import json
 import sys
-from typing import Optional
 
 
 def cmd_discover(args):
@@ -25,8 +23,7 @@ def cmd_discover(args):
         return 1
 
     for i, cam in enumerate(cameras):
-        print(f"\n[{i}] {cam.get('manufacturer', '?')} "
-              f"{cam.get('model', '?')}")
+        print(f"\n[{i}] {cam.get('manufacturer', '?')} {cam.get('model', '?')}")
         print(f"    IP:      {cam['ip']}")
         print(f"    Serial:  {cam.get('serial', '?')}")
         print(f"    Version: {cam.get('device_version', '?')}")
@@ -49,6 +46,7 @@ def cmd_info(args):
 def cmd_grab(args):
     """Grab a single frame and save."""
     import numpy as np
+
     from .camera import Camera
 
     with Camera(ip=args.ip) as cam:
@@ -85,7 +83,6 @@ def cmd_live(args):
 
 def cmd_setup(args):
     """Configure OS for GigE Vision camera use."""
-    import os
     import platform
 
     system = platform.system()
@@ -103,16 +100,17 @@ def cmd_setup(args):
 
         # Check firewall rule
         print("1. Firewall rule for GVSP (inbound UDP):")
-        print(f'   netsh advfirewall firewall add rule '
-              f'name="pyTelops-GVSP" dir=in action=allow '
-              f'protocol=UDP program="{python_exe}"')
+        print(
+            f"   netsh advfirewall firewall add rule "
+            f'name="pyTelops-GVSP" dir=in action=allow '
+            f'protocol=UDP program="{python_exe}"'
+        )
         print()
 
         # Check network profile
         print("2. Set camera network adapter to Private profile:")
         print("   (Replace 'Ethernet 5' with your adapter name)")
-        print("   Set-NetConnectionProfile -InterfaceAlias 'Ethernet 5' "
-              "-NetworkCategory Private")
+        print("   Set-NetConnectionProfile -InterfaceAlias 'Ethernet 5' -NetworkCategory Private")
         print()
 
         # Jumbo frames
@@ -145,13 +143,12 @@ def cmd_setup(args):
     return 0
 
 
-def main(argv: Optional[list[str]] = None):
+def main(argv: list[str] | None = None):
     """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
-        prog="pytelops",
-        description="pyTelops — Telops thermal camera driver")
-    parser.add_argument("--version", action="version",
-                        version=f"%(prog)s {_get_version()}")
+        prog="pytelops", description="pyTelops — Telops thermal camera driver"
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
 
     sub = parser.add_subparsers(dest="command")
 
@@ -165,24 +162,21 @@ def main(argv: Optional[list[str]] = None):
 
     # grab
     p_grab = sub.add_parser("grab", help="Grab a single frame")
-    p_grab.add_argument("-o", "--output", default="frame.npy",
-                        help="Output file (.npy or .csv)")
+    p_grab.add_argument("-o", "--output", default="frame.npy", help="Output file (.npy or .csv)")
     p_grab.add_argument("--ip", default=None)
-    p_grab.add_argument("--integration-time", type=float, default=None,
-                        help="Integration time in microseconds")
+    p_grab.add_argument(
+        "--integration-time", type=float, default=None, help="Integration time in microseconds"
+    )
     p_grab.add_argument("--timeout", type=float, default=5.0)
 
     # live
     p_live = sub.add_parser("live", help="Open live viewer")
     p_live.add_argument("--ip", default=None)
-    p_live.add_argument("--colormap", default="inferno",
-                        help="Colormap name")
-    p_live.add_argument("--scale", type=int, default=2,
-                        help="Display scale factor")
+    p_live.add_argument("--colormap", default="inferno", help="Colormap name")
+    p_live.add_argument("--scale", type=int, default=2, help="Display scale factor")
 
     # setup
-    p_setup = sub.add_parser("setup",
-                             help="Configure OS for GigE Vision")
+    sub.add_parser("setup", help="Configure OS for GigE Vision")
 
     args = parser.parse_args(argv)
 
@@ -204,6 +198,7 @@ def main(argv: Optional[list[str]] = None):
 def _get_version() -> str:
     try:
         from . import __version__
+
         return __version__
     except ImportError:
         return "unknown"

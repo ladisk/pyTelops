@@ -19,30 +19,39 @@ import re
 import socket
 import struct
 import time
-from contextlib import contextmanager
-from typing import Iterator, Optional
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
-from pyGigEVision import GVCPClient, GVCPError, GVSPReceiver
-from pyGigEVision.standard import (
+from pyGigEVision import GVCPClient, GVCPError, GVSPReceiver  # noqa: E402
+from pyGigEVision.standard import (  # noqa: E402
     REG_HEARTBEAT_TIMEOUT,
-    REG_SC_HOST_PORT, REG_SC_PACKET_SIZE, REG_SC_PACKET_DELAY, REG_SC_DEST_ADDR,
-    SC_PACKET_SIZE_MASK, SC_SCPS_DO_NOT_FRAGMENT,
+    REG_SC_DEST_ADDR,
+    REG_SC_HOST_PORT,
+    REG_SC_PACKET_DELAY,
+    REG_SC_PACKET_SIZE,
+    SC_PACKET_SIZE_MASK,
+    SC_SCPS_DO_NOT_FRAGMENT,
 )
-from . import registers as reg
+
+from . import registers as reg  # noqa: E402
 
 # --- Enum string resolution ---
 _ENUM_ALIASES = {
     reg.CalibrationMode: {
-        "raw": reg.CalibrationMode.RAW, "raw0": reg.CalibrationMode.RAW0,
-        "nuc": reg.CalibrationMode.NUC, "rt": reg.CalibrationMode.RT,
-        "ibr": reg.CalibrationMode.IBR, "ibi": reg.CalibrationMode.IBI,
+        "raw": reg.CalibrationMode.RAW,
+        "raw0": reg.CalibrationMode.RAW0,
+        "nuc": reg.CalibrationMode.NUC,
+        "rt": reg.CalibrationMode.RT,
+        "ibr": reg.CalibrationMode.IBR,
+        "ibi": reg.CalibrationMode.IBI,
     },
     reg.ExposureAuto: {
-        "off": reg.ExposureAuto.OFF, "once": reg.ExposureAuto.ONCE,
+        "off": reg.ExposureAuto.OFF,
+        "once": reg.ExposureAuto.ONCE,
         "continuous": reg.ExposureAuto.CONTINUOUS,
     },
     reg.TriggerSource: {
@@ -112,10 +121,8 @@ def _resolve_enum(value, enum_cls):
             if member.name.lower() == key:
                 return member
         valid = list(aliases.keys()) + [m.name for m in enum_cls]
-        raise ValueError(f"Unknown {enum_cls.__name__}: {value!r}. "
-                         f"Valid: {valid}")
-    raise TypeError(f"Expected {enum_cls.__name__}, str, or int, "
-                    f"got {type(value).__name__}")
+        raise ValueError(f"Unknown {enum_cls.__name__}: {value!r}. Valid: {valid}")
+    raise TypeError(f"Expected {enum_cls.__name__}, str, or int, got {type(value).__name__}")
 
 
 #: Manufacturer string Telops cameras advertise in their GVCP discovery
@@ -125,8 +132,7 @@ def _resolve_enum(value, enum_cls):
 TELOPS_MANUFACTURER = "Telops Inc."
 
 
-def discover(interface_ip: str = "", timeout: float = 2.0,
-             all_vendors: bool = False) -> list[dict]:
+def discover(interface_ip: str = "", timeout: float = 2.0, all_vendors: bool = False) -> list[dict]:
     """Discover Telops cameras on the network.
 
     Sends a GVCP broadcast and collects responses from GigE Vision
@@ -164,13 +170,12 @@ def discover(interface_ip: str = "", timeout: float = 2.0,
             cameras = GVCPClient.discover("", timeout)
 
     if not all_vendors:
-        cameras = [c for c in cameras
-                   if c.get("manufacturer") == TELOPS_MANUFACTURER]
+        cameras = [c for c in cameras if c.get("manufacturer") == TELOPS_MANUFACTURER]
 
     return cameras
 
 
-def _find_link_local_ip() -> Optional[str]:
+def _find_link_local_ip() -> str | None:
     """Find a local link-local (169.254.x.x) interface IP."""
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
@@ -244,15 +249,13 @@ class Camera:
     # the user forgot to disconnect).
     _active_cameras: dict[str, "Camera"] = {}
 
-    def __init__(self, ip: Optional[str] = None,
-                 local_ip: Optional[str] = None,
-                 timeout: float = 2.0):
+    def __init__(self, ip: str | None = None, local_ip: str | None = None, timeout: float = 2.0):
         self._camera_ip = ip
         self._local_ip = local_ip or ""
         self._timeout = timeout
 
-        self._gvcp: Optional[GVCPClient] = None
-        self._gvsp: Optional[GVSPReceiver] = None
+        self._gvcp: GVCPClient | None = None
+        self._gvsp: GVSPReceiver | None = None
         self._streaming = False
         self._acquiring = False
         self._connected = False
@@ -261,13 +264,13 @@ class Camera:
         # automatically re-apply the partition configuration after the
         # camera wipes it (REG_MEMORY_BUFFER_CLEAR_ALL clears both data
         # AND the partition, so the next buffer_record() would fail).
-        self._buffer_config_kwargs: Optional[dict] = None
+        self._buffer_config_kwargs: dict | None = None
         self._calibration_info: dict = {}
         self._calibration_names: dict = {}
         # User-set packet delay override. None = use default (force 0 on
         # start_stream for max throughput). Int = user's chosen value,
         # preserved across stream restarts.
-        self._packet_delay_override: Optional[int] = None
+        self._packet_delay_override: int | None = None
 
     def __repr__(self) -> str:
         status = "connected" if self._connected else "disconnected"
@@ -275,10 +278,8 @@ class Camera:
         return f"Camera({ip}, {status})"
 
     def __del__(self):
-        try:
+        with suppress(Exception):
             self.disconnect()
-        except Exception:
-            pass
 
     # ==========================================================
     # Context Manager
@@ -316,40 +317,40 @@ class Camera:
             if not cameras:
                 # Nothing Telops found — check if there are other GigE
                 # Vision devices so we can give a more specific error.
-                all_cams = discover(self._local_ip, self._timeout,
-                                    all_vendors=True)
+                all_cams = discover(self._local_ip, self._timeout, all_vendors=True)
                 if all_cams:
                     others = ", ".join(
-                        f"{c.get('manufacturer', '?')} "
-                        f"{c.get('model', '?')}"
-                        for c in all_cams)
+                        f"{c.get('manufacturer', '?')} {c.get('model', '?')}" for c in all_cams
+                    )
                     raise RuntimeError(
                         f"No Telops camera found, but other GigE Vision "
                         f"devices are on the network: {others}. "
                         f"Check that the Telops camera is powered on "
-                        f"and connected to the right Ethernet adapter.")
+                        f"and connected to the right Ethernet adapter."
+                    )
                 raise RuntimeError(
                     "No Telops camera found. Check:\n"
                     "  1. Camera is powered on\n"
                     "  2. Ethernet cable is connected\n"
                     "  3. No other software has GVCP control\n"
-                    "  4. Firewall allows UDP for this python.exe")
+                    "  4. Firewall allows UDP for this python.exe"
+                )
             self._camera_ip = cameras[0]["ip"]
-            logger.info("Discovered: %s %s at %s",
-                       cameras[0].get('manufacturer', ''),
-                       cameras[0].get('model', ''), self._camera_ip)
+            logger.info(
+                "Discovered: %s %s at %s",
+                cameras[0].get("manufacturer", ""),
+                cameras[0].get("model", ""),
+                self._camera_ip,
+            )
 
         # If there's an existing Camera in this process connected to the
         # same camera IP, disconnect it first (handles "forgot to disconnect"
         # and "kernel restart" scenarios within the same process).
         old = Camera._active_cameras.get(self._camera_ip)
         if old is not None and old is not self and old._connected:
-            logger.info("Disconnecting previous Camera instance for %s",
-                       self._camera_ip)
-            try:
+            logger.info("Disconnecting previous Camera instance for %s", self._camera_ip)
+            with suppress(Exception):
                 old.disconnect()
-            except Exception:
-                pass
 
         # Auto-detect local IP if not specified
         if not self._local_ip:
@@ -360,23 +361,17 @@ class Camera:
         self._gvcp.connect()
 
         # Reset heartbeat timeout
-        try:
+        with suppress(GVCPError):
             self._gvcp.write_reg(REG_HEARTBEAT_TIMEOUT, 3000)
-        except GVCPError:
-            pass
 
         # Stop any stale acquisition left over from a previous session
         # (e.g., crash without proper disconnect)
-        try:
+        with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except GVCPError:
-            pass
 
         # Clear stream destination (stop any stale streaming)
-        try:
+        with suppress(GVCPError):
             self._gvcp.write_reg(REG_SC_HOST_PORT, 0)
-        except GVCPError:
-            pass
 
         # Prepare GVSP receiver
         self._gvsp = GVSPReceiver(self._local_ip, gvcp_client=self._gvcp)
@@ -385,34 +380,21 @@ class Camera:
         Camera._active_cameras[self._camera_ip] = self
 
         # Auto-wait if camera is not ready (cooling down, initializing, etc.)
-        try:
+        with suppress(GVCPError):
             if self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY):
                 self.wait_until_ready()
-        except GVCPError:
-            pass
 
         # Apply sensible defaults (after camera is ready so writes succeed)
-        try:
+        with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_BAD_PIXEL_REPLACEMENT, 1)
-        except GVCPError:
-            pass
-        try:
-            self._gvcp.write_reg(reg.REG_FRAME_RATE_MODE,
-                                 reg.FrameRateMode.FIXED)
-        except GVCPError:
-            pass
-        try:
+        with suppress(GVCPError):
+            self._gvcp.write_reg(reg.REG_FRAME_RATE_MODE, reg.FrameRateMode.FIXED)
+        with suppress(GVCPError):
             self._gvcp.write_float(reg.REG_FRAME_RATE_MAX_FG, 1e9)
-        except GVCPError:
-            pass
-        try:
-            self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR,
-                                 reg.TestImageSelector.OFF)
-        except GVCPError:
-            pass
+        with suppress(GVCPError):
+            self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR, reg.TestImageSelector.OFF)
 
-    def wait_until_ready(self, timeout: float = 120.0,
-                         verbose: bool = True) -> None:
+    def wait_until_ready(self, timeout: float = 120.0, verbose: bool = True) -> None:
         """Wait for camera to be ready (cooled down, initialized).
 
         Automatically called by grab(), acquire(), and buffer_record()
@@ -427,7 +409,7 @@ class Camera:
         """
         self._check_connected()
 
-        _TDC_REASONS = {
+        _tdc_reasons = {
             reg.TDC_WAITING_FOR_COOLER: "Cooling down",
             reg.TDC_WAITING_FOR_SENSOR: "Sensor initializing",
             reg.TDC_WAITING_FOR_INIT: "Device initializing",
@@ -449,16 +431,14 @@ class Camera:
             if not not_ready:
                 if verbose and printed:
                     elapsed = timeout - (deadline - time.monotonic())
-                    print(f"\rCamera ready. ({elapsed:.0f}s)          ",
-                          flush=True)
+                    print(f"\rCamera ready. ({elapsed:.0f}s)          ", flush=True)
                 return
 
             # Build status message
             tdc = self._gvcp.read_reg(reg.REG_TDC_STATUS)
             tdc &= ~reg.TDC_ACQUISITION_STARTED
 
-            reasons = [desc for flag, desc in _TDC_REASONS.items()
-                       if tdc & flag]
+            reasons = [desc for flag, desc in _tdc_reasons.items() if tdc & flag]
             msg = ", ".join(reasons) if reasons else "Not ready"
 
             if tdc & reg.TDC_WAITING_FOR_COOLER:
@@ -470,8 +450,7 @@ class Camera:
 
             elapsed = timeout - (deadline - time.monotonic())
             if verbose:
-                print(f"\rWaiting: {msg} [{elapsed:.0f}s]          ",
-                      end="", flush=True)
+                print(f"\rWaiting: {msg} [{elapsed:.0f}s]          ", end="", flush=True)
                 printed = True
 
             time.sleep(2.0)
@@ -503,8 +482,7 @@ class Camera:
         self._connected = False
 
         # Remove from active registry
-        if (self._camera_ip and
-                Camera._active_cameras.get(self._camera_ip) is self):
+        if self._camera_ip and Camera._active_cameras.get(self._camera_ip) is self:
             del Camera._active_cameras[self._camera_ip]
 
     @property
@@ -527,7 +505,7 @@ class Camera:
         return self._acquiring
 
     @property
-    def camera_ip(self) -> Optional[str]:
+    def camera_ip(self) -> str | None:
         """Camera IP address (None if not yet discovered)."""
         return self._camera_ip
 
@@ -541,7 +519,8 @@ class Camera:
         if self._gvcp and self._gvcp._control_lost:
             raise RuntimeError(
                 "Camera control was lost (another application took over). "
-                "Call disconnect() then connect() to re-establish.")
+                "Call disconnect() then connect() to re-establish."
+            )
 
     def _check_ready(self):
         """If camera is not ready, auto-wait with a status line."""
@@ -559,11 +538,14 @@ class Camera:
         if fps_after < fps_before - 0.5:
             max_hz = self._gvcp.read_float(reg.REG_FRAME_RATE_MAX)
             import warnings
+
             warnings.warn(
                 f"Frame rate was reduced from {fps_before:.0f} to "
                 f"{fps_after:.0f} Hz (max for current settings: "
                 f"{max_hz:.0f} Hz).",
-                UserWarning, stacklevel=3)
+                UserWarning,
+                stacklevel=3,
+            )
 
     def _validate_resolution(self, w: int, h: int) -> tuple[int, int]:
         """Validate resolution in usable pixels.
@@ -575,19 +557,16 @@ class Camera:
         """
         # Width
         if w < self.WIDTH_MIN or w > self.WIDTH_MAX:
-            raise ValueError(
-                f"Width {w} out of range [{self.WIDTH_MIN}-{self.WIDTH_MAX}]")
+            raise ValueError(f"Width {w} out of range [{self.WIDTH_MIN}-{self.WIDTH_MAX}]")
         if w % self.WIDTH_STEP != 0:
-            valid = list(range(self.WIDTH_MIN, self.WIDTH_MAX + 1,
-                               self.WIDTH_STEP))
+            valid = list(range(self.WIDTH_MIN, self.WIDTH_MAX + 1, self.WIDTH_STEP))
             raise ValueError(
-                f"Width must be a multiple of {self.WIDTH_STEP}. "
-                f"Valid widths: {valid}")
+                f"Width must be a multiple of {self.WIDTH_STEP}. Valid widths: {valid}"
+            )
 
         # Height (usable pixels — multiples of 4)
         if h < self.HEIGHT_MIN or h > self.HEIGHT_MAX:
-            raise ValueError(
-                f"Height {h} out of range [{self.HEIGHT_MIN}-{self.HEIGHT_MAX}]")
+            raise ValueError(f"Height {h} out of range [{self.HEIGHT_MIN}-{self.HEIGHT_MAX}]")
         if h % self.HEIGHT_STEP != 0:
             nearest = round(h / self.HEIGHT_STEP) * self.HEIGHT_STEP
             nearest = max(self.HEIGHT_MIN, min(self.HEIGHT_MAX, nearest))
@@ -595,7 +574,8 @@ class Camera:
                 f"Height {h} is not valid. "
                 f"Min {self.HEIGHT_MIN}, max {self.HEIGHT_MAX}, step {self.HEIGHT_STEP} "
                 f"(valid: 4, 8, 12, ..., 252, 256). "
-                f"Nearest valid: {nearest}")
+                f"Nearest valid: {nearest}"
+            )
 
         return w, h
 
@@ -607,8 +587,7 @@ class Camera:
     @property
     def valid_heights(self) -> list[int]:
         """Valid height values (usable pixels, excludes header rows)."""
-        return list(range(self.HEIGHT_MIN, self.HEIGHT_MAX + 1,
-                          self.HEIGHT_STEP))
+        return list(range(self.HEIGHT_MIN, self.HEIGHT_MAX + 1, self.HEIGHT_STEP))
 
     @property
     def integration_time(self) -> float:
@@ -639,8 +618,7 @@ class Camera:
     @integration_time_auto.setter
     def integration_time_auto(self, mode):
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_EXPOSURE_AUTO,
-                             int(_resolve_enum(mode, reg.ExposureAuto)))
+        self._gvcp.write_reg(reg.REG_EXPOSURE_AUTO, int(_resolve_enum(mode, reg.ExposureAuto)))
 
     # Backward-compatible alias
     exposure_auto = integration_time_auto
@@ -665,11 +643,14 @@ class Camera:
         if hz > max_hz:
             actual = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
             import warnings
+
             warnings.warn(
                 f"Requested {hz:.0f} Hz exceeds max {max_hz:.0f} Hz "
                 f"(at current resolution/integration time). "
                 f"Camera clamped to {actual:.0f} Hz.",
-                UserWarning, stacklevel=2)
+                UserWarning,
+                stacklevel=2,
+            )
 
     @property
     def calibration_mode(self) -> reg.CalibrationMode:
@@ -680,8 +661,9 @@ class Camera:
     @calibration_mode.setter
     def calibration_mode(self, mode):
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_CALIBRATION_MODE,
-                             int(_resolve_enum(mode, reg.CalibrationMode)))
+        self._gvcp.write_reg(
+            reg.REG_CALIBRATION_MODE, int(_resolve_enum(mode, reg.CalibrationMode))
+        )
 
     @property
     def resolution(self) -> tuple[int, int]:
@@ -722,26 +704,30 @@ class Camera:
             "height": self._gvcp.read_reg(reg.REG_HEIGHT) - self.HEADER_ROWS,
             "integration_time_us": self._gvcp.read_float(reg.REG_EXPOSURE_TIME),
             "integration_time_auto": reg.ExposureAuto(
-                self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO)).name,
-            "frame_rate_hz": self._gvcp.read_float(
-                reg.REG_ACQUISITION_FRAME_RATE),
-            "frame_rate_max_hz": self._gvcp.read_float(
-                reg.REG_FRAME_RATE_MAX),
-            "calibration": reg.CalibrationMode(
-                self._gvcp.read_reg(reg.REG_CALIBRATION_MODE)).name,
-            "trigger_mode": reg.TriggerMode(
-                self._gvcp.read_reg(reg.REG_TRIGGER_MODE)).name,
+                self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO)
+            ).name,
+            "frame_rate_hz": self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE),
+            "frame_rate_max_hz": self._gvcp.read_float(reg.REG_FRAME_RATE_MAX),
+            "calibration": reg.CalibrationMode(self._gvcp.read_reg(reg.REG_CALIBRATION_MODE)).name,
+            "trigger_mode": reg.TriggerMode(self._gvcp.read_reg(reg.REG_TRIGGER_MODE)).name,
             "power_state": reg.DevicePowerState(
-                self._gvcp.read_reg(reg.REG_DEVICE_POWER_STATE)).name,
+                self._gvcp.read_reg(reg.REG_DEVICE_POWER_STATE)
+            ).name,
             "temperature_c": self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE),
             "buffer_mode": reg.MemoryBufferMode(
-                self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_MODE)).name,
+                self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_MODE)
+            ).name,
             "bad_pixel_replacement": bool(self._gvcp.read_reg(reg.REG_BAD_PIXEL_REPLACEMENT)),
             "reverse_x": bool(self._gvcp.read_reg(reg.REG_REVERSE_X)),
             "reverse_y": bool(self._gvcp.read_reg(reg.REG_REVERSE_Y)),
-            "test_image": reg.TestImageSelector(self._gvcp.read_reg(reg.REG_TEST_IMAGE_SELECTOR)).name,
+            "test_image": reg.TestImageSelector(
+                self._gvcp.read_reg(reg.REG_TEST_IMAGE_SELECTOR)
+            ).name,
             "frame_rate_mode": reg.FrameRateMode(self._gvcp.read_reg(reg.REG_FRAME_RATE_MODE)).name,
-            "roi_offset": (self._gvcp.read_reg(reg.REG_OFFSET_X), self._gvcp.read_reg(reg.REG_OFFSET_Y)),
+            "roi_offset": (
+                self._gvcp.read_reg(reg.REG_OFFSET_X),
+                self._gvcp.read_reg(reg.REG_OFFSET_Y),
+            ),
         }
 
     @property
@@ -804,15 +790,15 @@ class Camera:
     @test_image.setter
     def test_image(self, mode):
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR,
-                             int(_resolve_enum(mode, reg.TestImageSelector)))
+        self._gvcp.write_reg(
+            reg.REG_TEST_IMAGE_SELECTOR, int(_resolve_enum(mode, reg.TestImageSelector))
+        )
 
     @property
     def roi_offset(self) -> tuple[int, int]:
         """ROI offset as (x, y) pixels."""
         self._check_connected()
-        return (self._gvcp.read_reg(reg.REG_OFFSET_X),
-                self._gvcp.read_reg(reg.REG_OFFSET_Y))
+        return (self._gvcp.read_reg(reg.REG_OFFSET_X), self._gvcp.read_reg(reg.REG_OFFSET_Y))
 
     @roi_offset.setter
     def roi_offset(self, xy: tuple[int, int]):
@@ -826,13 +812,15 @@ class Camera:
                 f"roi_offset x={x} is invalid. Must be a non-negative "
                 f"multiple of {self.WIDTH_STEP} (the width step). "
                 f"Valid values: 0, {self.WIDTH_STEP}, "
-                f"{2 * self.WIDTH_STEP}, ...")
+                f"{2 * self.WIDTH_STEP}, ..."
+            )
         if y < 0 or y % self.HEIGHT_STEP != 0:
             raise ValueError(
                 f"roi_offset y={y} is invalid. Must be a non-negative "
                 f"multiple of {self.HEIGHT_STEP} (the height step). "
                 f"Valid values: 0, {self.HEIGHT_STEP}, "
-                f"{2 * self.HEIGHT_STEP}, ...")
+                f"{2 * self.HEIGHT_STEP}, ..."
+            )
 
         # Validate that subwindow fits within the sensor
         w, h = self.resolution
@@ -840,12 +828,14 @@ class Camera:
             raise ValueError(
                 f"roi_offset x={x} + width={w} = {x + w} exceeds "
                 f"sensor width {self.WIDTH_MAX}. Reduce resolution or "
-                f"offset.")
+                f"offset."
+            )
         if y + h > self.HEIGHT_MAX:
             raise ValueError(
                 f"roi_offset y={y} + height={h} = {y + h} exceeds "
                 f"sensor height {self.HEIGHT_MAX}. Reduce resolution or "
-                f"offset.")
+                f"offset."
+            )
 
         self._gvcp.write_reg(reg.REG_OFFSET_X, x)
         self._gvcp.write_reg(reg.REG_OFFSET_Y, y)
@@ -859,8 +849,7 @@ class Camera:
     @frame_rate_mode.setter
     def frame_rate_mode(self, mode):
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_FRAME_RATE_MODE,
-                             int(_resolve_enum(mode, reg.FrameRateMode)))
+        self._gvcp.write_reg(reg.REG_FRAME_RATE_MODE, int(_resolve_enum(mode, reg.FrameRateMode)))
 
     @property
     def trigger_frame_count(self) -> int:
@@ -912,8 +901,7 @@ class Camera:
         self._check_connected()
         ticks = int(ticks)
         if ticks < 0:
-            raise ValueError(
-                f"packet_delay must be non-negative, got {ticks}")
+            raise ValueError(f"packet_delay must be non-negative, got {ticks}")
         self._gvcp.write_reg(REG_SC_PACKET_DELAY, ticks)
         self._packet_delay_override = ticks
 
@@ -934,17 +922,16 @@ class Camera:
         if current_size != target_pkt_size:
             # Preserve upper flags and lower flag bits (DoNotFragment etc.)
             non_size_bits = pkt_reg & ~SC_PACKET_SIZE_MASK
-            self._gvcp.write_reg(REG_SC_PACKET_SIZE,
-                                 non_size_bits | target_pkt_size)
+            self._gvcp.write_reg(REG_SC_PACKET_SIZE, non_size_bits | target_pkt_size)
 
         self._gvsp._packet_data_size = target_pkt_size - 8
 
         # Inter-packet delay: respect user override if set, otherwise
         # force to 0 for maximum throughput (original default behavior).
         try:
-            target_delay = (self._packet_delay_override
-                            if self._packet_delay_override is not None
-                            else 0)
+            target_delay = (
+                self._packet_delay_override if self._packet_delay_override is not None else 0
+            )
             current_delay = self._gvcp.read_reg(REG_SC_PACKET_DELAY)
             if current_delay != target_delay:
                 self._gvcp.write_reg(REG_SC_PACKET_DELAY, target_delay)
@@ -972,10 +959,8 @@ class Camera:
         if self._acquiring:
             self.acquisition_stop()
 
-        try:
+        with suppress(GVCPError):
             self._gvcp.write_reg(REG_SC_HOST_PORT, 0)
-        except GVCPError:
-            pass
 
         self._gvsp.stop()
         self._streaming = False
@@ -985,18 +970,18 @@ class Camera:
     # ==========================================================
 
     # Header byte offsets for per-frame calibration data
-    _HDR_DATA_OFFSET = 12   # float32: additive offset (273.15 for RT Kelvin)
-    _HDR_DATA_EXP = 16      # int8: exponent (typically -8 for RT)
-    _HDR_CAL_MODE = 28      # uint8: calibration mode (2=RT, 1=NUC, etc.)
+    _HDR_DATA_OFFSET = 12  # float32: additive offset (273.15 for RT Kelvin)
+    _HDR_DATA_EXP = 16  # int8: exponent (typically -8 for RT)
+    _HDR_CAL_MODE = 28  # uint8: calibration mode (2=RT, 1=NUC, etc.)
 
     def _strip_headers(self, arr: np.ndarray) -> np.ndarray:
         """Strip Telops header rows from a frame or batch of frames."""
         if self.HEADER_ROWS == 0:
             return arr
         if arr.ndim == 2:
-            return arr[self.HEADER_ROWS:, :]
+            return arr[self.HEADER_ROWS :, :]
         elif arr.ndim == 3:
-            return arr[:, self.HEADER_ROWS:, :]
+            return arr[:, self.HEADER_ROWS :, :]
         return arr
 
     def _apply_calibration(self, frame: np.ndarray) -> np.ndarray:
@@ -1017,18 +1002,20 @@ class Camera:
             conversion needed.
         """
         if frame.ndim == 2:
-            header_bytes = frame[:self.HEADER_ROWS, :].tobytes()
-            data_exp = struct.unpack('<b', header_bytes[self._HDR_DATA_EXP:
-                                                        self._HDR_DATA_EXP + 1])[0]
-            data_offset = struct.unpack('<f', header_bytes[self._HDR_DATA_OFFSET:
-                                                           self._HDR_DATA_OFFSET + 4])[0]
+            header_bytes = frame[: self.HEADER_ROWS, :].tobytes()
+            data_exp = struct.unpack(
+                "<b", header_bytes[self._HDR_DATA_EXP : self._HDR_DATA_EXP + 1]
+            )[0]
+            data_offset = struct.unpack(
+                "<f", header_bytes[self._HDR_DATA_OFFSET : self._HDR_DATA_OFFSET + 4]
+            )[0]
             cal_mode = header_bytes[self._HDR_CAL_MODE]
 
             if data_exp == 0 and data_offset == 0:
-                return frame[self.HEADER_ROWS:, :]  # strip headers, no conversion
+                return frame[self.HEADER_ROWS :, :]  # strip headers, no conversion
 
-            data = frame[self.HEADER_ROWS:, :].astype(np.float32)
-            data = data * (2.0 ** data_exp) + data_offset
+            data = frame[self.HEADER_ROWS :, :].astype(np.float32)
+            data = data * (2.0**data_exp) + data_offset
 
             # RT mode: convert Kelvin to Celsius
             if cal_mode == 2:  # RT
@@ -1128,10 +1115,13 @@ class Camera:
         finally:
             self.acquisition_stop()
 
-    def read_frame(self, timeout: float = 0.0,
-                   strip_header: bool = True,
-                   convert: bool = True,
-                   latest: bool = False) -> Optional[np.ndarray]:
+    def read_frame(
+        self,
+        timeout: float = 0.0,
+        strip_header: bool = True,
+        convert: bool = True,
+        latest: bool = False,
+    ) -> np.ndarray | None:
         """Read the next frame from a running acquisition.
 
         Use after :meth:`acquisition_start` (or inside an
@@ -1172,7 +1162,8 @@ class Camera:
         if not self._acquiring:
             raise RuntimeError(
                 "Camera acquisition not active. Call cam.acquisition_start() "
-                "or use 'with cam.acquisition():' before read_frame().")
+                "or use 'with cam.acquisition():' before read_frame()."
+            )
 
         if latest:
             # Drain the queue non-blocking, keeping only the newest frame
@@ -1200,9 +1191,9 @@ class Camera:
     # Single-shot / Batch Acquisition
     # ==========================================================
 
-    def grab(self, timeout: float = 5.0,
-             strip_header: bool = True,
-             convert: bool = True) -> Optional[np.ndarray]:
+    def grab(
+        self, timeout: float = 5.0, strip_header: bool = True, convert: bool = True
+    ) -> np.ndarray | None:
         """Grab a single frame.
 
         Convenience wrapper for one-shot acquisition. Starts streaming
@@ -1242,9 +1233,9 @@ class Camera:
                 frame = self._strip_headers(frame)
         return frame
 
-    def acquire(self, n_frames: int, timeout: float = 30.0,
-                strip_header: bool = True,
-                convert: bool = True) -> Optional[np.ndarray]:
+    def acquire(
+        self, n_frames: int, timeout: float = 30.0, strip_header: bool = True, convert: bool = True
+    ) -> np.ndarray | None:
         """Acquire multiple frames via live streaming.
 
         Convenience wrapper for batch acquisition. Starts streaming if
@@ -1270,7 +1261,7 @@ class Camera:
             if not self._acquiring:
                 self.acquisition_start()
             deadline = time.monotonic() + timeout
-            for i in range(n_frames):
+            for _ in range(n_frames):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -1296,9 +1287,13 @@ class Camera:
     # Trigger
     # ==========================================================
 
-    def configure_trigger(self, source="external", activation="rising",
-                          selector="acquisition_start",
-                          enabled: bool = True) -> None:
+    def configure_trigger(
+        self,
+        source="external",
+        activation="rising",
+        selector="acquisition_start",
+        enabled: bool = True,
+    ) -> None:
         """Configure external trigger.
 
         Args:
@@ -1308,15 +1303,16 @@ class Camera:
             enabled: Enable or disable trigger mode.
         """
         self._check_connected()
-        self._gvcp.write_reg(reg.REG_TRIGGER_SELECTOR,
-                             int(_resolve_enum(selector, reg.TriggerSelector)))
-        self._gvcp.write_reg(reg.REG_TRIGGER_SOURCE,
-                             int(_resolve_enum(source, reg.TriggerSource)))
-        self._gvcp.write_reg(reg.REG_TRIGGER_ACTIVATION,
-                             int(_resolve_enum(activation, reg.TriggerActivation)))
-        self._gvcp.write_reg(reg.REG_TRIGGER_MODE,
-                             int(reg.TriggerMode.ON if enabled
-                                 else reg.TriggerMode.OFF))
+        self._gvcp.write_reg(
+            reg.REG_TRIGGER_SELECTOR, int(_resolve_enum(selector, reg.TriggerSelector))
+        )
+        self._gvcp.write_reg(reg.REG_TRIGGER_SOURCE, int(_resolve_enum(source, reg.TriggerSource)))
+        self._gvcp.write_reg(
+            reg.REG_TRIGGER_ACTIVATION, int(_resolve_enum(activation, reg.TriggerActivation))
+        )
+        self._gvcp.write_reg(
+            reg.REG_TRIGGER_MODE, int(reg.TriggerMode.ON if enabled else reg.TriggerMode.OFF)
+        )
 
     def software_trigger(self) -> None:
         """Send a software trigger command."""
@@ -1421,6 +1417,7 @@ class Camera:
     def sync_time(self) -> None:
         """Synchronize camera clock to host system time (UTC)."""
         import datetime
+
         self._check_connected()
         now = datetime.datetime.now(datetime.timezone.utc)
         self._gvcp.write_reg(reg.REG_POSIX_TIME, int(now.timestamp()))
@@ -1429,19 +1426,20 @@ class Camera:
     def posix_time(self):
         """Camera time as Python datetime (UTC)."""
         import datetime
+
         self._check_connected()
         seconds = self._gvcp.read_reg(reg.REG_POSIX_TIME)
         sub_100ns = self._gvcp.read_reg(reg.REG_SUB_SECOND_TIME)
         microseconds = sub_100ns // 10  # 100ns ticks -> microseconds
-        return datetime.datetime.fromtimestamp(
-            seconds, tz=datetime.timezone.utc
-        ).replace(microsecond=microseconds)
+        return datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc).replace(
+            microsecond=microseconds
+        )
 
     @posix_time.setter
     def posix_time(self, dt):
         """Set camera time from a datetime object."""
         self._check_connected()
-        if hasattr(dt, 'timestamp'):
+        if hasattr(dt, "timestamp"):
             self._gvcp.write_reg(reg.REG_POSIX_TIME, int(dt.timestamp()))
         else:
             self._gvcp.write_reg(reg.REG_POSIX_TIME, int(dt))
@@ -1542,10 +1540,8 @@ class Camera:
                     info["mf"] = p
                 elif p.upper().startswith("FW"):
                     info["fw"] = p
-                    try:
+                    with suppress(ValueError):
                         info["fw_pos"] = int(p[2:])
-                    except ValueError:
-                        pass
                 elif p.upper().startswith("IM"):
                     info["im"] = p
                 elif p.upper().startswith("SWD"):
@@ -1576,17 +1572,16 @@ class Camera:
                     lens_name = m.group(1) if m else None
 
                     # Extract FW position: filter wheel position #1
-                    m = re.search(r'filter wheel position #(\d+)', header)
+                    m = re.search(r"filter wheel position #(\d+)", header)
                     fw_pos = int(m.group(1)) if m else None
 
                     # Get temp range from data rows (first column, semicolon-separated)
-                    lines = [line for line in f
-                             if not line.startswith('%') and line.strip()]
+                    lines = [line for line in f if not line.startswith("%") and line.strip()]
                     temp_min = temp_max = None
                     if lines:
                         try:
-                            temp_min = float(lines[0].split(';')[0])
-                            temp_max = float(lines[-1].split(';')[0])
+                            temp_min = float(lines[0].split(";")[0])
+                            temp_max = float(lines[-1].split(";")[0])
                         except (ValueError, IndexError):
                             pass
 
@@ -1656,9 +1651,12 @@ class Camera:
             self._calibration_lens_info = lens_info
             self._calibration_tsco_by_key = tsco_by_key
 
-        logger.info("Loaded calibration info: %d .tsco files, "
-                    "%d exposure time files from %s",
-                    len(tsco_by_posix), len(lens_info), path)
+        logger.info(
+            "Loaded calibration info: %d .tsco files, %d exposure time files from %s",
+            len(tsco_by_posix),
+            len(lens_info),
+            path,
+        )
 
     def calibration_collections(self) -> list[dict]:
         """List all calibration collections on the camera.
@@ -1683,16 +1681,15 @@ class Camera:
             cal_type = self._gvcp.read_reg(reg.REG_CAL_COLLECTION_TYPE)
             block_count = self._gvcp.read_reg(reg.REG_CAL_BLOCK_COUNT)
 
-            dt = datetime.datetime.fromtimestamp(
-                posix_ts, tz=datetime.timezone.utc)
+            dt = datetime.datetime.fromtimestamp(posix_ts, tz=datetime.timezone.utc)
 
             entry = {
                 "index": i,
                 "timestamp": dt,
                 "posix": posix_ts,
                 "type": reg.CalibrationCollectionType(cal_type).name
-                        if cal_type in reg.CalibrationCollectionType.__members__.values()
-                        else cal_type,
+                if cal_type in reg.CalibrationCollectionType.__members__.values()
+                else cal_type,
                 "blocks": block_count,
             }
 
@@ -1714,8 +1711,7 @@ class Camera:
 
         return collections
 
-    def calibration_load(self, index: int = None, lens: str = None,
-                         temp: float = None) -> dict:
+    def calibration_load(self, index: int = None, lens: str = None, temp: float = None) -> dict:
         """Load a calibration collection and its first block.
 
         Specify by ``index``, or by ``lens`` name + target ``temp`` to
@@ -1748,7 +1744,8 @@ class Camera:
             if not self._calibration_info:
                 raise ValueError(
                     "No calibration info loaded. Call load_calibration_info() "
-                    "first, or use index= to specify by collection index.")
+                    "first, or use index= to specify by collection index."
+                )
 
             # Search for matching lens + temp range
             candidates = []
@@ -1765,7 +1762,7 @@ class Camera:
                     if t_min <= temp <= t_max:
                         candidates.append((idx, ci, t_max - t_min))
                 elif temp is None:
-                    candidates.append((idx, ci, float('inf')))
+                    candidates.append((idx, ci, float("inf")))
 
             if not candidates:
                 # Build helpful error message
@@ -1778,14 +1775,14 @@ class Camera:
                 avail_str = "\n".join(available) if available else "  (none)"
                 raise ValueError(
                     f"No calibration collection matches lens={lens!r}, "
-                    f"temp={temp}.\nAvailable:\n{avail_str}")
+                    f"temp={temp}.\nAvailable:\n{avail_str}"
+                )
 
             # Prefer narrowest temperature range
             candidates.sort(key=lambda x: x[2])
             index = candidates[0][0]
         else:
-            raise ValueError(
-                "Specify index= or lens= (with optional temp=)")
+            raise ValueError("Specify index= or lens= (with optional temp=)")
 
         # --- Load the collection (skip if already active) ---
         self._gvcp.write_reg(reg.REG_CAL_COLLECTION_SELECTOR, index)
@@ -1809,10 +1806,14 @@ class Camera:
         active_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_POSIX)
         if active_posix != expected_posix:
             import warnings
+
             warnings.warn(
                 f"Calibration load verification: active POSIX {active_posix} "
                 f"!= expected {expected_posix}. The camera may still be "
-                f"loading.", UserWarning, stacklevel=2)
+                f"loading.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # Build result info
         result = {"index": index, "posix": expected_posix}
@@ -1847,7 +1848,7 @@ class Camera:
         if temp_range:
             desc_parts.append(f"({temp_range[0]:.0f}-{temp_range[1]:.0f} C)")
 
-        logger.info("Loaded: %s", ' '.join(desc_parts))
+        logger.info("Loaded: %s", " ".join(desc_parts))
 
         return result
 
@@ -1865,15 +1866,21 @@ class Camera:
         col_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_POSIX)
         blk_posix = self._gvcp.read_reg(reg.REG_CAL_ACTIVE_BLOCK_POSIX)
 
-        col_dt = datetime.datetime.fromtimestamp(
-            col_posix, tz=datetime.timezone.utc) if col_posix else None
-        blk_dt = datetime.datetime.fromtimestamp(
-            blk_posix, tz=datetime.timezone.utc) if blk_posix else None
+        col_dt = (
+            datetime.datetime.fromtimestamp(col_posix, tz=datetime.timezone.utc)
+            if col_posix
+            else None
+        )
+        blk_dt = (
+            datetime.datetime.fromtimestamp(blk_posix, tz=datetime.timezone.utc)
+            if blk_posix
+            else None
+        )
 
         result = {
             "type": reg.CalibrationCollectionType(cal_type).name
-                    if cal_type in reg.CalibrationCollectionType.__members__.values()
-                    else cal_type,
+            if cal_type in reg.CalibrationCollectionType.__members__.values()
+            else cal_type,
             "collection_posix": col_posix,
             "collection_timestamp": col_dt,
             "block_posix": blk_posix,
@@ -1903,11 +1910,14 @@ class Camera:
     # Memory Buffer (16GB onboard)
     # ==========================================================
 
-    def buffer_configure(self, n_sequences: int = 1,
-                         duration: Optional[float] = None,
-                         frames_per_seq: Optional[int] = None,
-                         pre_moi: int = 0,
-                         moi_source="software") -> None:
+    def buffer_configure(
+        self,
+        n_sequences: int = 1,
+        duration: float | None = None,
+        frames_per_seq: int | None = None,
+        pre_moi: int = 0,
+        moi_source="software",
+    ) -> None:
         """Configure the internal memory buffer for recording.
 
         The camera has a 16GB ring buffer that records at full sensor speed
@@ -1944,7 +1954,8 @@ class Camera:
             if frames_per_seq <= 0:
                 raise ValueError(
                     f"duration={duration}s at {fps:.0f} fps = {frames_per_seq} "
-                    f"frames. Set frame_rate first.")
+                    f"frames. Set frame_rate first."
+                )
         elif frames_per_seq is None:
             frames_per_seq = 100
 
@@ -1953,27 +1964,18 @@ class Camera:
 
         # Try to enable buffer mode; if it fails, clean up stale state
         try:
-            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
-                                 reg.MemoryBufferMode.ON)
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, reg.MemoryBufferMode.ON)
         except GVCPError:
-            try:
+            with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-            except GVCPError:
-                pass
             time.sleep(0.3)
-            try:
+            with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
-            except GVCPError:
-                pass
             time.sleep(0.3)
-            try:
-                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
-                                     reg.MemoryBufferMode.OFF)
-            except GVCPError:
-                pass
+            with suppress(GVCPError):
+                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, reg.MemoryBufferMode.OFF)
             time.sleep(0.3)
-            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE,
-                                 reg.MemoryBufferMode.ON)
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MODE, reg.MemoryBufferMode.ON)
 
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_NUM_SEQUENCES, n_sequences)
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE, frames_per_seq)
@@ -2026,7 +2028,7 @@ class Camera:
                 safety timeout.
         """
         self._check_ready()
-        n_seq = getattr(self, '_buffer_n_sequences', 1)
+        n_seq = getattr(self, "_buffer_n_sequences", 1)
 
         # Auto-calculate per-sequence timeout from frame count and frame rate
         fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
@@ -2043,8 +2045,7 @@ class Camera:
             if seq_idx == 0:
                 # First sequence: arm + start + settle + fire MOI
                 if verbose:
-                    print(f"Arming (seq {seq_idx + 1}/{n_seq})...",
-                          end=" ", flush=True)
+                    print(f"Arming (seq {seq_idx + 1}/{n_seq})...", end=" ", flush=True)
 
                 self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
                 self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
@@ -2052,8 +2053,7 @@ class Camera:
             else:
                 # Subsequent sequences: camera stays armed, just fire MOI
                 if verbose:
-                    print(f"Firing (seq {seq_idx + 1}/{n_seq})...",
-                          end=" ", flush=True)
+                    print(f"Firing (seq {seq_idx + 1}/{n_seq})...", end=" ", flush=True)
 
             if verbose:
                 print("Recording...", end=" ", flush=True)
@@ -2065,10 +2065,8 @@ class Camera:
                 self._buffer_wait_sequence(seq_idx + 1, timeout=timeout)
             except TimeoutError:
                 # On timeout of the last sequence, stop acquisition
-                try:
+                with suppress(GVCPError):
                     self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-                except GVCPError:
-                    pass
                 if verbose:
                     print("TIMEOUT", flush=True)
                 raise
@@ -2078,10 +2076,8 @@ class Camera:
             total_recorded += seq_size
 
         # Stop acquisition after all sequences complete
-        try:
+        with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except GVCPError:
-            pass
         time.sleep(0.3)
 
         # Now read actual per-sequence counts (registers unlocked after stop)
@@ -2108,8 +2104,9 @@ class Camera:
         self._check_connected()
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
-    def buffer_wait(self, timeout: float = 30.0,
-                    poll_interval: float = 0.5) -> reg.MemoryBufferStatus:
+    def buffer_wait(
+        self, timeout: float = 30.0, poll_interval: float = 0.5
+    ) -> reg.MemoryBufferStatus:
         """Wait for buffer recording to complete.
 
         Polls buffer_status() until HOLDING or IDLE.
@@ -2129,17 +2126,16 @@ class Camera:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             status = self.buffer_status()
-            if status in (reg.MemoryBufferStatus.HOLDING,
-                          reg.MemoryBufferStatus.IDLE):
+            if status in (reg.MemoryBufferStatus.HOLDING, reg.MemoryBufferStatus.IDLE):
                 return status
             time.sleep(poll_interval)
         raise TimeoutError(
-            f"Buffer recording not complete after {timeout:.0f}s "
-            f"(last status: {status.name})")
+            f"Buffer recording not complete after {timeout:.0f}s (last status: {status.name})"
+        )
 
-    def _buffer_wait_sequence(self, target_count: int,
-                              timeout: float = 30.0,
-                              poll_interval: float = 0.5) -> None:
+    def _buffer_wait_sequence(
+        self, target_count: int, timeout: float = 30.0, poll_interval: float = 0.5
+    ) -> None:
         """Wait for the sequence counter to reach *target_count*.
 
         Polls ``MemoryBufferSequenceCount`` (0xE914) which increments
@@ -2166,7 +2162,8 @@ class Camera:
         raise TimeoutError(
             f"Sequence count did not reach {target_count} within "
             f"{timeout:.0f}s (current: "
-            f"{self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_COUNT)})")
+            f"{self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_COUNT)})"
+        )
 
     def buffer_info(self) -> dict:
         """Summary of buffer state and recorded sequences.
@@ -2177,14 +2174,13 @@ class Camera:
         """
         self._check_connected()
         status = self.buffer_status()
-        n_seq = getattr(self, '_buffer_n_sequences', 1)
+        n_seq = getattr(self, "_buffer_n_sequences", 1)
 
         recorded = []
         for i in range(n_seq):
             try:
                 self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, i)
-                count = self._gvcp.read_reg(
-                    reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
+                count = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
                 recorded.append(count)
             except GVCPError:
                 recorded.append(0)
@@ -2210,11 +2206,8 @@ class Camera:
             RECORDING, UPDATING, TRANSMITTING, DEFRAGGING).
         """
         self._check_connected()
-        try:
-            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_STATUS,
-                                 reg.MemoryBufferStatus.REFRESH)
-        except GVCPError:
-            pass
+        with suppress(GVCPError):
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_STATUS, reg.MemoryBufferStatus.REFRESH)
         val = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_STATUS)
         return reg.MemoryBufferStatus(val)
 
@@ -2234,15 +2227,18 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
         return self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
-    def buffer_download(self, sequence: int = 0,
-                        start_frame: Optional[int] = None,
-                        n_frames: int = 0, timeout: float = 0,
-                        bitrate_mbps: float = 1000.0,
-                        packet_size: int = 1500,
-                        strip_header: bool = True,
-                        convert: bool = True,
-                        verbose: bool = True
-                        ) -> Optional[np.ndarray]:
+    def buffer_download(
+        self,
+        sequence: int = 0,
+        start_frame: int | None = None,
+        n_frames: int = 0,
+        timeout: float = 0,
+        bitrate_mbps: float = 1000.0,
+        packet_size: int = 1500,
+        strip_header: bool = True,
+        convert: bool = True,
+        verbose: bool = True,
+    ) -> np.ndarray | None:
         """Download frames from the internal memory buffer.
 
         Args:
@@ -2267,16 +2263,14 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
 
         if n_frames == 0:
-            n_frames = self._gvcp.read_reg(
-                reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
+            n_frames = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
         if n_frames == 0:
             if verbose:
                 logger.warning("No frames recorded in buffer")
             return None
 
-        first_frame_id = self._gvcp.read_reg(
-            reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
+        first_frame_id = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
         if start_frame is None:
             start_frame = first_frame_id
 
@@ -2287,41 +2281,38 @@ class Camera:
         pbar = None
         if verbose:
             from tqdm import tqdm
-            pbar = tqdm(total=n_frames, unit="frame",
-                        desc="Downloading")
+
+            pbar = tqdm(total=n_frames, unit="frame", desc="Downloading")
 
         # Suppress GVSP "packets unrecoverable" warnings during download
         import logging
+
         gvsp_logger = logging.getLogger("pyGigEVision.gvsp")
         old_level = gvsp_logger.level
         gvsp_logger.setLevel(logging.CRITICAL)
 
         # Ensure acquisition is stopped before configuring download
-        try:
+        with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        except GVCPError:
-            pass
         time.sleep(0.2)
 
         # Configure download — mode MUST be set before other registers
         # (they are locked when mode == OFF)
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
-                             reg.MemoryBufferDownloadMode.SEQUENCE)
+        self._gvcp.write_reg(
+            reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE, reg.MemoryBufferDownloadMode.SEQUENCE
+        )
 
         # Increase download bitrate (register unlocked now that mode != OFF)
         old_bitrate = None
         try:
             old_bitrate = self._gvcp.read_float(reg.REG_DOWNLOAD_BITRATE_MAX)
             if bitrate_mbps != old_bitrate:
-                self._gvcp.write_float(reg.REG_DOWNLOAD_BITRATE_MAX,
-                                       bitrate_mbps)
+                self._gvcp.write_float(reg.REG_DOWNLOAD_BITRATE_MAX, bitrate_mbps)
         except GVCPError:
             pass
 
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID,
-                             start_frame)
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT,
-                             n_frames)
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, start_frame)
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, n_frames)
 
         # Start streaming
         self.start_stream()
@@ -2355,7 +2346,7 @@ class Camera:
 
         try:
             stall_deadline = time.monotonic() + 10.0
-            for i in range(n_frames):
+            for _ in range(n_frames):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
@@ -2370,30 +2361,22 @@ class Camera:
         finally:
             if pbar:
                 pbar.close()
-            try:
+            with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-            except GVCPError:
-                pass
             time.sleep(0.2)
             if old_bitrate is not None:
-                try:
-                    self._gvcp.write_float(reg.REG_DOWNLOAD_BITRATE_MAX,
-                                           old_bitrate)
-                except GVCPError:
-                    pass
-            try:
-                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
-                                     reg.MemoryBufferDownloadMode.OFF)
-            except GVCPError:
-                pass
+                with suppress(GVCPError):
+                    self._gvcp.write_float(reg.REG_DOWNLOAD_BITRATE_MAX, old_bitrate)
+            with suppress(GVCPError):
+                self._gvcp.write_reg(
+                    reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE, reg.MemoryBufferDownloadMode.OFF
+                )
             if old_pkt_reg is not None:
-                try:
+                with suppress(GVCPError):
                     # Restore original register value (size + flags incl.
                     # DoNotFragment) exactly as it was before download.
                     self._gvcp.write_reg(REG_SC_PACKET_SIZE, old_pkt_reg)
                     self._gvsp._packet_data_size = (old_pkt_reg & SC_PACKET_SIZE_MASK) - 8
-                except GVCPError:
-                    pass
             self._gvsp.resend_enabled = True
             self.stop_stream()
             gvsp_logger.setLevel(old_level)
@@ -2401,10 +2384,14 @@ class Camera:
         elapsed = time.monotonic() - t_start
         if verbose and frames:
             fps = len(frames) / elapsed if elapsed > 0 else 0
-            mbps = len(frames) * self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE) \
-                / elapsed / 1e6 if elapsed > 0 else 0
-            logger.info("Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)",
-                       len(frames), elapsed, fps, mbps)
+            mbps = (
+                len(frames) * self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE) / elapsed / 1e6
+                if elapsed > 0
+                else 0
+            )
+            logger.info(
+                "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)", len(frames), elapsed, fps, mbps
+            )
 
         if not frames:
             return None
@@ -2424,15 +2411,13 @@ class Camera:
         """Print data integrity summary after download."""
         n = data.shape[0]
         frame_means = data.mean(axis=tuple(range(1, data.ndim)))
-        if data.dtype == np.float32:
-            zero_frames = 0  # calibrated data — 0.0 is valid temperature
-        else:
-            zero_frames = int(np.sum(frame_means == 0))
+        # For calibrated (float32) data, 0.0 is a valid temperature — skip blank-frame check.
+        zero_frames = 0 if data.dtype == np.float32 else int(np.sum(frame_means == 0))
         row_sums = data.reshape(n, data.shape[1], -1).sum(axis=2)
-        if data.dtype == np.float32:
-            frames_with_zero_rows = 0  # calibrated data — 0.0 is valid
-        else:
-            frames_with_zero_rows = int(np.sum(np.any(row_sums == 0, axis=1)))
+        # Same rationale for zero-row check.
+        frames_with_zero_rows = (
+            0 if data.dtype == np.float32 else int(np.sum(np.any(row_sums == 0, axis=1)))
+        )
 
         issues = []
         if n < expected:
@@ -2443,10 +2428,15 @@ class Camera:
             issues.append(f"{frames_with_zero_rows} frames with zero rows")
 
         if issues:
-            logger.warning("Data check: %s", ', '.join(issues))
+            logger.warning("Data check: %s", ", ".join(issues))
         else:
-            logger.info("Data check: OK — %d frames, range [%s–%s], mean %.0f",
-                        n, data.min(), data.max(), data.mean())
+            logger.info(
+                "Data check: OK — %d frames, range [%s–%s], mean %.0f",
+                n,
+                data.min(),
+                data.max(),
+                data.mean(),
+            )
 
     def buffer_clear(self) -> None:
         """Clear all sequences from the memory buffer.
@@ -2487,6 +2477,7 @@ class Camera:
             scale: Display upscale factor (2 = double size).
         """
         from .gui import LiveView
+
         viewer = LiveView(self, colormap=colormap, scale=scale)
         viewer.run()
 

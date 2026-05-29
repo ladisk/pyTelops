@@ -3,13 +3,14 @@
 Unit tests use mocking. Hardware tests require --hardware flag.
 """
 
-import numpy as np
-import pytest
 from unittest.mock import MagicMock, patch
 
-from pyTelops.camera import Camera, discover, _find_link_local_ip
-from pyTelops import registers as reg
+import numpy as np
+import pytest
 from pyGigEVision.standard import REG_SC_PACKET_DELAY
+
+from pyTelops import registers as reg
+from pyTelops.camera import Camera, discover
 
 
 def _make_fake_connected_camera():
@@ -135,19 +136,17 @@ class TestAcquisitionAPI:
 
     def test_acquisition_contextmanager_starts_and_stops(self):
         cam = _make_fake_connected_camera()
-        with patch.object(cam, "start_stream"):
-            with cam.acquisition() as c:
-                assert c is cam
-                assert cam.is_acquiring is True
+        with patch.object(cam, "start_stream"), cam.acquisition() as c:
+            assert c is cam
+            assert cam.is_acquiring is True
         assert cam.is_acquiring is False
 
     def test_acquisition_contextmanager_stops_on_exception(self):
         cam = _make_fake_connected_camera()
-        with patch.object(cam, "start_stream"):
-            with pytest.raises(ValueError):
-                with cam.acquisition():
-                    assert cam.is_acquiring is True
-                    raise ValueError("oops")
+        with patch.object(cam, "start_stream"), pytest.raises(ValueError):  # noqa: SIM117
+            with cam.acquisition():
+                assert cam.is_acquiring is True
+                raise ValueError("oops")
         assert cam.is_acquiring is False
 
     def test_read_frame_raises_without_active_acquisition(self):
@@ -199,8 +198,7 @@ class TestAcquisitionAPI:
         cam._gvsp.get_frame.side_effect = [None, fresh]
         with patch.object(cam, "start_stream"):
             cam.acquisition_start()
-        result = cam.read_frame(latest=True, timeout=0.1,
-                                convert=False, strip_header=False)
+        result = cam.read_frame(latest=True, timeout=0.1, convert=False, strip_header=False)
         assert (result == 99).all()
         assert cam._gvsp.get_frame.call_count == 2
 
@@ -233,8 +231,7 @@ class TestAcquisitionAPI:
         cam._gvsp.get_frame.return_value = fake_raw
         with patch.object(cam, "start_stream"):
             cam.acquisition_start()
-        with patch.object(cam, "_apply_calibration",
-                          return_value=fake_calibrated) as mock_cal:
+        with patch.object(cam, "_apply_calibration", return_value=fake_calibrated) as mock_cal:
             result = cam.read_frame(timeout=0.0, convert=True)
         mock_cal.assert_called_once()
         assert result.shape == (4, 8)
@@ -244,8 +241,7 @@ class TestAcquisitionAPI:
         """grab() should set _acquiring during the call and clear it after."""
         cam = _make_fake_connected_camera()
         cam._gvsp.get_frame.return_value = None  # timeout
-        with patch.object(cam, "start_stream"), \
-                patch.object(cam, "stop_stream"):
+        with patch.object(cam, "start_stream"), patch.object(cam, "stop_stream"):
             cam.grab(timeout=0.0)
         assert cam.is_acquiring is False  # restored
 
@@ -253,18 +249,15 @@ class TestAcquisitionAPI:
         """grab() inside an acquisition() block must leave acquisition running."""
         cam = _make_fake_connected_camera()
         cam._gvsp.get_frame.return_value = None
-        with patch.object(cam, "start_stream"), \
-                patch.object(cam, "stop_stream"):
-            with cam.acquisition():
-                cam.grab(timeout=0.0)
-                assert cam.is_acquiring is True
+        with patch.object(cam, "start_stream"), patch.object(cam, "stop_stream"), cam.acquisition():
+            cam.grab(timeout=0.0)
+            assert cam.is_acquiring is True
         assert cam.is_acquiring is False
 
     def test_acquire_uses_acquisition_lifecycle(self):
         cam = _make_fake_connected_camera()
         cam._gvsp.get_frame.return_value = None
-        with patch.object(cam, "start_stream"), \
-                patch.object(cam, "stop_stream"):
+        with patch.object(cam, "start_stream"), patch.object(cam, "stop_stream"):
             cam.acquire(n_frames=3, timeout=0.0)
         assert cam.is_acquiring is False
 
@@ -283,8 +276,7 @@ class TestAcquisitionAPI:
         so clear → record → download works without a manual re-configure."""
         cam = _make_fake_connected_camera()
         cam._gvcp.read_float.return_value = 100.0  # fake frame_rate for duration path
-        cam.buffer_configure(n_sequences=2, frames_per_seq=500,
-                             pre_moi=10, moi_source="software")
+        cam.buffer_configure(n_sequences=2, frames_per_seq=500, pre_moi=10, moi_source="software")
         # Verify kwargs were stored
         assert cam._buffer_config_kwargs == {
             "n_sequences": 2,
@@ -294,8 +286,10 @@ class TestAcquisitionAPI:
         }
         # Count configure-related register writes after the first configure
         configure_writes = [
-            call for call in cam._gvcp.write_reg.call_args_list
-            if call.args[0] in (
+            call
+            for call in cam._gvcp.write_reg.call_args_list
+            if call.args[0]
+            in (
                 reg.REG_MEMORY_BUFFER_NUM_SEQUENCES,
                 reg.REG_MEMORY_BUFFER_SEQ_SIZE,
                 reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE,
@@ -309,8 +303,10 @@ class TestAcquisitionAPI:
         cam._gvcp.write_reg.assert_any_call(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
         # And the full configure register block was written again
         configure_writes_after = [
-            call for call in cam._gvcp.write_reg.call_args_list
-            if call.args[0] in (
+            call
+            for call in cam._gvcp.write_reg.call_args_list
+            if call.args[0]
+            in (
                 reg.REG_MEMORY_BUFFER_NUM_SEQUENCES,
                 reg.REG_MEMORY_BUFFER_SEQ_SIZE,
                 reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE,
@@ -318,7 +314,8 @@ class TestAcquisitionAPI:
             )
         ]
         assert len(configure_writes_after) == n_before_clear + 4, (
-            "buffer_clear must re-apply all 4 configure registers")
+            "buffer_clear must re-apply all 4 configure registers"
+        )
 
     def test_buffer_clear_without_prior_configure_is_plain(self):
         """If buffer_configure was never called, buffer_clear should only
@@ -329,7 +326,8 @@ class TestAcquisitionAPI:
         cam._gvcp.write_reg.assert_any_call(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
         # No num-sequences write — no re-apply happened
         num_seq_writes = [
-            call for call in cam._gvcp.write_reg.call_args_list
+            call
+            for call in cam._gvcp.write_reg.call_args_list
             if call.args[0] == reg.REG_MEMORY_BUFFER_NUM_SEQUENCES
         ]
         assert len(num_seq_writes) == 0
@@ -338,38 +336,41 @@ class TestAcquisitionAPI:
         """Client-side validation: offset_x must be a multiple of WIDTH_STEP (64)."""
         cam = _make_fake_connected_camera()
         # Stub resolution so the subwindow fit check doesn't fire first
-        with patch.object(type(cam), "resolution",
-                          new=property(lambda self: (64, 4))):
-            with pytest.raises(ValueError, match="multiple of 64"):
-                cam.roi_offset = (96, 0)
+        with (
+            patch.object(type(cam), "resolution", new=property(lambda self: (64, 4))),
+            pytest.raises(ValueError, match="multiple of 64"),
+        ):
+            cam.roi_offset = (96, 0)
 
     def test_roi_offset_rejects_misaligned_y(self):
         """Client-side validation: offset_y must be a multiple of HEIGHT_STEP (4)."""
         cam = _make_fake_connected_camera()
-        with patch.object(type(cam), "resolution",
-                          new=property(lambda self: (64, 4))):
-            with pytest.raises(ValueError, match="multiple of 4"):
-                cam.roi_offset = (0, 3)
+        with (
+            patch.object(type(cam), "resolution", new=property(lambda self: (64, 4))),
+            pytest.raises(ValueError, match="multiple of 4"),
+        ):
+            cam.roi_offset = (0, 3)
 
     def test_roi_offset_rejects_negative(self):
         cam = _make_fake_connected_camera()
-        with patch.object(type(cam), "resolution",
-                          new=property(lambda self: (64, 4))):
-            with pytest.raises(ValueError, match="non-negative"):
-                cam.roi_offset = (-64, 0)
+        with (
+            patch.object(type(cam), "resolution", new=property(lambda self: (64, 4))),
+            pytest.raises(ValueError, match="non-negative"),
+        ):
+            cam.roi_offset = (-64, 0)
 
     def test_roi_offset_rejects_out_of_bounds(self):
         """x + width must fit within sensor width."""
         cam = _make_fake_connected_camera()
-        with patch.object(type(cam), "resolution",
-                          new=property(lambda self: (128, 64))):
-            with pytest.raises(ValueError, match="exceeds sensor width"):
-                cam.roi_offset = (256, 0)  # 256 + 128 = 384 > 320
+        with (
+            patch.object(type(cam), "resolution", new=property(lambda self: (128, 64))),
+            pytest.raises(ValueError, match="exceeds sensor width"),
+        ):
+            cam.roi_offset = (256, 0)  # 256 + 128 = 384 > 320
 
     def test_roi_offset_accepts_valid_values(self):
         cam = _make_fake_connected_camera()
-        with patch.object(type(cam), "resolution",
-                          new=property(lambda self: (128, 64))):
+        with patch.object(type(cam), "resolution", new=property(lambda self: (128, 64))):
             cam.roi_offset = (64, 96)
             cam._gvcp.write_reg.assert_any_call(reg.REG_OFFSET_X, 64)
             cam._gvcp.write_reg.assert_any_call(reg.REG_OFFSET_Y, 96)
@@ -423,8 +424,11 @@ class TestAcquisitionAPI:
         cam._gvcp.reset_mock()
         cam.start_stream()
         # Should re-apply the user's override, NOT force to 0
-        write_calls = [call for call in cam._gvcp.write_reg.call_args_list
-                       if call.args[0] == REG_SC_PACKET_DELAY]
+        write_calls = [
+            call
+            for call in cam._gvcp.write_reg.call_args_list
+            if call.args[0] == REG_SC_PACKET_DELAY
+        ]
         assert len(write_calls) == 1
         assert write_calls[0].args[1] == 1000
 
@@ -438,8 +442,11 @@ class TestAcquisitionAPI:
         cam._gvcp.read_reg.return_value = 1000
         cam.start_stream()
         # start_stream should NOT have written REG_SC_PACKET_DELAY again
-        delay_writes = [call for call in cam._gvcp.write_reg.call_args_list
-                        if call.args[0] == REG_SC_PACKET_DELAY]
+        delay_writes = [
+            call
+            for call in cam._gvcp.write_reg.call_args_list
+            if call.args[0] == REG_SC_PACKET_DELAY
+        ]
         assert len(delay_writes) == 0
 
     def test_packet_delay_survives_stream_restart(self):
@@ -463,20 +470,24 @@ class TestAcquisitionAPI:
         from pyGigEVision import GVCPError
 
         cam = _make_fake_connected_camera()
+
         # Make start_stream succeed (sets _streaming=True), but the
         # subsequent acquisition register write raises.
         def fake_start_stream():
             cam._streaming = True
+
         cam._gvcp.write_reg.side_effect = GVCPError("simulated")
         stop_stream_called = []
-        with patch.object(cam, "start_stream", side_effect=fake_start_stream), \
-                patch.object(cam, "stop_stream",
-                             side_effect=lambda: stop_stream_called.append(True)):
-            with pytest.raises(GVCPError):
-                cam.grab(timeout=0.0)
+        with (
+            patch.object(cam, "start_stream", side_effect=fake_start_stream),
+            patch.object(cam, "stop_stream", side_effect=lambda: stop_stream_called.append(True)),
+            pytest.raises(GVCPError),
+        ):
+            cam.grab(timeout=0.0)
         assert stop_stream_called, (
             "grab() must call stop_stream() in cleanup if "
-            "acquisition_start() raised after start_stream() succeeded")
+            "acquisition_start() raised after start_stream() succeeded"
+        )
 
 
 class TestDiscover:
@@ -485,8 +496,8 @@ class TestDiscover:
     @patch("pyTelops.camera.GVCPClient.discover")
     def test_discover_returns_list(self, mock_disc):
         mock_disc.return_value = [
-            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.",
-             "model": "FAST M3k"}]
+            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.", "model": "FAST M3k"}
+        ]
         cameras = discover()
         assert len(cameras) == 1
         assert cameras[0]["ip"] == "169.254.67.34"
@@ -502,13 +513,13 @@ class TestDiscover:
         """discover() must only return Telops devices by default, even
         when other GigE Vision cameras are on the same network."""
         mock_disc.return_value = [
-            {"ip": "192.168.221.198",
-             "manufacturer": "MICRO-EPSILON Optronic GmbH",
-             "model": "scanCONTROL 2500-50"},
-            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.",
-             "model": "TS-IR"},
-            {"ip": "169.254.10.1", "manufacturer": "FLIR Systems",
-             "model": "A50"},
+            {
+                "ip": "192.168.221.198",
+                "manufacturer": "MICRO-EPSILON Optronic GmbH",
+                "model": "scanCONTROL 2500-50",
+            },
+            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.", "model": "TS-IR"},
+            {"ip": "169.254.10.1", "manufacturer": "FLIR Systems", "model": "A50"},
         ]
         cameras = discover()
         assert len(cameras) == 1
@@ -519,11 +530,12 @@ class TestDiscover:
     def test_discover_all_vendors_returns_everything(self, mock_disc):
         """all_vendors=True returns every GigE Vision device found."""
         mock_disc.return_value = [
-            {"ip": "192.168.221.198",
-             "manufacturer": "MICRO-EPSILON Optronic GmbH",
-             "model": "scanCONTROL 2500-50"},
-            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.",
-             "model": "TS-IR"},
+            {
+                "ip": "192.168.221.198",
+                "manufacturer": "MICRO-EPSILON Optronic GmbH",
+                "model": "scanCONTROL 2500-50",
+            },
+            {"ip": "169.254.67.34", "manufacturer": "Telops Inc.", "model": "TS-IR"},
         ]
         cameras = discover(all_vendors=True)
         assert len(cameras) == 2
@@ -532,10 +544,8 @@ class TestDiscover:
     def test_discover_filter_with_interface_ip(self, mock_disc):
         """Filter also applies when interface_ip is explicitly passed."""
         mock_disc.return_value = [
-            {"ip": "192.168.1.5", "manufacturer": "Basler",
-             "model": "acA2000"},
-            {"ip": "192.168.1.6", "manufacturer": "Telops Inc.",
-             "model": "FAST M3k"},
+            {"ip": "192.168.1.5", "manufacturer": "Basler", "model": "acA2000"},
+            {"ip": "192.168.1.6", "manufacturer": "Telops Inc.", "model": "FAST M3k"},
         ]
         cameras = discover(interface_ip="192.168.1.10")
         assert len(cameras) == 1
@@ -547,13 +557,14 @@ class TestDiscover:
         can't find a Telops camera — makes mixed-vendor setup mistakes
         obvious."""
         mock_disc.return_value = [
-            {"ip": "192.168.221.198",
-             "manufacturer": "MICRO-EPSILON Optronic GmbH",
-             "model": "scanCONTROL 2500-50"},
+            {
+                "ip": "192.168.221.198",
+                "manufacturer": "MICRO-EPSILON Optronic GmbH",
+                "model": "scanCONTROL 2500-50",
+            },
         ]
         cam = Camera()
-        with pytest.raises(RuntimeError,
-                            match="MICRO-EPSILON"):
+        with pytest.raises(RuntimeError, match="MICRO-EPSILON"):
             cam.connect()
 
 
@@ -561,4 +572,4 @@ class TestDiscover:
 # Hardware tests (skipped without --hardware flag)
 # ============================================================
 
-    # Legacy hardware tests removed — all covered by test_hardware.py
+# Legacy hardware tests removed — all covered by test_hardware.py

@@ -1,7 +1,9 @@
 """Tests for CLI commands (no camera needed for most)."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import patch, MagicMock
+
 from pyTelops.cli import main
 
 
@@ -22,9 +24,13 @@ class TestCLIParser:
             assert result == 1  # no cameras found
 
     def test_discover_finds_camera(self, capsys):
-        mock_cam = {"ip": "169.254.1.1", "manufacturer": "Telops",
-                    "model": "FAST M3k", "serial": "123",
-                    "device_version": "1.0"}
+        mock_cam = {
+            "ip": "169.254.1.1",
+            "manufacturer": "Telops",
+            "model": "FAST M3k",
+            "serial": "123",
+            "device_version": "1.0",
+        }
         with patch("pyTelops.camera.discover", return_value=[mock_cam]):
             result = main(["discover"])
             assert result == 0
@@ -49,8 +55,8 @@ class TestCLIParser:
     def test_grab_no_camera(self):
         mock_cam = MagicMock()
         mock_cam.grab.return_value = None
-        with patch("pyTelops.camera.Camera") as MockCam:
-            MockCam.return_value.__enter__ = MagicMock(return_value=mock_cam)
-            MockCam.return_value.__exit__ = MagicMock(return_value=False)
+        with patch("pyTelops.camera.Camera") as mock_cam_cls:
+            mock_cam_cls.return_value.__enter__ = MagicMock(return_value=mock_cam)
+            mock_cam_cls.return_value.__exit__ = MagicMock(return_value=False)
             result = main(["grab"])
             assert result == 1  # failed to grab
