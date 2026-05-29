@@ -18,7 +18,7 @@ unreachable.
 - Confirm the camera has a link-local address (``169.254.x.x``) and
   your host has a matching link-local IP on the same Ethernet adapter.
   ``ipconfig`` on Windows, ``ip a`` on Linux.
-- Run ``pytelops setup`` as administrator once per environment — it
+- Run ``pytelops setup`` as administrator once per environment -- it
   prints the Windows firewall rule you need to allow inbound UDP for
   ``python.exe``. Python environment changes (new venv, Anaconda vs
   system Python) require a new rule per binary.
@@ -28,6 +28,19 @@ unreachable.
   filters. These can silently drop UDP for a specific ``python.exe``
   even with Windows Firewall disabled. Test by running the same code
   with a different Python binary.
+
+VPN (Tailscale) shadows the camera adapter
+-------------------------------------------
+
+If discovery finds no camera (or only unrelated GigE Vision devices) while
+Tailscale is running, its virtual adapter is shadowing the Ethernet adapter.
+Stop the service and tear down the adapter in one elevated PowerShell command:
+
+.. code-block:: powershell
+
+   Stop-Service Tailscale; Disable-NetAdapter Tailscale -Confirm:$false
+
+Restore afterwards with ``Start-Service Tailscale``.
 
 ``ACCESS_DENIED`` on reconnect
 ------------------------------
@@ -40,7 +53,7 @@ hangs for several seconds.
 release it cleanly. The camera keeps the old session alive until its
 heartbeat timeout expires.
 
-**Fix:** this is normal. Wait up to ~15 seconds — pyTelops polls the
+**Fix:** this is normal. Wait up to ~15 seconds -- pyTelops polls the
 camera and auto-recovers once the heartbeat timeout elapses. If it
 takes longer, power-cycle the camera.
 
@@ -93,7 +106,7 @@ and always show the most recent frame:
                process_and_display(frame)
 
 This drops intermediate frames during slow periods but keeps
-end-to-end latency bounded to one frame period + one render. Use
+end-to-end latency bounded to one frame period plus one render. Use
 ``latest=False`` (the default) for measurement or logging where you
 need every frame in order.
 
@@ -104,9 +117,9 @@ Buffer download fails or is unreliable
 with missing frames, or fails the integrity check.
 
 **Cause:** the download saturates GigE at ~45 MB/s and has effectively
-no headroom. Any competing network or CPU load — most commonly an
+no headroom. Any competing network or CPU load -- most commonly an
 active **Microsoft Teams / Zoom / Google Meet call**, or heavy
-background processes — can starve the receiver enough to drop frames.
+background processes -- can starve the receiver enough to drop frames.
 The camera has no backpressure: it pushes at the configured bitrate
 regardless of whether the host is keeping up.
 
@@ -125,3 +138,49 @@ regardless of whether the host is keeping up.
 
 - Ensure the camera adapter is on a dedicated Ethernet port, not
   shared with the internet (Wi-Fi for internet, Ethernet for camera).
+
+Firewall rule reset after power cycle
+--------------------------------------
+
+**Symptom:** The camera worked before, but after a power cycle or
+reboot, ``discover()`` returns nothing or streaming produces only
+``packets unrecoverable`` errors.
+
+**Cause:** on some Windows configurations the per-program firewall rule
+for ``python.exe`` is reset or removed when the system restarts or
+when a Windows Update runs.
+
+**Fix:** re-run ``pytelops setup`` as administrator to restore the rule.
+You can verify the rule exists with:
+
+.. code-block:: powershell
+
+   netsh advfirewall firewall show rule name="pyTelops-GVSP"
+
+If the output is empty, the rule was removed. Re-add it manually:
+
+.. code-block:: powershell
+
+   netsh advfirewall firewall add rule name="pyTelops-GVSP" dir=in `
+       action=allow protocol=UDP `
+       program="C:\path\to\python.exe"
+
+Replace the path with the full path to the Python binary in your active
+environment.
+
+Resolution cycling crash
+------------------------
+
+**Symptom:** After changing ``cam.resolution`` several times in quick
+succession (for example, in a loop or during exploratory use in a
+notebook), the camera stops responding and has to be power-cycled.
+
+**Cause:** the camera firmware does not tolerate rapid resolution changes.
+Each resolution change triggers a sensor reset sequence; issuing a new
+change before the previous reset completes can leave the firmware in an
+inconsistent state.
+
+**Fix:** allow at least 1 second between resolution changes. If the
+camera is unresponsive, power-cycle it -- the firmware state is reset on
+boot and the camera will be ready again after its cooldown sequence
+completes (typically 2--3 minutes from a cold start).

@@ -182,22 +182,28 @@ def discover(interface_ip: str = "", timeout: float = 2.0, all_vendors: bool = F
     cameras. If no interface_ip is given, tries the link-local interface
     first, then broadcasts on all interfaces.
 
-    By default only **Telops** cameras are returned — responses from
+    By default only **Telops** cameras are returned -- responses from
     other GigE Vision devices (FLIR, Basler, Allied Vision, laser
     scanners, etc.) that happen to share the network are filtered out
     by manufacturer string. Pass ``all_vendors=True`` to get every
     discovered GigE Vision device regardless of vendor.
 
-    Args:
-        interface_ip: Local IP to bind to (empty = auto-detect).
-        timeout: Seconds to wait for responses.
-        all_vendors: If True, return every GigE Vision camera found,
-            not just Telops ones. Useful for debugging network setup
-            when you want to see what's out there. Defaults to False.
+    Parameters
+    ----------
+    interface_ip : str
+        Local IP to bind to (empty string = auto-detect).
+    timeout : float
+        Seconds to wait for responses.
+    all_vendors : bool
+        If True, return every GigE Vision camera found, not just Telops
+        ones. Useful for debugging network setup when you want to see
+        what is out there. Defaults to False.
 
-    Returns:
-        List of dicts with keys: ip, manufacturer, model,
-        device_version, serial, user_name.
+    Returns
+    -------
+    list of dict
+        Each dict has keys: ``ip``, ``manufacturer``, ``model``,
+        ``device_version``, ``serial``, ``user_name``.
     """
     if interface_ip:
         cameras = GVCPClient.discover(interface_ip, timeout)
