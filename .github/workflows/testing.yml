@@ -1,9 +1,9 @@
 name: Tests
 
 # Manual-only while pyTelops depends on the private pyGigEVision repo via
-# git+ssh — automated CI on private GitHub repos needs deploy keys or PAT
-# secrets configured. Re-enable push/pull_request triggers when those are
-# in place (or when both repos go public and pyGigEVision is on PyPI).
+# git+ssh. Automated CI on a private dependency needs deploy keys or PAT
+# secrets. Re-enable the push/pull_request triggers when pyGigEVision is on
+# PyPI and the dependency pin is switched (the coordinated public release).
 on:
   workflow_dispatch:
 
@@ -11,28 +11,20 @@ jobs:
   test:
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13"]
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[test]"
-
-      - name: Lint (syntax errors only)
-        run: |
-          pip install flake8
-          flake8 pyTelops/ --count --select=E9,F63,F7,F82 --show-source --statistics
-
+          python-version: "${{ matrix.python-version }}"
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Lint (ruff check)
+        run: ruff check pyTelops tests
+      - name: Lint (ruff format check)
+        run: ruff format --check pyTelops tests
       - name: Run tests
-        run: |
-          pytest tests/ -v --tb=short
+        run: pytest -v
