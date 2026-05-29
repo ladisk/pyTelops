@@ -773,10 +773,6 @@ class Camera:
         the thermal-imaging convention. The two are interchangeable and
         :attr:`exposure` is kept as a backward-compatible alias.
 
-        If automatic exposure control (:attr:`integration_time_auto`) is
-        not ``"off"``, writing this property first disables AEC so the
-        manual value takes effect.
-
         Returns
         -------
         float
@@ -800,6 +796,10 @@ class Camera:
     @integration_time.setter
     def integration_time(self, us: float) -> None:
         """Set the integration time in microseconds.
+
+        If automatic exposure control (:attr:`integration_time_auto`) is
+        not ``"off"``, this setter first disables AEC so the manual value
+        takes effect.
 
         Parameters
         ----------
@@ -977,10 +977,12 @@ class Camera:
         Parameters
         ----------
         mode : reg.CalibrationMode, str, or int
-            Accepted strings: ``"RT"``, ``"NUC"``, ``"RAW"``, ``"IBR"``,
-            ``"IBI"`` (case-insensitive). Also accepts the enum directly or
-            its integer value. ``"RAW0"`` is accepted as an alias for raw
-            mode with no offset.
+            Accepted strings: ``"RT"``, ``"NUC"``, ``"RAW"``, ``"RAW0"``,
+            ``"IBR"``, ``"IBI"`` (case-insensitive). Also accepts the enum
+            directly or its integer value. ``"RAW0"`` maps to
+            ``CalibrationMode.RAW0`` (value 0); ``"RAW"`` maps to
+            ``CalibrationMode.RAW`` (value 255). These are two distinct
+            pipeline modes, not aliases of each other.
 
         Raises
         ------
