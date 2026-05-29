@@ -1,7 +1,5 @@
 """Tests for register definitions and enums."""
 
-import pytest
-
 from pyTelops import registers as reg
 
 

@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from pyTelops.camera import _resolve_enum, Camera
 from pyTelops import registers as reg
+from pyTelops.camera import Camera, _resolve_enum
 
 
 class TestResolveEnum:
@@ -71,19 +71,29 @@ class TestResolveEnum:
     # --- MemoryBufferMOISource ---
 
     def test_moi_software(self):
-        assert _resolve_enum("software", reg.MemoryBufferMOISource) == reg.MemoryBufferMOISource.SOFTWARE
+        assert (
+            _resolve_enum("software", reg.MemoryBufferMOISource)
+            == reg.MemoryBufferMOISource.SOFTWARE
+        )
 
     def test_moi_external(self):
-        assert _resolve_enum("external", reg.MemoryBufferMOISource) == reg.MemoryBufferMOISource.EXTERNAL_SIGNAL
+        assert (
+            _resolve_enum("external", reg.MemoryBufferMOISource)
+            == reg.MemoryBufferMOISource.EXTERNAL_SIGNAL
+        )
 
     # --- Enum name fallback ---
 
     def test_enum_name_fallback(self):
         """Enum member name works even without alias."""
-        assert _resolve_enum("RISING_EDGE", reg.TriggerActivation) == reg.TriggerActivation.RISING_EDGE
+        assert (
+            _resolve_enum("RISING_EDGE", reg.TriggerActivation) == reg.TriggerActivation.RISING_EDGE
+        )
 
     def test_enum_name_case_insensitive(self):
-        assert _resolve_enum("rising_edge", reg.TriggerActivation) == reg.TriggerActivation.RISING_EDGE
+        assert (
+            _resolve_enum("rising_edge", reg.TriggerActivation) == reg.TriggerActivation.RISING_EDGE
+        )
 
 
 class TestStripHeaders:
@@ -255,11 +265,12 @@ class TestCalibrationConversion:
     def _make_rt_frame(self, pixel_value, width=20):
         """Build a fake frame with RT header (DataExp=-8, DataOffset=273.15)."""
         import struct
+
         # Header: 2 rows x width pixels x 2 bytes
         header = bytearray(2 * width * 2)
-        struct.pack_into('<f', header, 12, 273.15)    # DataOffset
-        struct.pack_into('<b', header, 16, -8)         # DataExp
-        header[28] = 2                                 # CalibrationMode = RT
+        struct.pack_into("<f", header, 12, 273.15)  # DataOffset
+        struct.pack_into("<b", header, 16, -8)  # DataExp
+        header[28] = 2  # CalibrationMode = RT
 
         header_arr = np.frombuffer(bytes(header), dtype=np.uint16).reshape(2, width)
         data_arr = np.full((2, width), pixel_value, dtype=np.uint16)
@@ -275,7 +286,6 @@ class TestCalibrationConversion:
 
     def test_nuc_no_conversion(self):
         """NUC mode: DataExp=0, DataOffset=0 — no conversion."""
-        import struct
         cam = Camera()
         width = 20
         header = bytearray(2 * width * 2)
@@ -320,9 +330,9 @@ class TestCalibrationParsing:
         et_dir.mkdir()
         (et_dir / "estimated_ExposureTime_ELSN08887_MF08573_FW1_IM0.txt").write_text(
             '% Camera model TEL-8050 - lens "MW 50mm" model TEL-8887 - filter wheel position #1\n'
-            '% column #1: temp\n'
-            '0.0;22.7;180.4;370.3\n'
-            '175.0;3.5;27.6;56.7\n'
+            "% column #1: temp\n"
+            "0.0;22.7;180.4;370.3\n"
+            "175.0;3.5;27.6;56.7\n"
         )
         cam = Camera()
         cam.load_calibration_info(str(tmp_path))
@@ -361,14 +371,34 @@ class TestCalibrationLoadSearch:
     def _cam_with_mock_calibration(self):
         cam = Camera()
         cam._calibration_info = {
-            0: {"index": 0, "posix": 100, "lens": "MW 50mm", "fw_pos": 0,
-                "temp_range": (0.0, 175.0)},
-            1: {"index": 1, "posix": 101, "lens": "MW 50mm", "fw_pos": 1,
-                "temp_range": (25.0, 378.0)},
-            2: {"index": 2, "posix": 102, "lens": "MW 25mm", "fw_pos": 0,
-                "temp_range": (0.0, 184.0)},
-            3: {"index": 3, "posix": 103, "lens": "MW 25mm", "fw_pos": 1,
-                "temp_range": (115.0, 376.0)},
+            0: {
+                "index": 0,
+                "posix": 100,
+                "lens": "MW 50mm",
+                "fw_pos": 0,
+                "temp_range": (0.0, 175.0),
+            },
+            1: {
+                "index": 1,
+                "posix": 101,
+                "lens": "MW 50mm",
+                "fw_pos": 1,
+                "temp_range": (25.0, 378.0),
+            },
+            2: {
+                "index": 2,
+                "posix": 102,
+                "lens": "MW 25mm",
+                "fw_pos": 0,
+                "temp_range": (0.0, 184.0),
+            },
+            3: {
+                "index": 3,
+                "posix": 103,
+                "lens": "MW 25mm",
+                "fw_pos": 1,
+                "temp_range": (115.0, 376.0),
+            },
         }
         return cam
 
