@@ -54,7 +54,7 @@ can select by lens name plus a target temperature, or directly by index:
 
 When selecting by ``lens`` and ``temp``, the method picks the collection whose
 temperature range contains ``temp``.  If multiple collections match (overlapping
-ranges), the one with the smallest index is chosen.
+ranges), the one with the narrowest temperature range is chosen.
 
 Checking the active collection
 --------------------------------

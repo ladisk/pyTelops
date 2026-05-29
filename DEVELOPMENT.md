@@ -35,8 +35,8 @@ register constants, GenICam XML download helper) lives in a separate
 package, **pyGigEVision**, which pyTelops depends on. pyTelops keeps
 only the Telops-specific parts (vendor register map, calibration
 loading, RT-mode Celsius conversion, 16 GB onboard buffer recording,
-2-row image header handling). Lorenzo's open-flir driver will rebase
-onto the same pyGigEVision base.
+2-row image header handling). Other vendor drivers built on pyGigEVision
+will rebase onto the same base.
 
 ```
 ┌──────────────────────────────────────┐
@@ -326,7 +326,7 @@ The camera's `REG_MEMORY_BUFFER_CLEAR_ALL` register wipes partition configuratio
 
 ### Phase 18: Split out pyGigEVision (v0.2.0, 2026-05-13)
 
-**Why.** With Lorenzo (LolloCappo) starting an open-flir driver from the same protocol primitives, the GigE Vision protocol code in pyTelops became something both drivers needed. Rather than have each vendor driver vendorize a copy of `gvcp.py`/`gvsp.py`, we extracted them into a standalone package that both depend on. The market survey from April 2026 (see `py-gigevision-opportunity.md`) confirmed no other pure-Python, no-SDK, no-GenTL GigE Vision library exists, so the split is also a small contribution to the broader ecosystem (eventually).
+**Why.** With Lorenzo (LolloCappo) starting another vendor driver built on pyGigEVision from the same protocol primitives, the GigE Vision protocol code in pyTelops became something both drivers needed. Rather than have each vendor driver vendorize a copy of `gvcp.py`/`gvsp.py`, we extracted them into a standalone package that both depend on. No other pure-Python, no-SDK, no-GenTL GigE Vision library was found to exist at the time of the split, so the extracted package is also a small contribution to the broader ecosystem (see https://github.com/ladisk/pyGigEVision).
 
 **What moved (to `pyGigEVision`).** Everything that worked unchanged on any GigE Vision camera, regardless of vendor:
 
@@ -349,7 +349,7 @@ The camera's `REG_MEMORY_BUFFER_CLEAR_ALL` register wipes partition configuratio
 - `from pyTelops.gvcp import GVCPClient` - broken (the file is gone). Anyone importing internal modules directly needs to update to `from pyGigEVision import GVCPClient`. No production user is known to do this.
 - `pyTelops.registers.REG_SC_*` - broken (the constants moved). Internal callers in `camera.py` were already updated to import from `pyGigEVision.standard`. External callers should do the same.
 
-**Why no `BaseCamera` class in pyGigEVision.** The standard rule is to extract abstractions at three implementations, not one. With only `Camera` (Telops) as a real example and open-flir not yet shipping, designing a `BaseCamera` now would almost certainly bake in Telops-specific assumptions (cooldown wait, 2-row header) that don't generalize. Phase 2 of the pyGigEVision design is intentionally undecided; `BaseCamera` will only land if the same lifecycle pattern actually repeats across Telops, FLIR, and a third vendor.
+**Why no `BaseCamera` class in pyGigEVision.** The standard rule is to extract abstractions at three implementations, not one. With only `Camera` (Telops) as a real example and other vendor drivers built on pyGigEVision not yet shipping, designing a `BaseCamera` now would almost certainly bake in Telops-specific assumptions (cooldown wait, 2-row header) that don't generalize. Phase 2 of the pyGigEVision design is intentionally undecided; `BaseCamera` will only land if the same lifecycle pattern actually repeats across Telops, FLIR, and a third vendor.
 
 **Versioning and dependency.** `pyTelops 0.2.0` declares `pyGigEVision >= 0.1.0` as a dependency, pinned to the private `git+ssh://git@github.com/ladisk/pyGigEVision.git@v0.1.0` URL while both repos are private. Switches to a normal PyPI version pin when both go public.
 
