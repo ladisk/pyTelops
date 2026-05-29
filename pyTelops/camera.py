@@ -1,17 +1,59 @@
 """
 High-level Telops camera driver.
 
-Provides a clean, Pythonic interface to Telops FAST-series thermal cameras
-over GigE Vision. Handles discovery, streaming, buffer operations, and
-camera configuration.
+This module exposes the :class:`Camera` class, which provides a Pythonic
+interface to Telops FAST-series thermal cameras over GigE Vision 1.2. Control
+messages are exchanged over GVCP (UDP register read/write) via
+:class:`pyGigEVision.GVCPClient`; image data arrives over GVSP via
+:class:`pyGigEVision.GVSPReceiver`. Register address constants and enum
+definitions live in :mod:`pyTelops.registers`.
 
-Usage:
+Usable-pixels convention
+------------------------
+Telops cameras embed two metadata rows at the top of every frame. The driver
+strips them transparently so that all user-facing values (resolution,
+``grab()``, ``acquire()``, buffer downloads) are in *usable pixels*. The
+constant :attr:`Camera.HEADER_ROWS` (= 2) records this offset; when writing
+height to the camera register the driver adds it back automatically.
+
+Calibration and physical units
+-------------------------------
+When :attr:`Camera.calibration_mode` is ``"RT"``, frames are delivered in
+degrees Celsius. The per-frame header contains a DataExp and DataOffset that
+encode the Kelvin conversion; the driver applies ``pixel * 2**DataExp +
+DataOffset - 273.15`` automatically. In ``"NUC"`` or ``"RAW"`` mode the
+driver returns the raw 16-bit integer values unchanged.
+
+Lifecycle
+---------
+The standard pattern is a context manager::
+
     from pyTelops import Camera
 
     with Camera() as cam:
         cam.integration_time = 50.0
         frame = cam.grab()
+
+For manual control::
+
+    cam = Camera(ip="169.254.67.34")
+    cam.connect()
+    cam.integration_time = 100.0
+    frames = cam.acquire(50)
+    cam.disconnect()
+
+:meth:`Camera.connect` handles auto-discovery when no IP is supplied,
+re-connects over a stale session from a previous process, and waits for the
+camera to finish cooling down. :meth:`Camera.disconnect` stops streaming,
+releases GVCP control, and closes all sockets.
+
+See also
+--------
+pyTelops.registers : register addresses and enum types
+pyGigEVision : underlying GigE Vision protocol layer
 """
+
+from __future__ import annotations
 
 import logging
 import os
@@ -198,38 +240,54 @@ def _find_local_ip_for(camera_ip: str) -> str:
 
 
 class Camera:
-    """Telops thermal camera over GigE Vision.
+    """Telops FAST-series thermal camera over GigE Vision.
 
-    Control via GVCP (register read/write), streaming via GVSP.
-    Supports live acquisition, internal memory buffer, trigger
-    configuration, and GUI viewer.
+    Provides register-level control (GVCP) and frame streaming (GVSP) for
+    Telops FAST infrared cameras. Supports live single-frame and burst
+    acquisition, internal memory-buffer recording, hardware and software
+    triggering, and a lightweight GUI viewer.
 
-    Args:
-        ip: Camera IP address. None = auto-discover first camera.
-        local_ip: Local network interface IP. None = auto-detect.
-        timeout: UDP timeout in seconds.
+    All resolution values are in *usable pixels* (the driver hides the two
+    Telops metadata rows). In ``"RT"`` calibration mode the driver
+    automatically converts frames to degrees Celsius using per-frame header
+    data. In ``"NUC"`` or ``"RAW"`` mode frames are raw 16-bit integers.
 
-    Examples:
-        Auto-discover and grab a frame::
+    Parameters
+    ----------
+    ip : str or None, optional
+        Camera IPv4 address (e.g. ``"169.254.67.34"``). When ``None``
+        (default) the driver broadcasts a GVCP discovery and uses the first
+        Telops camera found on the network.
+    local_ip : str or None, optional
+        IPv4 address of the local network interface to use. When ``None``
+        (default) the driver auto-detects the interface that can reach the
+        camera.
+    timeout : float, optional
+        UDP socket timeout in seconds for GVCP operations. Default is
+        ``2.0``.
 
-            with Camera() as cam:
-                frame = cam.grab()
+    Examples
+    --------
+    Auto-discover and grab a single frame:
 
-        Connect to a specific camera::
+    >>> with Camera() as cam:
+    ...     frame = cam.grab()
 
-            cam = Camera(ip="169.254.67.34")
-            cam.connect()
-            cam.integration_time = 100.0
-            frames = cam.acquire(50)
-            cam.disconnect()
+    Connect to a specific camera and acquire a burst:
 
-        Buffer recording::
+    >>> cam = Camera(ip="169.254.67.34")
+    >>> cam.connect()
+    >>> cam.integration_time = 100.0
+    >>> frames = cam.acquire(50)
+    >>> cam.disconnect()
 
-            with Camera() as cam:
-                cam.buffer_configure(frames_per_seq=1000)
-                cam.buffer_arm()
-                cam.buffer_fire_moi()
-                data = cam.buffer_download()
+    Internal memory-buffer recording:
+
+    >>> with Camera() as cam:
+    ...     cam.buffer_configure(frames_per_seq=1000)
+    ...     cam.buffer_arm()
+    ...     cam.buffer_fire_moi()
+    ...     data = cam.buffer_download()
     """
 
     # Number of metadata rows embedded in each frame by Telops cameras
@@ -247,9 +305,29 @@ class Camera:
     # Used to forcibly disconnect a stale instance when a new Camera
     # connects to the same camera (e.g., after a kernel restart or when
     # the user forgot to disconnect).
-    _active_cameras: dict[str, "Camera"] = {}
+    _active_cameras: dict[str, Camera] = {}
 
-    def __init__(self, ip: str | None = None, local_ip: str | None = None, timeout: float = 2.0):
+    def __init__(
+        self, ip: str | None = None, local_ip: str | None = None, timeout: float = 2.0
+    ) -> None:
+        """Initialise a Camera handle without connecting.
+
+        Creating a :class:`Camera` object does not open any network
+        connection. Call :meth:`connect` (or use the class as a context
+        manager) to establish control.
+
+        Parameters
+        ----------
+        ip : str or None, optional
+            Camera IPv4 address. ``None`` triggers auto-discovery on
+            :meth:`connect`.
+        local_ip : str or None, optional
+            Local interface IPv4 address. ``None`` triggers auto-detection
+            on :meth:`connect`.
+        timeout : float, optional
+            UDP timeout in seconds for GVCP register operations. Default
+            ``2.0``.
+        """
         self._camera_ip = ip
         self._local_ip = local_ip or ""
         self._timeout = timeout
@@ -297,16 +375,37 @@ class Camera:
     # ==========================================================
 
     def connect(self) -> None:
-        """Discover camera (if needed) and establish GVCP control.
+        """Discover the camera (if needed) and establish GVCP control.
 
-        If a previous Camera instance in the same process is still
-        connected to this camera, it is automatically disconnected first.
-        If a stale session from another process holds CCP, we poll until
-        the camera's heartbeat timeout expires (up to ~15 s).
+        If no IP was supplied at construction time, a GVCP broadcast is
+        sent and the first Telops camera found is used. If another
+        :class:`Camera` instance in the same process is still connected to
+        the same camera IP it is disconnected first, which handles the
+        common "forgot to disconnect" and "kernel restart" scenarios. A
+        stale CCP grant held by a process that has already exited is
+        reclaimed automatically when the camera's heartbeat timeout
+        expires (typically within 15 s).
 
-        Raises:
-            RuntimeError: If no camera is found.
-            GVCPError: If GVCP handshake fails.
+        After the GVCP handshake the driver applies a set of sensible
+        defaults (bad-pixel replacement on, fixed frame-rate mode, test
+        image off) and, if the camera reports ``REG_DEVICE_NOT_READY``,
+        blocks in :meth:`wait_until_ready` until it is ready. Idempotent
+        when already connected.
+
+        Raises
+        ------
+        RuntimeError
+            If no Telops camera is found on the network.
+        GVCPError
+            If the GVCP handshake fails or a register write is rejected.
+
+        Examples
+        --------
+        >>> cam = Camera()
+        >>> cam.connect()
+        >>> cam.is_connected
+        True
+        >>> cam.disconnect()
         """
         if self._connected:
             return
@@ -395,17 +494,28 @@ class Camera:
             self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR, reg.TestImageSelector.OFF)
 
     def wait_until_ready(self, timeout: float = 120.0, verbose: bool = True) -> None:
-        """Wait for camera to be ready (cooled down, initialized).
+        """Block until the camera finishes cooling down and initialising.
 
-        Automatically called by grab(), acquire(), and buffer_record()
-        if the camera is not ready. Shows a single updating status line.
+        Polls ``REG_DEVICE_NOT_READY`` every two seconds. If ``verbose``
+        is ``True``, the current TDC status bits (e.g. "Cooling down
+        (18.5 C)") are printed on a single overwriting line so the
+        terminal is not flooded. Called automatically by :meth:`connect`,
+        :meth:`grab`, :meth:`acquire`, and :meth:`buffer_record` when
+        the camera is not yet ready.
 
-        Args:
-            timeout: Max seconds to wait.
-            verbose: Print status updates.
+        Parameters
+        ----------
+        timeout : float, optional
+            Maximum seconds to wait before raising. Default ``120.0``.
+        verbose : bool, optional
+            Print a live status line while waiting. Default ``True``.
 
-        Raises:
-            TimeoutError: If camera not ready within timeout.
+        Raises
+        ------
+        TimeoutError
+            If the camera is still not ready after *timeout* seconds.
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
 
@@ -459,12 +569,34 @@ class Camera:
 
     @property
     def tdc_status(self) -> int:
-        """Raw TDC Status bitmask (see TDC_* constants in registers)."""
+        """Raw TDC status bitmask from ``REG_TDC_STATUS``.
+
+        Each bit corresponds to a ``TDC_*`` constant in
+        :mod:`pyTelops.registers`. Useful for diagnosing why the camera
+        is not ready without waiting for the full :meth:`wait_until_ready`
+        timeout.
+
+        Returns
+        -------
+        int
+            Bitmask of active TDC status flags.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return self._gvcp.read_reg(reg.REG_TDC_STATUS)
 
     def disconnect(self) -> None:
-        """Stop streaming, release GVCP control, close sockets."""
+        """Stop streaming, release GVCP control, and close all sockets.
+
+        Calls :meth:`stop_stream` if streaming is active, closes the GVSP
+        receiver, and releases the GVCP CCP grant. Idempotent when already
+        disconnected. Called automatically by :meth:`__exit__` and
+        :meth:`__del__`.
+        """
         if not self._connected:
             return
 
@@ -487,26 +619,50 @@ class Camera:
 
     @property
     def is_connected(self) -> bool:
-        """Whether the camera is connected."""
+        """Whether the camera is connected.
+
+        Returns
+        -------
+        bool
+            ``True`` after a successful :meth:`connect`; ``False`` after
+            :meth:`disconnect` or before the first connection.
+        """
         return self._connected
 
     @property
     def is_streaming(self) -> bool:
-        """Whether GVSP streaming is active."""
+        """Whether GVSP streaming is active.
+
+        Returns
+        -------
+        bool
+            ``True`` between :meth:`start_stream` and :meth:`stop_stream`.
+        """
         return self._streaming
 
     @property
     def is_acquiring(self) -> bool:
         """Whether continuous frame acquisition is active.
 
-        True between :meth:`acquisition_start` and :meth:`acquisition_stop`
-        (or inside an :meth:`acquisition` context manager).
+        Returns
+        -------
+        bool
+            ``True`` between :meth:`acquisition_start` and
+            :meth:`acquisition_stop`, or while inside an
+            :meth:`acquisition` context manager.
         """
         return self._acquiring
 
     @property
     def camera_ip(self) -> str | None:
-        """Camera IP address (None if not yet discovered)."""
+        """Camera IPv4 address, or ``None`` if not yet discovered.
+
+        Returns
+        -------
+        str or None
+            The address used (or to be used) for the GVCP connection.
+            Set during :meth:`connect` when auto-discovery is used.
+        """
         return self._camera_ip
 
     # ==========================================================
@@ -581,22 +737,81 @@ class Camera:
 
     @property
     def valid_widths(self) -> list[int]:
-        """Valid width values."""
+        """All valid frame widths in pixels.
+
+        Widths are multiples of :attr:`WIDTH_STEP` (64) in the range
+        ``[WIDTH_MIN, WIDTH_MAX]`` i.e. ``[64, 128, 192, 256, 320]``.
+
+        Returns
+        -------
+        list of int
+            Sorted list of valid width values.
+        """
         return list(range(self.WIDTH_MIN, self.WIDTH_MAX + 1, self.WIDTH_STEP))
 
     @property
     def valid_heights(self) -> list[int]:
-        """Valid height values (usable pixels, excludes header rows)."""
+        """All valid frame heights in usable pixels.
+
+        Heights are multiples of :attr:`HEIGHT_STEP` (4) in the range
+        ``[HEIGHT_MIN, HEIGHT_MAX]`` i.e. ``[4, 8, ..., 252, 256]``. The
+        two Telops header rows are not counted here; the driver adds them
+        back before writing the hardware register.
+
+        Returns
+        -------
+        list of int
+            Sorted list of valid height values.
+        """
         return list(range(self.HEIGHT_MIN, self.HEIGHT_MAX + 1, self.HEIGHT_STEP))
 
     @property
     def integration_time(self) -> float:
-        """Integration time in microseconds."""
+        """Integration (exposure) time in microseconds.
+
+        The camera-native term is exposure time; ``integration_time`` is
+        the thermal-imaging convention. The two are interchangeable and
+        :attr:`exposure` is kept as a backward-compatible alias.
+
+        If automatic exposure control (:attr:`integration_time_auto`) is
+        not ``"off"``, writing this property first disables AEC so the
+        manual value takes effect.
+
+        Returns
+        -------
+        float
+            Current integration time in microseconds.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+
+        Examples
+        --------
+        >>> with Camera() as cam:
+        ...     cam.integration_time = 50.0
+        ...     cam.integration_time
+        50.0
+        """
         self._check_connected()
         return self._gvcp.read_float(reg.REG_EXPOSURE_TIME)
 
     @integration_time.setter
-    def integration_time(self, us: float):
+    def integration_time(self, us: float) -> None:
+        """Set the integration time in microseconds.
+
+        Parameters
+        ----------
+        us : float
+            Integration time in microseconds. Must be within the range the
+            camera allows for the current frame rate and resolution.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         # Disable AEC if active (it locks ExposureTime register)
         aec = self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO)
@@ -606,37 +821,118 @@ class Camera:
         self._gvcp.write_float(reg.REG_EXPOSURE_TIME, us)
         self._check_fps_clamped(fps_before)
 
-    # Backward-compatible alias
+    #: Alias for :attr:`integration_time` (backward-compatible).
     exposure = integration_time
 
     @property
     def integration_time_auto(self) -> reg.ExposureAuto:
-        """Auto integration time control mode (OFF, ONCE, CONTINUOUS)."""
+        """Automatic exposure control (AEC) mode.
+
+        When not ``"off"``, the camera adjusts integration time
+        automatically. Setting :attr:`integration_time` while AEC is
+        active will first disable AEC.
+
+        Returns
+        -------
+        reg.ExposureAuto
+            Current AEC mode enum value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return reg.ExposureAuto(self._gvcp.read_reg(reg.REG_EXPOSURE_AUTO))
 
     @integration_time_auto.setter
-    def integration_time_auto(self, mode):
+    def integration_time_auto(self, mode: reg.ExposureAuto | str | int) -> None:
+        """Set the automatic exposure control mode.
+
+        Parameters
+        ----------
+        mode : reg.ExposureAuto, str, or int
+            Accepted strings: ``"off"``, ``"once"``, ``"continuous"``.
+            Also accepts the enum directly or its integer value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *mode* is not a recognised string.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_EXPOSURE_AUTO, int(_resolve_enum(mode, reg.ExposureAuto)))
 
-    # Backward-compatible alias
+    #: Alias for :attr:`integration_time_auto` (backward-compatible).
     exposure_auto = integration_time_auto
 
     @property
     def frame_rate(self) -> float:
-        """Acquisition frame rate in Hz."""
+        """Acquisition frame rate in Hz.
+
+        The camera clamps this to :attr:`frame_rate_max` whenever
+        resolution or integration time changes. The setter emits a
+        :class:`UserWarning` if the requested value exceeds the
+        maximum for the current settings.
+
+        Returns
+        -------
+        float
+            Current frame rate in Hz.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+
+        Examples
+        --------
+        >>> with Camera() as cam:
+        ...     cam.frame_rate = 100.0
+        ...     cam.frame_rate
+        100.0
+        """
         self._check_connected()
         return self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
 
     @property
     def frame_rate_max(self) -> float:
-        """Maximum frame rate in Hz for current resolution and integration time."""
+        """Maximum achievable frame rate for the current settings (Hz).
+
+        Depends on resolution and integration time. Use this to determine
+        the upper bound before setting :attr:`frame_rate`.
+
+        Returns
+        -------
+        float
+            Maximum frame rate in Hz.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return self._gvcp.read_float(reg.REG_FRAME_RATE_MAX)
 
     @frame_rate.setter
-    def frame_rate(self, hz: float):
+    def frame_rate(self, hz: float) -> None:
+        """Set the acquisition frame rate.
+
+        Parameters
+        ----------
+        hz : float
+            Desired frame rate in Hz. If *hz* exceeds :attr:`frame_rate_max`
+            for the current resolution and integration time the camera clamps
+            it and a :class:`UserWarning` is emitted.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         max_hz = self._gvcp.read_float(reg.REG_FRAME_RATE_MAX)
         self._gvcp.write_float(reg.REG_ACQUISITION_FRAME_RATE, hz)
@@ -654,12 +950,45 @@ class Camera:
 
     @property
     def calibration_mode(self) -> reg.CalibrationMode:
-        """Calibration mode (RAW, NUC, RT, IBR, IBI)."""
+        """Active calibration pipeline mode.
+
+        Determines what processing the camera applies to raw sensor data
+        before transmitting frames over GVSP. In ``"RT"`` mode the driver
+        automatically converts pixel values to degrees Celsius using the
+        per-frame header coefficients.
+
+        Returns
+        -------
+        reg.CalibrationMode
+            Current calibration mode enum value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return reg.CalibrationMode(self._gvcp.read_reg(reg.REG_CALIBRATION_MODE))
 
     @calibration_mode.setter
-    def calibration_mode(self, mode):
+    def calibration_mode(self, mode: reg.CalibrationMode | str | int) -> None:
+        """Set the calibration mode.
+
+        Parameters
+        ----------
+        mode : reg.CalibrationMode, str, or int
+            Accepted strings: ``"RT"``, ``"NUC"``, ``"RAW"``, ``"IBR"``,
+            ``"IBI"`` (case-insensitive). Also accepts the enum directly or
+            its integer value. ``"RAW0"`` is accepted as an alias for raw
+            mode with no offset.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *mode* is not a recognised string.
+        """
         self._check_connected()
         self._gvcp.write_reg(
             reg.REG_CALIBRATION_MODE, int(_resolve_enum(mode, reg.CalibrationMode))
@@ -667,12 +996,31 @@ class Camera:
 
     @property
     def resolution(self) -> tuple[int, int]:
-        """Image resolution as (width, height) in usable pixels.
+        """Frame resolution as ``(width, height)`` in usable pixels.
 
-        Width must be a multiple of 64 (64-320).
-        Height must be a multiple of 4 (4-256).
-        The 2 Telops header rows are hidden from the user.
-        See ``valid_widths`` and ``valid_heights`` for allowed values.
+        Width must be a multiple of 64 in the range ``[64, 320]``.
+        Height must be a multiple of 4 in the range ``[4, 256]``. The two
+        Telops header rows are excluded from the height value here; the
+        driver adds them back automatically when writing the hardware
+        register. Use :attr:`valid_widths` and :attr:`valid_heights` to
+        enumerate all accepted values.
+
+        Returns
+        -------
+        tuple of (int, int)
+            ``(width, height)`` in usable pixels.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+
+        Examples
+        --------
+        >>> with Camera() as cam:
+        ...     cam.resolution = (320, 256)
+        ...     cam.resolution
+        (320, 256)
         """
         self._check_connected()
         w = self._gvcp.read_reg(reg.REG_WIDTH)
@@ -680,7 +1028,26 @@ class Camera:
         return w, h - self.HEADER_ROWS
 
     @resolution.setter
-    def resolution(self, wh: tuple[int, int]):
+    def resolution(self, wh: tuple[int, int]) -> None:
+        """Set the frame resolution.
+
+        Parameters
+        ----------
+        wh : tuple of (int, int)
+            ``(width, height)`` in usable pixels. Width must be a multiple
+            of 64 in ``[64, 320]``; height must be a multiple of 4 in
+            ``[4, 256]``. Changing resolution may reduce the maximum frame
+            rate; a :class:`UserWarning` is emitted if the current rate is
+            clamped.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *width* or *height* are outside the allowed range or not a
+            valid multiple.
+        """
         self._check_connected()
         w, h = self._validate_resolution(wh[0], wh[1])
         fps_before = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
@@ -690,13 +1057,54 @@ class Camera:
 
     @property
     def temperature(self) -> float:
-        """Camera sensor temperature in Celsius (read-only)."""
+        """Main camera sensor temperature in degrees Celsius (read-only).
+
+        Reports the value from ``REG_DEVICE_TEMPERATURE``. For other
+        internal temperature sensors (compressor, FPGAs, etc.) use
+        :meth:`sensor_temperature`.
+
+        Returns
+        -------
+        float
+            Sensor temperature in degrees Celsius.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE)
 
     @property
     def info(self) -> dict:
-        """Current camera configuration as a dict."""
+        """Current camera configuration as a dictionary.
+
+        Reads a snapshot of the most commonly needed settings in one
+        call. Useful for logging state before a recording session.
+
+        Returns
+        -------
+        dict
+            Keys: ``ip``, ``width``, ``height``, ``integration_time_us``,
+            ``integration_time_auto``, ``frame_rate_hz``,
+            ``frame_rate_max_hz``, ``calibration``, ``trigger_mode``,
+            ``power_state``, ``temperature_c``, ``buffer_mode``,
+            ``bad_pixel_replacement``, ``reverse_x``, ``reverse_y``,
+            ``test_image``, ``frame_rate_mode``, ``roi_offset``.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+
+        Examples
+        --------
+        >>> with Camera() as cam:
+        ...     cfg = cam.info
+        ...     print(cfg["calibration"])
+        RT
+        """
         self._check_connected()
         return {
             "ip": self._camera_ip,
@@ -732,7 +1140,16 @@ class Camera:
 
     @property
     def state(self) -> str:
-        """Camera state: disconnected, connected, streaming, standby, error."""
+        """High-level camera state as a string.
+
+        Possible values: ``"disconnected"``, ``"connected"``,
+        ``"streaming"``, ``"standby"``, ``"not_ready"``, ``"error"``.
+
+        Returns
+        -------
+        str
+            Current camera state.
+        """
         if not self._connected or not self._gvcp:
             return "disconnected"
         if self._streaming:
@@ -750,45 +1167,149 @@ class Camera:
 
     @property
     def bad_pixel_replacement(self) -> bool:
-        """Bad pixel auto-replacement. ON by default (replaces with neighbor value)."""
+        """Bad-pixel auto-replacement (enabled by default).
+
+        When enabled the camera replaces pixels flagged as defective with
+        the average of their neighbours before transmitting. Enabled
+        automatically by :meth:`connect`. Disable only for diagnostics.
+
+        Returns
+        -------
+        bool
+            ``True`` if bad-pixel replacement is active.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return bool(self._gvcp.read_reg(reg.REG_BAD_PIXEL_REPLACEMENT))
 
     @bad_pixel_replacement.setter
-    def bad_pixel_replacement(self, enabled: bool):
+    def bad_pixel_replacement(self, enabled: bool) -> None:
+        """Enable or disable bad-pixel replacement.
+
+        Parameters
+        ----------
+        enabled : bool
+            ``True`` to enable, ``False`` to disable.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_BAD_PIXEL_REPLACEMENT, int(enabled))
 
     @property
     def reverse_x(self) -> bool:
-        """Horizontal image flip."""
+        """Horizontal image flip (mirror left-right).
+
+        Returns
+        -------
+        bool
+            ``True`` if horizontal flipping is active.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return bool(self._gvcp.read_reg(reg.REG_REVERSE_X))
 
     @reverse_x.setter
-    def reverse_x(self, enabled: bool):
+    def reverse_x(self, enabled: bool) -> None:
+        """Enable or disable horizontal image flip.
+
+        Parameters
+        ----------
+        enabled : bool
+            ``True`` to mirror the image left-right.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_REVERSE_X, int(enabled))
 
     @property
     def reverse_y(self) -> bool:
-        """Vertical image flip."""
+        """Vertical image flip (mirror top-bottom).
+
+        Returns
+        -------
+        bool
+            ``True`` if vertical flipping is active.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return bool(self._gvcp.read_reg(reg.REG_REVERSE_Y))
 
     @reverse_y.setter
-    def reverse_y(self, enabled: bool):
+    def reverse_y(self, enabled: bool) -> None:
+        """Enable or disable vertical image flip.
+
+        Parameters
+        ----------
+        enabled : bool
+            ``True`` to mirror the image top-bottom.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_REVERSE_Y, int(enabled))
 
     @property
-    def test_image(self):
-        """Test image source ("off" for normal operation)."""
+    def test_image(self) -> reg.TestImageSelector:
+        """Internal test-pattern source.
+
+        Use ``"off"`` (the default set by :meth:`connect`) for normal
+        operation. Test patterns are useful for verifying streaming
+        without a physical scene.
+
+        Returns
+        -------
+        reg.TestImageSelector
+            Current test image selector enum value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return reg.TestImageSelector(self._gvcp.read_reg(reg.REG_TEST_IMAGE_SELECTOR))
 
     @test_image.setter
-    def test_image(self, mode):
+    def test_image(self, mode: reg.TestImageSelector | str | int) -> None:
+        """Select the internal test-pattern source.
+
+        Parameters
+        ----------
+        mode : reg.TestImageSelector, str, or int
+            Accepted strings: ``"off"``, ``"static"``, ``"dynamic"``,
+            ``"constant"`` (case-insensitive). Also accepts the enum
+            directly or its integer value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *mode* is not a recognised string.
+        """
         self._check_connected()
         self._gvcp.write_reg(
             reg.REG_TEST_IMAGE_SELECTOR, int(_resolve_enum(mode, reg.TestImageSelector))
@@ -796,12 +1317,47 @@ class Camera:
 
     @property
     def roi_offset(self) -> tuple[int, int]:
-        """ROI offset as (x, y) pixels."""
+        """Region-of-interest pixel offset as ``(x, y)``.
+
+        Defines the top-left corner of the active area on the sensor.
+        ``x`` must be a non-negative multiple of :attr:`WIDTH_STEP` (64);
+        ``y`` must be a non-negative multiple of :attr:`HEIGHT_STEP` (4).
+        The combination of offset and :attr:`resolution` must not exceed
+        the full sensor size (320 x 256).
+
+        Returns
+        -------
+        tuple of (int, int)
+            ``(x, y)`` pixel offset from the top-left of the sensor.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return (self._gvcp.read_reg(reg.REG_OFFSET_X), self._gvcp.read_reg(reg.REG_OFFSET_Y))
 
     @roi_offset.setter
-    def roi_offset(self, xy: tuple[int, int]):
+    def roi_offset(self, xy: tuple[int, int]) -> None:
+        """Set the region-of-interest pixel offset.
+
+        Parameters
+        ----------
+        xy : tuple of (int, int)
+            ``(x, y)`` offset in pixels. Both values must be non-negative.
+            ``x`` must be a multiple of 64; ``y`` must be a multiple of 4.
+            The subwindow ``(x + width, y + height)`` must fit within the
+            320 x 256 sensor.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If the offset is out of range, not properly aligned, or the
+            subwindow exceeds the sensor dimensions.
+        """
         self._check_connected()
         x, y = int(xy[0]), int(xy[1])
 
@@ -841,63 +1397,151 @@ class Camera:
         self._gvcp.write_reg(reg.REG_OFFSET_Y, y)
 
     @property
-    def frame_rate_mode(self):
-        """Frame rate mode (FIXED, FIXED_LOCKED, MAXIMUM, BURST)."""
+    def frame_rate_mode(self) -> reg.FrameRateMode:
+        """Frame-rate control mode.
+
+        Controls how the camera determines its output frame rate.
+
+        * ``"fixed"`` -- use the value in :attr:`frame_rate` (default set
+          by :meth:`connect`).
+        * ``"fixed_locked"`` -- locked to an external timing source.
+        * ``"maximum"`` -- always run at :attr:`frame_rate_max`.
+        * ``"burst"`` -- burst mode (used with trigger frame count).
+
+        Returns
+        -------
+        reg.FrameRateMode
+            Current frame-rate mode enum value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return reg.FrameRateMode(self._gvcp.read_reg(reg.REG_FRAME_RATE_MODE))
 
     @frame_rate_mode.setter
-    def frame_rate_mode(self, mode):
+    def frame_rate_mode(self, mode: reg.FrameRateMode | str | int) -> None:
+        """Set the frame-rate control mode.
+
+        Parameters
+        ----------
+        mode : reg.FrameRateMode, str, or int
+            Accepted strings: ``"fixed"``, ``"fixed_locked"``
+            (alias ``"locked"``), ``"maximum"`` (alias ``"max"``),
+            ``"burst"`` (case-insensitive). Also accepts the enum directly
+            or its integer value.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *mode* is not a recognised string.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_FRAME_RATE_MODE, int(_resolve_enum(mode, reg.FrameRateMode)))
 
     @property
     def trigger_frame_count(self) -> int:
-        """Frames per trigger event (for burst capture)."""
+        """Number of frames captured per trigger event.
+
+        Relevant when :attr:`frame_rate_mode` is ``"burst"`` or when
+        using :meth:`trigger_software`. The camera emits this many
+        frames after each trigger pulse.
+
+        Returns
+        -------
+        int
+            Current trigger frame count.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         return self._gvcp.read_reg(reg.REG_TRIGGER_FRAME_COUNT)
 
     @trigger_frame_count.setter
-    def trigger_frame_count(self, count: int):
+    def trigger_frame_count(self, count: int) -> None:
+        """Set the number of frames per trigger event.
+
+        Parameters
+        ----------
+        count : int
+            Number of frames to capture per trigger.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_TRIGGER_FRAME_COUNT, count)
 
     @property
     def packet_delay(self) -> int:
-        """Inter-packet delay for GVSP streaming, in camera timer ticks.
+        """Inter-packet delay for GVSP streaming in camera timer ticks.
 
         Each tick is 8 ns on Telops cameras. The camera inserts this
-        much delay between successive stream packets, which spreads
-        the per-frame burst over time and reduces host-side UDP
+        much delay between successive packets within one frame burst,
+        which spreads the data over time and reduces host-side UDP
         receive overflow at the cost of slightly lower maximum frame
         rate.
 
         Typical values:
-            ``0`` — no delay (default). Maximum throughput. Works on
-                clean networks with a fast receiver. Risk of packet
-                loss if the host has hiccups (GC, display redraws,
-                thread scheduling jitter).
-            ``1000`` — ~8 µs between packets. Spreads a 113-packet
-                frame over ~2 ms. Usable up to ~400 fps. Safe default
-                for live processing loops where the host is doing
-                non-trivial work.
-            ``5000`` — ~40 µs between packets. Very conservative,
-                max ~100 fps. Use only if ``1000`` is not enough.
 
-        Setting this property writes the value to the camera register
-        immediately. The value is also remembered and re-applied on
-        subsequent calls to :meth:`start_stream`, so it survives
-        stream restarts and context-manager re-entry.
+        * ``0`` -- no delay (default). Maximum throughput. Works on
+          clean networks with a fast receiver. Risk of packet loss if
+          the host has scheduling jitter (GC, display redraws).
+        * ``1000`` -- ~8 us between packets. Spreads a 113-packet
+          frame over ~2 ms. Usable up to ~400 fps. Safe default for
+          live processing loops with non-trivial host work.
+        * ``5000`` -- ~40 us between packets. Very conservative,
+          max ~100 fps. Use only if ``1000`` is not enough.
 
-        This setting has no effect on buffer recording (which uses
-        the camera's internal memory at full sensor speed) or on
-        buffer download (which uses a separate bitrate register).
+        Writing this property sends the new value to the camera
+        register immediately and caches it so it is re-applied on
+        subsequent :meth:`start_stream` calls, surviving stream
+        restarts and context-manager re-entry.
+
+        This setting has no effect on internal memory-buffer recording
+        or buffer download, which use separate bitrate registers.
+
+        Returns
+        -------
+        int
+            Current inter-packet delay in camera timer ticks.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
         return self._gvcp.read_reg(REG_SC_PACKET_DELAY)
 
     @packet_delay.setter
-    def packet_delay(self, ticks: int):
+    def packet_delay(self, ticks: int) -> None:
+        """Set the inter-packet delay for GVSP streaming.
+
+        Parameters
+        ----------
+        ticks : int
+            Non-negative number of camera timer ticks (8 ns each) to
+            insert between successive stream packets. Set to ``0`` for
+            maximum throughput; increase if packets are dropped on busy
+            hosts.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *ticks* is negative.
+        """
         self._check_connected()
         ticks = int(ticks)
         if ticks < 0:
@@ -1091,7 +1735,7 @@ class Camera:
         self._acquiring = False
 
     @contextmanager
-    def acquisition(self) -> Iterator["Camera"]:
+    def acquisition(self) -> Iterator[Camera]:
         """Context manager for continuous frame acquisition.
 
         Starts acquisition on entry and stops it on exit, even if an
