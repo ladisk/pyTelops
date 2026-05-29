@@ -4,6 +4,14 @@
 pyTelops
 ========
 
+.. image:: https://github.com/ladisk/pyTelops/actions/workflows/testing.yml/badge.svg
+   :target: https://github.com/ladisk/pyTelops/actions/workflows/testing.yml
+   :alt: Tests
+
+.. image:: https://readthedocs.org/projects/pytelops/badge/?version=latest
+   :target: https://pytelops.readthedocs.io/en/latest/
+   :alt: Documentation
+
 .. image:: https://img.shields.io/pypi/v/pyTelops.svg
    :target: https://pypi.org/project/pyTelops/
 
@@ -58,6 +66,11 @@ Quick start
        frames = cam.acquire(10)         # 10 frames -> numpy (N, H, W)
 
 Frames are returned as numpy arrays with Telops header rows already stripped.
+
+Documentation
+-------------
+
+Full documentation at https://pytelops.readthedocs.io.
 
 Streaming vs buffer
 -------------------
@@ -343,10 +356,10 @@ Or use the built-in setup helper:
 Troubleshooting
 ---------------
 
-For common issues — firewall setup, ``packets unrecoverable`` warnings
-at high frame rates, growing lag in live displays, buffer download
-failures, and more — see
-`TROUBLESHOOTING.rst <TROUBLESHOOTING.rst>`_.
+For firewall setup, ``packets unrecoverable`` warnings at high frame rates,
+growing lag in live displays, buffer-download failures, the Tailscale
+discovery issue, and more, see the `troubleshooting guide
+<https://pytelops.readthedocs.io/en/latest/troubleshooting.html>`_.
 
 Integration
 -----------
