@@ -55,6 +55,7 @@ pyGigEVision : underlying GigE Vision protocol layer
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import re
@@ -2120,15 +2121,39 @@ class Camera:
     # Image Processing
     # ==========================================================
 
-    def nuc(self, mode="black_body", blackbody_temp=None, timeout=60.0):
+    def nuc(
+        self,
+        mode: str | reg.ImageCorrectionMode = "black_body",
+        blackbody_temp: float | None = None,
+        timeout: float = 60.0,
+    ) -> None:
         """Perform Non-Uniformity Correction (NUC).
 
-        Blocks until complete. Locks many camera registers while running.
+        Writes the correction mode and (optionally) the external blackbody
+        temperature, then triggers the NUC sequence and polls
+        ``REG_DEVICE_NOT_READY`` once per second until the camera reports
+        ready.  Many registers are locked by the camera during this time.
 
-        Args:
-            mode: "black_body" or "icu" (or ImageCorrectionMode enum).
-            blackbody_temp: Temperature in Celsius (for black body mode).
-            timeout: Max seconds to wait.
+        Parameters
+        ----------
+        mode : str or reg.ImageCorrectionMode, optional
+            Correction algorithm.  Accepted strings (case-insensitive):
+            ``"black_body"`` (default) or ``"icu"``.  Also accepts the
+            :class:`reg.ImageCorrectionMode` enum directly.
+        blackbody_temp : float or None, optional
+            External blackbody reference temperature in degrees Celsius.
+            Used only in ``"black_body"`` mode.  When ``None`` (default)
+            the register is not written and the camera uses whatever value
+            was previously programmed.
+        timeout : float, optional
+            Maximum seconds to wait for the NUC to finish.  Default 60.0.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        TimeoutError
+            If the NUC sequence does not complete within *timeout* seconds.
         """
         self._check_connected()
         m = _resolve_enum(mode, reg.ImageCorrectionMode)
@@ -2148,12 +2173,35 @@ class Camera:
     # Diagnostics
     # ==========================================================
 
-    def sensor_temperature(self, location="sensor") -> float:
-        """Read temperature at a specific sensor location.
+    def sensor_temperature(self, location: str | reg.TemperatureLocation = "sensor") -> float:
+        """Read the temperature at a specific camera location.
 
-        Args:
-            location: "sensor", "compressor", "cold_finger", "processing_fpga",
-                      etc. (or TemperatureLocation enum).
+        Writes the selector register then reads the float result register.
+        For a snapshot of all locations at once, use :meth:`diagnostics`.
+
+        Parameters
+        ----------
+        location : str or reg.TemperatureLocation, optional
+            Sensor location identifier.  Accepted strings (case-insensitive):
+            ``"sensor"``, ``"mainboard"``, ``"internal_lens"``,
+            ``"external_lens"``, ``"icu"``, ``"filter_wheel"``,
+            ``"compressor"``, ``"cold_finger"``, ``"spare"``,
+            ``"external_thermistor"``, ``"processing_fpga"``,
+            ``"output_fpga"``, ``"storage_fpga"``.  Defaults to
+            ``"sensor"``.  Also accepts the :class:`reg.TemperatureLocation`
+            enum or its integer value.
+
+        Returns
+        -------
+        float
+            Temperature in degrees Celsius.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *location* is not a recognised string.
         """
         self._check_connected()
         loc = _resolve_enum(location, reg.TemperatureLocation)
@@ -2161,10 +2209,58 @@ class Camera:
         return self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE_READOUT)
 
     def diagnostics(self) -> dict:
-        """Read all diagnostic sensors (temperatures, voltages, currents, uptime).
+        """Read all diagnostic sensors in one call.
 
-        Involves ~40 register reads, may take a few hundred milliseconds.
-        Sensors not available on this model return None.
+        Iterates over every entry in :class:`reg.TemperatureLocation`,
+        :class:`reg.VoltageLocation`, and :class:`reg.CurrentLocation`,
+        writing each selector register and reading the corresponding float
+        register.  Sensors that the camera rejects with a
+        :class:`GVCPError` (unsupported on this model) are stored as
+        ``None``.  The call issues roughly 40 register reads and typically
+        completes within a few hundred milliseconds.
+
+        Returns
+        -------
+        dict
+            A dict with the following keys:
+
+            ``"temperatures"`` : dict[str, float or None]
+                Keyed by lowercase :class:`reg.TemperatureLocation` member
+                names (e.g. ``"sensor"``, ``"compressor"``,
+                ``"cold_finger"``, ``"processing_fpga"``).  Values in
+                degrees Celsius; ``None`` if the location is not supported
+                by this camera model.
+            ``"voltages"`` : dict[str, float or None]
+                Keyed by lowercase :class:`reg.VoltageLocation` member
+                names (e.g. ``"cooler"``, ``"supply_24v"``).  Values in
+                volts; ``None`` if unsupported.
+            ``"currents"`` : dict[str, float or None]
+                Keyed by lowercase :class:`reg.CurrentLocation` member
+                names (e.g. ``"cooler"``, ``"supply_24v"``).  Values in
+                amps; ``None`` if unsupported.
+            ``"device_running_s"`` : int
+                Total device uptime in seconds.
+            ``"cooler_running_s"`` : int
+                Total cooler uptime in seconds.
+            ``"power_on_cycles"`` : int
+                Number of times the device has been powered on.
+            ``"cooler_power_on_cycles"`` : int
+                Number of times the cooler has been powered on.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+
+        Examples
+        --------
+        >>> d = cam.diagnostics()
+        >>> print(d["temperatures"]["sensor"])
+        -196.3
+        >>> print(d["voltages"]["cooler"])
+        4.85
+        >>> print(d["device_running_s"] / 3600, "hours")
+        12.4 hours
         """
         self._check_connected()
 
@@ -2207,12 +2303,33 @@ class Camera:
     # ==========================================================
 
     def save_config(self) -> None:
-        """Save current configuration to camera non-volatile memory."""
+        """Save the current configuration to camera non-volatile memory.
+
+        Writes ``1`` to ``REG_SAVE_CONFIGURATION``.  The camera persists
+        all writable registers (integration time, resolution, frame rate,
+        trigger settings, etc.) so they are restored on next power-on.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_SAVE_CONFIGURATION, 1)
 
     def sync_time(self) -> None:
-        """Synchronize camera clock to host system time (UTC)."""
+        """Synchronise the camera clock to the host system time (UTC).
+
+        Reads the current UTC time from the host and writes the integer
+        POSIX timestamp to ``REG_POSIX_TIME``.  Sub-second precision is
+        not written; use the :attr:`posix_time` setter with a
+        :class:`datetime.datetime` object for finer control.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         import datetime
 
         self._check_connected()
@@ -2220,10 +2337,23 @@ class Camera:
         self._gvcp.write_reg(reg.REG_POSIX_TIME, int(now.timestamp()))
 
     @property
-    def posix_time(self):
-        """Camera time as Python datetime (UTC)."""
-        import datetime
+    def posix_time(self) -> datetime.datetime:
+        """Camera wall-clock time as a timezone-aware UTC datetime.
 
+        Reads ``REG_POSIX_TIME`` (whole seconds) and ``REG_SUB_SECOND_TIME``
+        (100-nanosecond ticks) from the camera and combines them into a
+        :class:`datetime.datetime` with microsecond resolution.
+
+        Returns
+        -------
+        datetime.datetime
+            Timezone-aware datetime in UTC with microsecond precision.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         seconds = self._gvcp.read_reg(reg.REG_POSIX_TIME)
         sub_100ns = self._gvcp.read_reg(reg.REG_SUB_SECOND_TIME)
@@ -2233,8 +2363,23 @@ class Camera:
         )
 
     @posix_time.setter
-    def posix_time(self, dt):
-        """Set camera time from a datetime object."""
+    def posix_time(self, dt: datetime.datetime | float | int) -> None:
+        """Set the camera clock from a datetime object or POSIX timestamp.
+
+        Parameters
+        ----------
+        dt : datetime.datetime or float or int
+            When *dt* has a ``timestamp()`` method (i.e. is a
+            :class:`datetime.datetime`), its integer POSIX timestamp is
+            written to ``REG_POSIX_TIME``.  Otherwise the value itself is
+            cast to ``int`` and written directly (interpreted as seconds
+            since the Unix epoch).  Sub-second precision is truncated.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         if hasattr(dt, "timestamp"):
             self._gvcp.write_reg(reg.REG_POSIX_TIME, int(dt.timestamp()))
@@ -2243,7 +2388,28 @@ class Camera:
 
     @property
     def gev_timestamp_ns(self) -> int:
-        """GigE Vision timestamp in nanoseconds (read-only)."""
+        """GigE Vision free-running timestamp in nanoseconds (read-only).
+
+        Latches the camera's GigE Vision internal counter by writing
+        ``2`` to ``REG_GEV_TIMESTAMP_CONTROL``, then reads the 64-bit
+        tick value from the high and low word registers and the tick
+        frequency.  The tick count is scaled to nanoseconds as
+        ``ticks * 1_000_000_000 / freq``.  If the camera reports a
+        frequency of zero the raw tick count is returned unchanged.
+
+        This timestamp is independent of wall-clock time; use
+        :attr:`posix_time` or :meth:`sync_time` for UTC-anchored time.
+
+        Returns
+        -------
+        int
+            Elapsed time since the camera was powered on, in nanoseconds.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         # Latch timestamp
         self._gvcp.write_reg(reg.REG_GEV_TIMESTAMP_CONTROL, 2)
@@ -2265,37 +2431,109 @@ class Camera:
     # ==========================================================
 
     @property
-    def calibration_names(self) -> dict:
-        """Manual name mapping {index: name} for calibration collections.
+    def calibration_names(self) -> dict[int, str]:
+        """Manual name mapping ``{collection_index: name}`` for calibration collections.
 
-        Allows assigning human-readable names to collections without
-        needing the USB calibration data directory.
+        Provides human-readable labels that appear in the output of
+        :meth:`calibration_collections`, :meth:`calibration_load`, and
+        :meth:`calibration_active` without requiring the USB calibration
+        data directory.  A connection to the camera is not needed to set
+        this mapping.
 
-        Examples:
-            cam.calibration_names = {0: "MW 50mm FW1", 3: "Microscope FW2"}
+        Returns
+        -------
+        dict[int, str]
+            Current ``{index: name}`` mapping (empty by default).
+
+        See Also
+        --------
+        load_calibration_info : Load lens/temperature metadata from the
+            calibration data directory on USB.
         """
         return self._calibration_names
 
     @calibration_names.setter
-    def calibration_names(self, names: dict):
+    def calibration_names(self, names: dict[int, str]) -> None:
+        """Set the manual name mapping for calibration collections.
+
+        Parameters
+        ----------
+        names : dict[int, str]
+            Mapping of collection index (0-based) to a human-readable name
+            string.  For example ``{0: "MW 50mm FW1", 3: "Microscope FW2"}``.
+        """
         self._calibration_names = names
 
     def load_calibration_info(self, path: str) -> None:
-        """Load calibration metadata from USB calibration data directory.
+        """Load calibration metadata from the USB calibration data directory.
 
-        Parses filenames and exposure time files to map camera collection
-        indices to lens names, filter wheel positions, and temperature ranges.
+        Parses ``.tsco`` filenames and exposure-time text files to build a
+        mapping from camera collection indices to lens names, filter-wheel
+        positions, and calibrated temperature ranges.  A camera connection
+        is not required -- the method reads only local files.  When
+        connected, indices are resolved immediately; when called before
+        :meth:`connect`, the raw file data is stored and matched on
+        connection.
 
-        This method only reads files and does not require a camera connection.
-        After calling this, ``calibration_collections()`` and
-        ``calibration_load(lens=..., temp=...)`` will include lens/temp info.
+        After this call, :meth:`calibration_collections` will include
+        ``"lens"``, ``"fw_position"``, and ``"temp_range"`` fields where
+        available, and :meth:`calibration_load` supports the
+        ``lens=`` / ``temp=`` selection path.
 
-        Args:
-            path: Path to the calibration data directory
-                  (e.g., "TEL-8050 Calibration Data/").
+        Directory layout expected
+        -------------------------
+        ``<path>/``
+            One or more ``.tsco`` files whose names encode the sensor
+            serial number, EL identifier, filter-wheel position (FW),
+            and a POSIX timestamp.  Two filename formats are supported:
 
-        Raises:
-            FileNotFoundError: If the path does not exist.
+            * Old: ``TEL08050_<POSIX>_ELxxxxx_MFxxxxx_FWn_IMn_SWDn.tsco``
+            * New: ``TEL08050_ELxxxxx_MFxxxxx_FWn_IMn_SWDn_<POSIX>.tsco``
+
+        ``<path>/estimated_ExposureTimes/``
+            Optional sub-directory of ``.txt`` files.  Each file contains
+            a header line with the lens name (``lens "MW 50mm"``) and the
+            filter-wheel position (``filter wheel position #N``), followed
+            by semicolon-delimited temperature/exposure rows.  The first
+            column of the first and last data rows gives ``temp_min`` and
+            ``temp_max`` for the collection.
+
+        Naming normalisation
+        --------------------
+        Exposure-time filenames may use ``ELSN`` as the element prefix
+        (e.g. ``ELSN08887``) whereas ``.tsco`` files use ``EL08887``.
+        This method strips the ``SN`` suffix (``ELSN`` -> ``EL``) before
+        matching.  Filter-wheel positions in exposure-time files are
+        1-indexed (``FW1`` -- ``FW4``) while ``.tsco`` files are
+        0-indexed (``FW0`` -- ``FW3``); the method subtracts 1 from the
+        exposure-time value before comparing.
+
+        Parameters
+        ----------
+        path : str
+            Absolute or relative path to the calibration data directory
+            (e.g. ``"TEL-8050 Calibration Data/"``).
+
+        Raises
+        ------
+        FileNotFoundError
+            If *path* does not exist or is not a directory.
+
+        Examples
+        --------
+        Load info before connecting (stored and matched on connection):
+
+        >>> cam.load_calibration_info("/media/usb/TEL-8050 Calibration Data")
+        >>> cam.connect("192.168.100.10")
+        >>> cam.calibration_load(lens="50mm", temp=25)
+
+        Load info after connecting (indices resolved immediately):
+
+        >>> cam.connect("192.168.100.10")
+        >>> cam.load_calibration_info("/media/usb/TEL-8050 Calibration Data")
+        >>> cols = cam.calibration_collections()
+        >>> for c in cols:
+        ...     print(c["index"], c.get("lens"), c.get("temp_range"))
         """
         path = os.path.normpath(path)
         if not os.path.isdir(path):
@@ -2456,15 +2694,51 @@ class Camera:
         )
 
     def calibration_collections(self) -> list[dict]:
-        """List all calibration collections on the camera.
+        """List all calibration collections stored on the camera.
 
-        Returns list of dicts with keys: ``index``, ``timestamp``, ``type``,
-        ``blocks``, and optionally: ``lens``, ``fw_position``, ``temp_range``
-        (if ``load_calibration_info`` was called), ``name``
-        (if ``calibration_names`` was set).
+        Reads the collection count from ``REG_CAL_COLLECTION_COUNT``, then
+        iterates over each index reading its POSIX timestamp, type, and
+        block count.  Optional fields are included only when the
+        corresponding data is available.
 
-        Returns:
-            List of dicts, one per calibration collection.
+        Returns
+        -------
+        list of dict
+            One dict per collection.  Always-present keys:
+
+            ``"index"`` : int
+                0-based collection index.
+            ``"timestamp"`` : datetime.datetime
+                Collection creation time (UTC, timezone-aware).
+            ``"posix"`` : int
+                Raw POSIX timestamp of the collection.
+            ``"type"`` : str or int
+                Calibration type name from
+                :class:`reg.CalibrationCollectionType` (e.g.
+                ``"TELOPS_FIXED"``), or the raw integer if unknown.
+            ``"blocks"`` : int
+                Number of calibration blocks in this collection.
+
+            Optional keys (present when :meth:`load_calibration_info` was
+            called and matched this collection):
+
+            ``"lens"`` : str
+                Human-readable lens name (e.g. ``"MW 50mm"``).
+            ``"fw_position"`` : int
+                0-based filter-wheel position.
+            ``"temp_range"`` : tuple[float, float]
+                ``(temp_min, temp_max)`` in degrees Celsius.
+
+            Optional key (present when :attr:`calibration_names` includes
+            this index):
+
+            ``"name"`` : str
+                Manually assigned human-readable name.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
         import datetime
@@ -2508,30 +2782,78 @@ class Camera:
 
         return collections
 
-    def calibration_load(self, index: int = None, lens: str = None, temp: float = None) -> dict:
-        """Load a calibration collection and its first block.
+    def calibration_load(
+        self, index: int | None = None, lens: str | None = None, temp: float | None = None
+    ) -> dict:
+        """Load a calibration collection and activate its first block.
 
-        Specify by ``index``, or by ``lens`` name + target ``temp`` to
-        auto-select the matching collection.
+        Exactly one of ``index`` or ``lens`` must be supplied.  When
+        ``lens`` is given, :meth:`load_calibration_info` must have been
+        called first so that lens/temperature metadata is available.
 
-        Args:
-            index: Collection index (0-based).
-            lens: Lens name substring (e.g., "50mm", "microscope").
-                  Combined with ``temp`` to find the right collection.
-            temp: Target temperature in Celsius. Selects the collection
-                  whose temperature range includes this value.
+        The method writes ``REG_CAL_COLLECTION_SELECTOR`` to select the
+        target collection, then compares its POSIX timestamp to the
+        currently active POSIX timestamp.  If they match the collection
+        is already loaded and no further register writes are performed.
+        Otherwise it writes ``REG_CAL_COLLECTION_LOAD``, waits 2 s, then
+        loads block 0 via ``REG_CAL_BLOCK_LOAD`` and waits another 2 s.
+        A :class:`UserWarning` is emitted if the active POSIX register
+        does not match the expected value after loading (the camera may
+        still be processing).
 
-        Returns:
-            Dict with loaded collection info.
+        Parameters
+        ----------
+        index : int or None, optional
+            0-based collection index.  Use when you know the exact index.
+        lens : str or None, optional
+            Lens name substring to search (case-insensitive, e.g.
+            ``"50mm"``, ``"microscope"``).  When multiple collections
+            match the lens name, the one whose ``temp_range`` contains
+            *temp* is preferred; ties are broken by selecting the
+            narrowest temperature range.
+        temp : float or None, optional
+            Target scene temperature in degrees Celsius.  Used together
+            with *lens* to select the collection whose calibrated
+            temperature range covers this value.  Ignored when *index*
+            is specified.
 
-        Raises:
-            ValueError: If no matching collection is found, or if neither
-                        ``index`` nor ``lens``+``temp`` is provided.
+        Returns
+        -------
+        dict
+            Information about the loaded collection.  Always-present keys:
 
-        Examples:
-            cam.calibration_load(index=4)
-            cam.calibration_load(lens="50mm", temp=25)
-            cam.calibration_load(lens="microscope", temp=300)
+            ``"index"`` : int
+                Collection index that was loaded.
+            ``"posix"`` : int
+                POSIX timestamp of the loaded collection.
+
+            Optional keys (present when metadata was available from
+            :meth:`load_calibration_info` or :attr:`calibration_names`):
+
+            ``"lens"`` : str, ``"fw_position"`` : int,
+            ``"temp_range"`` : tuple[float, float], ``"name"`` : str.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If neither *index* nor *lens* is provided, or if no collection
+            matches the *lens* / *temp* criteria.
+
+        Examples
+        --------
+        Load by explicit index:
+
+        >>> cam.calibration_load(index=4)
+
+        Load by lens and target temperature (requires prior
+        :meth:`load_calibration_info` call):
+
+        >>> cam.load_calibration_info("/media/usb/TEL-8050 Calibration Data")
+        >>> cam.calibration_load(lens="50mm", temp=25)
+
+        >>> cam.calibration_load(lens="microscope", temp=300)
         """
         self._check_connected()
 
@@ -2650,11 +2972,52 @@ class Camera:
         return result
 
     def calibration_active(self) -> dict:
-        """Currently loaded calibration collection and block.
+        """Return information about the currently active calibration.
 
-        Returns:
-            Dict with keys: ``type``, ``collection_posix``,
-            ``collection_timestamp``, ``block_posix``, ``block_timestamp``.
+        Reads the active calibration type, collection POSIX timestamp, and
+        block POSIX timestamp from camera registers.  If calibration
+        metadata was loaded via :meth:`load_calibration_info`, the result
+        is enriched with lens, filter-wheel position, and temperature range.
+        If :attr:`calibration_names` contains an entry for the active
+        collection index, its name is included as well.
+
+        Returns
+        -------
+        dict
+            Always-present keys:
+
+            ``"type"`` : str or int
+                Calibration type name from
+                :class:`reg.CalibrationCollectionType` (e.g.
+                ``"TELOPS_FIXED"``), or the raw integer if unknown.
+            ``"collection_posix"`` : int
+                POSIX timestamp of the active collection (``0`` if none).
+            ``"collection_timestamp"`` : datetime.datetime or None
+                UTC datetime for the active collection, or ``None`` when
+                the POSIX value is zero.
+            ``"block_posix"`` : int
+                POSIX timestamp of the active block (``0`` if none).
+            ``"block_timestamp"`` : datetime.datetime or None
+                UTC datetime for the active block, or ``None`` when the
+                POSIX value is zero.
+
+            Optional keys (present when metadata is available):
+
+            ``"index"`` : int
+                Matched collection index.
+            ``"lens"`` : str
+                Lens name from :meth:`load_calibration_info`.
+            ``"fw_position"`` : int
+                0-based filter-wheel position.
+            ``"temp_range"`` : tuple[float, float]
+                ``(temp_min, temp_max)`` in degrees Celsius.
+            ``"name"`` : str
+                Manually assigned name from :attr:`calibration_names`.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
         """
         self._check_connected()
         import datetime
