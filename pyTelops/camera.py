@@ -1556,7 +1556,22 @@ class Camera:
     # ==========================================================
 
     def start_stream(self) -> None:
-        """Configure stream channel and start GVSP receiver."""
+        """Configure the GVSP stream channel and start the receiver thread.
+
+        Sets the packet size to the standard MTU (1500 bytes), writes the
+        destination IP and port to the camera, and starts the GVSP receiver.
+        Idempotent -- safe to call when streaming is already active.
+
+        After this call, frames flow from the camera but are not queued in the
+        acquisition buffer until :meth:`acquisition_start` is also called.
+        For a single combined start, use :meth:`acquisition_start` directly
+        (it calls :meth:`start_stream` automatically).
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         if self._streaming:
             return
@@ -1597,7 +1612,17 @@ class Camera:
         self._streaming = True
 
     def stop_stream(self) -> None:
-        """Stop acquisition and GVSP receiver, tear down stream channel."""
+        """Stop the GVSP receiver and tear down the stream channel.
+
+        If acquisition is currently running, :meth:`acquisition_stop` is
+        called first. Then the camera's host-port register is cleared and the
+        GVSP receiver thread is stopped. Idempotent -- safe to call when
+        streaming is already inactive.
+
+        To pause acquisition without releasing the socket (so the next
+        :meth:`acquisition_start` is faster), use :meth:`acquisition_stop`
+        alone instead of this method.
+        """
         if not self._streaming:
             return
 
@@ -1631,21 +1656,28 @@ class Camera:
         return arr
 
     def _apply_calibration(self, frame: np.ndarray) -> np.ndarray:
-        """Apply per-frame calibration using header metadata.
+        """Apply per-frame calibration using the embedded Telops header data.
 
-        Reads DataExp and DataOffset from the Telops header rows
-        (before they are stripped) and converts pixel values to
-        physical units:
-          - RT mode: Celsius (pixel * 2^DataExp + DataOffset - 273.15)
-          - IBR/IBI: physical units (pixel * 2^DataExp + DataOffset)
-          - NUC/RAW: no conversion (DataExp=0, DataOffset=0)
+        Reads ``DataExp`` and ``DataOffset`` from the header rows (which must
+        still be present in *frame*) and converts pixel values::
 
-        Args:
-            frame: Raw frame WITH header rows (not yet stripped).
+            physical = pixel * 2**DataExp + DataOffset
+            # RT mode only: physical -= 273.15  (Kelvin to Celsius)
 
-        Returns:
-            Converted float32 array (same shape), or original if no
-            conversion needed.
+        For NUC/RAW frames ``DataExp`` and ``DataOffset`` are both zero, so
+        the function strips headers and returns without arithmetic conversion.
+
+        Parameters
+        ----------
+        frame : numpy.ndarray
+            Raw frame (2-D) or batch (3-D) WITH the two Telops header rows
+            still included (i.e. shape ``(H+2, W)`` or ``(N, H+2, W)``).
+
+        Returns
+        -------
+        numpy.ndarray
+            float32 array with header rows stripped. Returns the unmodified
+            uint16 sub-array (header stripped) when no calibration is needed.
         """
         if frame.ndim == 2:
             header_bytes = frame[: self.HEADER_ROWS, :].tobytes()
@@ -1685,14 +1717,13 @@ class Camera:
     def acquisition_start(self) -> None:
         """Start continuous frame acquisition.
 
-        Configures the stream channel (if not already up) and tells
-        the camera to begin sending frames continuously. Frames can
-        then be retrieved one at a time with :meth:`read_frame` in a
-        loop. Idempotent — safe to call when already acquiring.
+        Calls :meth:`start_stream` if the GVSP channel is not yet open, then
+        writes the acquisition-start register. Frames begin flowing and can
+        be retrieved with :meth:`read_frame`. Idempotent -- safe to call when
+        already acquiring.
 
-        Pair with :meth:`acquisition_stop` to halt acquisition. For
-        automatic cleanup on exception, use the :meth:`acquisition`
-        context manager instead::
+        Pair with :meth:`acquisition_stop` to halt. For automatic cleanup on
+        exception, prefer the :meth:`acquisition` context manager::
 
             with cam.acquisition():
                 while running:
@@ -1700,11 +1731,17 @@ class Camera:
                     if frame is not None:
                         process(frame)
 
-        Note:
-            Not thread-safe. Acquisition lifecycle calls
-            (``acquisition_start`` / ``acquisition_stop``) must be
-            serialized by the caller. ``read_frame`` IS safe to call
-            concurrently with itself.
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected or not ready.
+
+        Notes
+        -----
+        Not thread-safe. Acquisition lifecycle calls
+        (``acquisition_start`` / ``acquisition_stop``) must be serialized by
+        the caller. :meth:`read_frame` is safe to call concurrently with
+        itself from multiple threads.
         """
         self._check_ready()
         if self._acquiring:
@@ -1717,16 +1754,18 @@ class Camera:
     def acquisition_stop(self) -> None:
         """Stop continuous frame acquisition.
 
-        Writes the acquisition-stop register but leaves the GVSP
-        stream channel intact, so a subsequent :meth:`acquisition_start`
-        can resume without re-binding sockets. Use :meth:`stop_stream`
-        for full teardown. Idempotent.
+        Writes the acquisition-stop register and clears the internal
+        ``_acquiring`` flag. The GVSP stream channel is left intact so a
+        subsequent :meth:`acquisition_start` can resume without re-binding
+        sockets. For a full teardown (including the receiver thread), call
+        :meth:`stop_stream`. Idempotent -- safe to call when not acquiring.
 
-        Note:
-            Not thread-safe. Acquisition lifecycle calls
-            (``acquisition_start`` / ``acquisition_stop``) must be
-            serialized by the caller. ``read_frame`` IS safe to call
-            concurrently with itself.
+        Notes
+        -----
+        Not thread-safe. Acquisition lifecycle calls
+        (``acquisition_start`` / ``acquisition_stop``) must be serialized by
+        the caller. :meth:`read_frame` is safe to call concurrently from
+        multiple threads.
         """
         if not self._acquiring:
             return
@@ -1740,20 +1779,30 @@ class Camera:
     def acquisition(self) -> Iterator[Camera]:
         """Context manager for continuous frame acquisition.
 
-        Starts acquisition on entry and stops it on exit, even if an
-        exception occurs inside the block. The stream channel is left
-        intact on exit so subsequent acquisitions reuse the same socket.
+        Calls :meth:`acquisition_start` on entry and :meth:`acquisition_stop`
+        on exit, even if an exception is raised inside the block. The GVSP
+        stream channel is left open after exit so a subsequent
+        :meth:`acquisition_start` (or ``with cam.acquisition()``) can resume
+        without re-binding sockets.
 
-        Yields:
-            self — for fluent chaining inside the ``with`` block.
+        Yields
+        ------
+        Camera
+            The camera instance itself, for fluent use inside the block.
 
-        Example::
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected or not ready (propagated from
+            :meth:`acquisition_start`).
 
-            with cam.acquisition():
-                for _ in range(100):
-                    frame = cam.read_frame(timeout=0.1)
-                    if frame is not None:
-                        process(frame)
+        Examples
+        --------
+        >>> with cam.acquisition() as c:
+        ...     for _ in range(100):
+        ...         frame = c.read_frame(timeout=0.1)
+        ...         if frame is not None:
+        ...             process(frame)
         """
         self.acquisition_start()
         try:
@@ -1768,42 +1817,66 @@ class Camera:
         convert: bool = True,
         latest: bool = False,
     ) -> np.ndarray | None:
-        """Read the next frame from a running acquisition.
+        """Pop one frame from the acquisition queue.
 
-        Use after :meth:`acquisition_start` (or inside an
-        :meth:`acquisition` block) to pull frames from a continuously
-        streaming camera. Non-blocking by default.
+        Must be called after :meth:`acquisition_start` or inside an
+        :meth:`acquisition` block. Non-blocking by default.
 
-        Args:
-            timeout: Seconds to wait for a frame. ``0.0`` (default) is
-                non-blocking — returns ``None`` immediately if no frame
-                is ready. Use a small positive value (e.g. ``0.1``) to
-                block briefly.
-            strip_header: Remove Telops metadata rows (default True).
-                When ``convert=True``, the headers are removed by the
-                calibration step regardless of this flag.
-            convert: Convert to Celsius in RT mode (default True).
-                Set False for raw uint16 values.
-            latest: If True, drain the internal frame queue and return
-                only the most recent frame (older queued frames are
-                discarded). Use this in live-display loops to bound
-                end-to-end latency — otherwise a slow consumer causes
-                frames to pile up and the display lags further and
-                further behind real time. Default False preserves
-                every frame in order (use for measurement / logging).
+        Parameters
+        ----------
+        timeout : float, optional
+            Seconds to wait for a frame. ``0.0`` (default) returns
+            immediately with whatever is queued, or ``None`` if empty.
+            Use a small positive value (e.g. ``0.1``) to block briefly.
+        strip_header : bool, optional
+            Remove the two Telops metadata rows. Default ``True``. When
+            ``convert=True`` the headers are consumed by the calibration
+            step regardless of this flag.
+        convert : bool, optional
+            Convert pixel values to physical units using the per-frame
+            header coefficients. In RT mode this yields float32 degrees
+            Celsius; in other modes the conversion is still applied but
+            the result is in the camera's native units. Set ``False`` to
+            get raw uint16 counts. Default ``True``.
+        latest : bool, optional
+            When ``True``, drain the queue and return only the newest
+            frame, discarding stale ones. Use for live displays where lag
+            must not accumulate. When ``False`` (default), return frames
+            in order -- the correct choice for measurement and logging.
 
-        Returns:
-            2D numpy array (H, W) — float32 Celsius in RT mode, uint16
-            raw counts otherwise. ``None`` if no frame was available
-            within the timeout.
+        Returns
+        -------
+        numpy.ndarray or None
+            2-D array of shape ``(H, W)``. dtype is float32 when
+            ``convert=True`` (RT mode), uint16 otherwise. Returns
+            ``None`` if no frame was available within *timeout*.
 
-        Raises:
-            RuntimeError: If acquisition is not currently running.
+        Raises
+        ------
+        RuntimeError
+            If acquisition is not currently running.
 
-        Note:
-            Thread-safe — multiple threads may call ``read_frame``
-            concurrently. The underlying GVSP frame queue handles
-            inter-thread coordination.
+        Notes
+        -----
+        Thread-safe -- multiple threads may call :meth:`read_frame`
+        concurrently. The underlying GVSP frame queue handles
+        inter-thread coordination.
+
+        Examples
+        --------
+        Non-blocking poll inside a loop:
+
+        >>> cam.acquisition_start()
+        >>> frame = cam.read_frame(timeout=2.0)
+        >>> cam.acquisition_stop()
+
+        Live-display loop with stale-frame draining:
+
+        >>> with cam.acquisition():
+        ...     while displaying:
+        ...         frame = cam.read_frame(timeout=0.05, latest=True)
+        ...         if frame is not None:
+        ...             show(frame)
         """
         if not self._acquiring:
             raise RuntimeError(
@@ -1842,21 +1915,42 @@ class Camera:
     ) -> np.ndarray | None:
         """Grab a single frame.
 
-        Convenience wrapper for one-shot acquisition. Starts streaming
-        and acquisition if not already active, grabs one frame, and
-        restores the prior state. For repeated frame access in a loop,
-        prefer :meth:`acquisition` + :meth:`read_frame` instead — this
-        method has per-call setup overhead.
+        Convenience wrapper for one-shot acquisition. If streaming or
+        acquisition are not already active they are started and then
+        restored to their prior state after the frame is captured. For
+        repeated access in a loop, prefer :meth:`acquisition` +
+        :meth:`read_frame` -- this method carries per-call setup overhead.
 
-        Args:
-            timeout: Seconds to wait for a frame.
-            strip_header: Remove Telops metadata rows (default True).
-            convert: Convert to Celsius in RT mode (default True).
-                     Set False for raw uint16 values.
+        Parameters
+        ----------
+        timeout : float, optional
+            Seconds to wait for a frame. Default ``5.0``.
+        strip_header : bool, optional
+            Remove the two Telops metadata rows. Default ``True``. Ignored
+            when ``convert=True`` because the calibration step handles
+            header removal.
+        convert : bool, optional
+            Apply per-frame calibration. In RT mode this yields float32
+            degrees Celsius. Set ``False`` for raw uint16 counts.
+            Default ``True``.
 
-        Returns:
-            2D numpy array (H, W). Float32 Celsius in RT mode,
-            uint16 raw counts otherwise. None on timeout.
+        Returns
+        -------
+        numpy.ndarray or None
+            2-D array of shape ``(H, W)``. dtype is float32 when
+            ``convert=True`` (RT mode), uint16 otherwise. Returns
+            ``None`` on timeout.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected or not ready.
+
+        Examples
+        --------
+        >>> with Camera() as cam:
+        ...     frame = cam.grab()  # float32 Celsius, RT mode
+        ...     raw = cam.grab(convert=False)  # uint16 raw counts
         """
         self._check_ready()
         was_streaming = self._streaming
@@ -1882,21 +1976,40 @@ class Camera:
     def acquire(
         self, n_frames: int, timeout: float = 30.0, strip_header: bool = True, convert: bool = True
     ) -> np.ndarray | None:
-        """Acquire multiple frames via live streaming.
+        """Acquire a burst of frames via live streaming.
 
-        Convenience wrapper for batch acquisition. Starts streaming if
-        not already active, captures ``n_frames`` frames, and restores
-        the prior state.
+        Starts streaming and acquisition if not already active, collects
+        exactly *n_frames* frames (or as many as arrive before *timeout*
+        expires), then restores the prior state.
 
-        Args:
-            n_frames: Number of frames to capture.
-            timeout: Total timeout in seconds.
-            strip_header: Remove Telops metadata rows (default True).
-            convert: Convert to Celsius in RT mode (default True).
+        Parameters
+        ----------
+        n_frames : int
+            Number of frames to capture.
+        timeout : float, optional
+            Total wall-clock timeout in seconds across all frames.
+            Default ``30.0``.
+        strip_header : bool, optional
+            Remove the two Telops metadata rows. Default ``True``. Ignored
+            when ``convert=True`` because the calibration step handles
+            header removal.
+        convert : bool, optional
+            Apply per-frame calibration. In RT mode this yields float32
+            degrees Celsius. Set ``False`` for raw uint16 counts.
+            Default ``True``.
 
-        Returns:
-            3D numpy array (N, H, W) or None if no frames captured.
-            Float32 Celsius in RT mode, uint16 raw counts otherwise.
+        Returns
+        -------
+        numpy.ndarray or None
+            3-D array of shape ``(N, H, W)`` where *N* is the number of
+            frames actually received (may be less than *n_frames* on
+            timeout). dtype is float32 when ``convert=True`` (RT mode),
+            uint16 otherwise. Returns ``None`` if no frames were captured.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected or not ready.
         """
         self._check_ready()
         was_streaming = self._streaming
@@ -1935,18 +2048,46 @@ class Camera:
 
     def configure_trigger(
         self,
-        source="external",
-        activation="rising",
-        selector="acquisition_start",
+        source: reg.TriggerSource | str | int = "external",
+        activation: reg.TriggerActivation | str | int = "rising",
+        selector: reg.TriggerSelector | str | int = "acquisition_start",
         enabled: bool = True,
     ) -> None:
-        """Configure external trigger.
+        """Configure the hardware or software trigger.
 
-        Args:
-            source: "software" or "external" (or TriggerSource enum).
-            activation: "rising", "falling", "any" (or TriggerActivation enum).
-            selector: "acquisition_start", "flagging", "gating" (or enum).
-            enabled: Enable or disable trigger mode.
+        Writes the trigger selector, source, activation, and mode registers
+        in a single call. After this, the camera waits for a trigger before
+        each frame (or acquisition start, depending on *selector*).
+
+        Parameters
+        ----------
+        source : reg.TriggerSource, str, or int, optional
+            Trigger source. Accepted strings (case-insensitive):
+            ``"external"`` -- BNC connector (default),
+            ``"software"`` -- :meth:`software_trigger`. Also accepts the
+            :class:`reg.TriggerSource` enum directly or its integer value.
+        activation : reg.TriggerActivation, str, or int, optional
+            Edge or level that fires the trigger. Accepted strings:
+            ``"rising"`` (default), ``"falling"``, ``"any"``. Also accepts
+            :class:`reg.TriggerActivation` directly or its integer value.
+            ``"level_high"`` and ``"level_low"`` are available as enum
+            members but have no alias string -- pass the enum or integer.
+        selector : reg.TriggerSelector, str, or int, optional
+            Which camera event the trigger controls. Accepted strings:
+            ``"acquisition_start"`` (default), ``"flagging"``,
+            ``"gating"``. Also accepts :class:`reg.TriggerSelector`
+            directly or its integer value.
+        enabled : bool, optional
+            ``True`` (default) to enable trigger mode; ``False`` to disable
+            it (free-running).
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        ValueError
+            If *source*, *activation*, or *selector* is an unrecognised
+            string.
         """
         self._check_connected()
         self._gvcp.write_reg(
@@ -1961,7 +2102,17 @@ class Camera:
         )
 
     def software_trigger(self) -> None:
-        """Send a software trigger command."""
+        """Send a software trigger pulse to the camera.
+
+        Writes ``1`` to ``REG_TRIGGER_SOFTWARE``. Has effect only when
+        trigger mode is enabled and the source is set to ``"software"``
+        (see :meth:`configure_trigger`).
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
         self._check_connected()
         self._gvcp.write_reg(reg.REG_TRIGGER_SOFTWARE, 1)
 
