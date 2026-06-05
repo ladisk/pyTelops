@@ -32,7 +32,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.20",
     "tqdm",
-    "pyGigEVision @ git+ssh://git@github.com/ladisk/pyGigEVision.git@v0.1.0",
+    "pyGigEVision @ git+ssh://git@github.com/ladisk/pyGigEVision.git@feat/multi-nic-discovery-forceip",
 ]
 
 [project.optional-dependencies]

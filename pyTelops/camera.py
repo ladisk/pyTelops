@@ -208,32 +208,12 @@ def discover(interface_ip: str = "", timeout: float = 2.0, all_vendors: bool = F
     if interface_ip:
         cameras = GVCPClient.discover(interface_ip, timeout)
     else:
-        # Try link-local first
-        local_ip = _find_link_local_ip()
-        if local_ip:
-            cameras = GVCPClient.discover(local_ip, timeout)
-            if not cameras:
-                # Fallback: broadcast on all interfaces
-                cameras = GVCPClient.discover("", timeout)
-        else:
-            cameras = GVCPClient.discover("", timeout)
+        cameras = GVCPClient.discover("", timeout)
 
     if not all_vendors:
         cameras = [c for c in cameras if c.get("manufacturer") == TELOPS_MANUFACTURER]
 
     return cameras
-
-
-def _find_link_local_ip() -> str | None:
-    """Find a local link-local (169.254.x.x) interface IP."""
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip.startswith("169.254."):
-                return ip
-    except OSError:
-        pass
-    return None
 
 
 def _find_local_ip_for(camera_ip: str) -> str:
