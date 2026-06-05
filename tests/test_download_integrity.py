@@ -1,4 +1,4 @@
-from pyTelops.camera import _build_integrity_report, _plan_frame_retries
+from pyTelops.camera import _build_integrity_report, _plan_frame_retries, _resolve_packet_size
 from pyTelops.errors import DownloadStats, FrameIntegrityError
 
 
@@ -71,3 +71,25 @@ def test_plan_frame_retries_caps_batch():
     ids = list(range(200, 260))
     out = _plan_frame_retries(ids, already_retried=set(), max_batch=16)
     assert out == list(range(200, 216))
+
+
+def test_resolve_packet_size_standard_passes_through():
+    assert _resolve_packet_size(requested=1500, probe_max=1500) == (1500, None)
+
+
+def test_resolve_packet_size_jumbo_supported():
+    size, warn = _resolve_packet_size(requested=8000, probe_max=9000)
+    assert size == 8000
+    assert warn is None
+
+
+def test_resolve_packet_size_jumbo_unsupported_falls_back():
+    size, warn = _resolve_packet_size(requested=9000, probe_max=1500)
+    assert size == 1500
+    assert warn is not None
+    assert "1500" in warn
+
+
+def test_resolve_packet_size_probe_unknown_keeps_request():
+    # probe_max None means the probe could not run; do not second-guess.
+    assert _resolve_packet_size(requested=4000, probe_max=None) == (4000, None)

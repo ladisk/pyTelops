@@ -303,6 +303,26 @@ def _plan_frame_retries(incomplete_ids, already_retried, max_batch=64):
     return fresh[:max_batch]
 
 
+def _resolve_packet_size(requested, probe_max):
+    """Decide the effective GVSP packet size given a path-MTU probe result.
+
+    Returns ``(effective_size, warning)`` where *warning* is ``None`` or a
+    human-readable string. Falls back to 1500 when a jumbo request exceeds the
+    probed path capacity.
+    """
+    if requested <= 1500 or probe_max is None:
+        return requested, None
+    if requested <= probe_max:
+        return requested, None
+    warning = (
+        f"Requested packet_size={requested} exceeds the path MTU "
+        f"(probed max {probe_max}). Jumbo frames need MTU>={requested} "
+        f"end-to-end (NIC, switches, OS); most USB-to-GigE adapters do not "
+        f"support them. Falling back to packet_size=1500."
+    )
+    return 1500, warning
+
+
 class Camera:
     """Telops FAST-series thermal camera over GigE Vision.
 
