@@ -70,3 +70,31 @@ def test_connect_raises_on_unreachable(monkeypatch):
     cam = Camera()
     with pytest.raises(RuntimeError, match="not on any host"):
         cam.connect()
+
+
+def test_force_ip_wrapper_delegates(monkeypatch):
+    from pyTelops.provisioning import force_ip
+
+    calls = {}
+
+    def fake_force(mac, ip, mask, gateway="0.0.0.0", timeout=2.0):
+        calls.update(mac=mac, ip=ip, mask=mask, gateway=gateway)
+
+    monkeypatch.setattr("pyTelops.provisioning.GVCPClient.force_ip", staticmethod(fake_force))
+    cam = {"ip": "169.254.2.43", "mac": "aa:bb:cc:dd:ee:ff"}
+    force_ip(cam, "192.168.0.77", "255.255.255.0", gateway="192.168.0.1")
+    assert calls == {
+        "mac": "aa:bb:cc:dd:ee:ff",
+        "ip": "192.168.0.77",
+        "mask": "255.255.255.0",
+        "gateway": "192.168.0.1",
+    }
+
+
+def test_force_ip_wrapper_requires_mac():
+    import pytest
+
+    from pyTelops.provisioning import force_ip
+
+    with pytest.raises(ValueError, match="mac"):
+        force_ip({"ip": "169.254.2.43"}, "192.168.0.77", "255.255.255.0")

@@ -19,6 +19,7 @@ __version__ = "0.2.1"
 from pyGigEVision import GVCPClient, GVCPError
 
 from .camera import Camera, discover
+from .provisioning import force_ip
 from .registers import (
     CalibrationCollectionType,
     CalibrationMode,
@@ -41,6 +42,7 @@ IntegrationTimeAuto = ExposureAuto
 __all__ = [
     "Camera",
     "discover",
+    "force_ip",
     "GVCPClient",
     "GVCPError",
     "CalibrationMode",
