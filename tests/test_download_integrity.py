@@ -154,18 +154,42 @@ def test_buffer_download_tolerates_when_allowed():
     assert cam.last_download_stats.resend_requested == 0
 
 
-def test_buffer_download_enables_resends_when_requested():
+def test_buffer_download_honors_resend_flag_during_stream():
+    for want in (True, False):
+        cam = _fake_cam_for_download()
+        captured = {}
+
+        def grab(timeout, _cam=cam, _cap=captured):
+            _cap["resend"] = _cam._gvsp.resend_enabled
+            _cap["calls"] = _cap.get("calls", 0) + 1
+            return _frame(0, 0) if _cap["calls"] == 1 else None
+
+        cam._gvsp.get_frame_with_info.side_effect = grab
+        cam.buffer_download(
+            n_frames=1,
+            convert=False,
+            strip_header=False,
+            verbose=False,
+            retries=0,
+            resend=want,
+        )
+        assert captured["resend"] is want
+
+
+def test_buffer_download_resets_stats_on_empty_buffer():
     cam = _fake_cam_for_download()
-    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(0, 1), None]
+    # First, a normal download populates stats.
+    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), None]
     cam.buffer_download(
-        n_frames=2,
-        convert=False,
-        strip_header=False,
-        verbose=False,
-        retries=0,
-        resend=True,
+        n_frames=1, convert=False, strip_header=False, verbose=False, retries=0
     )
-    assert cam._gvsp.resend_enabled is True
+    assert cam.last_download_stats is not None
+    # Now simulate an empty buffer: read_reg returns 0 for recorded size, so
+    # n_frames resolves to 0 and the method returns None early.
+    cam._gvcp.read_reg.return_value = 0
+    out = cam.buffer_download(n_frames=0, convert=False, strip_header=False, verbose=False)
+    assert out is None
+    assert cam.last_download_stats is None
 
 
 def test_download_diagnostics_reports_incomplete(caplog):

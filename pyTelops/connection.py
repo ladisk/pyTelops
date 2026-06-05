@@ -128,6 +128,13 @@ def tune_connection(
     if socket_buffers is None:
         socket_buffers = [0]
 
+    if any(sb for sb in socket_buffers):
+        warnings.append(
+            "socket_buffers values are recorded but not yet applied "
+            "(SO_RCVBUF tuning is not wired into buffer_download); "
+            "sweeping multiple values produces trials that differ only by label."
+        )
+
     trials = []
     for ps in candidate_packet_sizes:
         for br in candidate_bitrates:

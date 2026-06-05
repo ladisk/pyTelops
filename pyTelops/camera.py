@@ -3728,6 +3728,7 @@ class Camera:
         >>> frames = cam.buffer_download(bitrate_mbps=300.0)
         """
         self._check_connected()
+        self.last_download_stats = None
 
         if packet_size > 1500:
             probe_max = self._probe_max_packet_size(packet_size)
@@ -3853,13 +3854,16 @@ class Camera:
             self.stop_stream()
 
         elapsed = time.monotonic() - t_start
+        # Read the payload-size register at most once; both the verbose summary
+        # and the stats throughput reuse it. Skip the read entirely when there
+        # is nothing to report (no frames or zero elapsed) so the empty path
+        # does not issue an extra register read.
+        payload = None
+        if frames and elapsed > 0:
+            payload = self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE)
         if verbose and frames:
             fps = len(frames) / elapsed if elapsed > 0 else 0
-            mbps = (
-                len(frames) * self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE) / elapsed / 1e6
-                if elapsed > 0
-                else 0
-            )
+            mbps = len(frames) * payload / elapsed / 1e6 if payload is not None else 0
             logger.info(
                 "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)",
                 len(frames),
@@ -3877,10 +3881,11 @@ class Camera:
             }
             already_retried = set()
             for _ in range(retries):
-                snapshot = getattr(
-                    self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
+                interim = _build_integrity_report(
+                    per_frame_info,
+                    {"requested": 0, "recovered": 0, "failed": 0},
+                    n_requested=n_frames,
                 )
-                interim = _build_integrity_report(per_frame_info, snapshot, n_requested=n_frames)
                 todo = _plan_frame_retries(interim.incomplete_frame_ids, already_retried)
                 if not todo:
                     break
@@ -3903,8 +3908,7 @@ class Camera:
         stats.elapsed_s = elapsed
         stats.packet_size_used = packet_size
         stats.bitrate_used = bitrate_mbps
-        if elapsed > 0:
-            payload = self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE)
+        if payload is not None:
             stats.throughput_mbps = len(frames) * payload / elapsed / 1e6
         stats.recovered_by_retry = recovered
         self.last_download_stats = stats
@@ -3939,31 +3943,49 @@ class Camera:
 
         HARDWARE-GATED: the exact register sequence to re-stream a single
         buffered frame must be confirmed against the camera; validated by the
-        repro_dropped_frames benchmark script. Isolated here so the retry loop
-        is unit-tested with this method mocked.
+        repro_dropped_frames benchmark script. Self-manages its own stream and
+        download mode so the GVSP receiver is alive during the re-requests.
+        Isolated here so the retry loop is unit-tested with this method mocked.
         """
         out = {}
-        for fid in frame_ids:
+        with suppress(GVCPError):
+            self._gvcp.write_reg(
+                reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
+                reg.MemoryBufferDownloadMode.SEQUENCE,
+            )
+        self.start_stream()
+        try:
+            for fid in frame_ids:
+                with suppress(GVCPError):
+                    self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, fid)
+                    self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, 1)
+                    self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+                out[fid] = self._gvsp.get_frame_with_info(timeout=2.0)
+                with suppress(GVCPError):
+                    self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        finally:
+            self.stop_stream()
             with suppress(GVCPError):
-                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, fid)
-                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, 1)
-                self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
-            out[fid] = self._gvsp.get_frame_with_info(timeout=2.0)
-            with suppress(GVCPError):
-                self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+                self._gvcp.write_reg(
+                    reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
+                    reg.MemoryBufferDownloadMode.OFF,
+                )
         return out
 
     def _probe_max_packet_size(self, desired, candidates=None):
         """Find the largest packet size the path can carry, via FireTestPacket.
 
-        Uses the GigE Vision test-packet mechanism: set DoNotFragment, request a
-        test packet of size N, and check whether the stream socket receives it.
-        Returns the largest passing size, or ``None`` if the probe cannot run.
+        Starts a short, self-contained GVSP stream, sets DoNotFragment, requests
+        a test packet of each candidate size, and checks whether the stream
+        socket receives it. Returns the largest passing size, or ``None`` if the
+        probe cannot run.
 
         HARDWARE-GATED: the exact REG_SC_PACKET_SIZE flag bit layout for the
-        test-packet trigger must be confirmed on the camera; validated by the
-        repro_jumbo_corruption benchmark script. Isolated here so the jumbo
-        decision logic is unit-tested with this method mocked.
+        test-packet trigger and the test-packet delivery path must be confirmed
+        on the camera; validated by the repro_jumbo_corruption benchmark script.
+        Self-manages its own stream so the GVSP receiver is alive during the
+        probe and the main download's frame queue is not polluted. Isolated here
+        so the jumbo decision logic is unit-tested with this method mocked.
         """
         if candidates is None:
             candidates = sorted({1500, 4000, 8000, min(desired, 16260)})
@@ -3972,6 +3994,7 @@ class Camera:
         except GVCPError:
             return None
         best = 1500
+        self.start_stream()
         try:
             for size in candidates:
                 flags = (old & 0xFFFF0000) | SC_SCPS_DO_NOT_FRAGMENT | SC_SCPS_FIRE_TEST_PACKET
@@ -3984,6 +4007,7 @@ class Camera:
         finally:
             with suppress(GVCPError):
                 self._gvcp.write_reg(REG_SC_PACKET_SIZE, old)
+            self.stop_stream()
         return best
 
     @staticmethod
