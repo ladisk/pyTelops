@@ -207,3 +207,20 @@ def test_buffer_download_retries_recover_stragglers():
     assert cam.last_download_stats.n_incomplete == 0
     assert cam.last_download_stats.recovered_by_retry == 1
     cam._redownload_frames.assert_called_once()
+
+
+def test_buffer_download_falls_back_when_jumbo_unsupported(caplog):
+    cam = _fake_cam_for_download()
+    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(0, 1), None]
+    cam._probe_max_packet_size = MagicMock(return_value=1500)
+    with caplog.at_level(logging.WARNING, logger="pyTelops.camera"):
+        cam.buffer_download(
+            n_frames=2,
+            convert=False,
+            strip_header=False,
+            verbose=False,
+            retries=0,
+            packet_size=9000,
+        )
+    assert cam.last_download_stats.packet_size_used == 1500
+    assert any("1500" in r.message for r in caplog.records)

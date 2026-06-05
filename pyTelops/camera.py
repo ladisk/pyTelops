@@ -78,6 +78,7 @@ from pyGigEVision.standard import (  # noqa: E402
     REG_SC_PACKET_SIZE,
     SC_PACKET_SIZE_MASK,
     SC_SCPS_DO_NOT_FRAGMENT,
+    SC_SCPS_FIRE_TEST_PACKET,
 )
 
 from . import registers as reg  # noqa: E402
@@ -3728,6 +3729,12 @@ class Camera:
         """
         self._check_connected()
 
+        if packet_size > 1500:
+            probe_max = self._probe_max_packet_size(packet_size)
+            packet_size, pkt_warn = _resolve_packet_size(packet_size, probe_max)
+            if pkt_warn:
+                logger.warning(pkt_warn)
+
         # Select sequence and get info
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
 
@@ -3945,6 +3952,39 @@ class Camera:
             with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         return out
+
+    def _probe_max_packet_size(self, desired, candidates=None):
+        """Find the largest packet size the path can carry, via FireTestPacket.
+
+        Uses the GigE Vision test-packet mechanism: set DoNotFragment, request a
+        test packet of size N, and check whether the stream socket receives it.
+        Returns the largest passing size, or ``None`` if the probe cannot run.
+
+        HARDWARE-GATED: the exact REG_SC_PACKET_SIZE flag bit layout for the
+        test-packet trigger must be confirmed on the camera; validated by the
+        repro_jumbo_corruption benchmark script. Isolated here so the jumbo
+        decision logic is unit-tested with this method mocked.
+        """
+        if candidates is None:
+            candidates = sorted({1500, 4000, 8000, min(desired, 16260)})
+        try:
+            old = self._gvcp.read_reg(REG_SC_PACKET_SIZE)
+        except GVCPError:
+            return None
+        best = 1500
+        try:
+            for size in candidates:
+                flags = (old & 0xFFFF0000) | SC_SCPS_DO_NOT_FRAGMENT | SC_SCPS_FIRE_TEST_PACKET
+                value = flags | (size & SC_PACKET_SIZE_MASK)
+                with suppress(GVCPError):
+                    self._gvcp.write_reg(REG_SC_PACKET_SIZE, value)
+                got = self._gvsp.get_frame_with_info(timeout=0.5)
+                if got is not None:
+                    best = max(best, size)
+        finally:
+            with suppress(GVCPError):
+                self._gvcp.write_reg(REG_SC_PACKET_SIZE, old)
+        return best
 
     @staticmethod
     def _download_diagnostics(data, expected, stats):
