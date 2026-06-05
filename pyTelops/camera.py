@@ -81,6 +81,7 @@ from pyGigEVision.standard import (  # noqa: E402
 )
 
 from . import registers as reg  # noqa: E402
+from .errors import DownloadStats  # noqa: E402
 
 # --- Enum string resolution ---
 _ENUM_ALIASES = {
@@ -244,6 +245,43 @@ def _find_local_ip_for(camera_ip: str) -> str:
         return s.getsockname()[0]
     finally:
         s.close()
+
+
+def _build_integrity_report(per_frame_info, resend_stats, n_requested):
+    """Build a :class:`DownloadStats` from per-frame GVSP info.
+
+    Parameters
+    ----------
+    per_frame_info : list of (int, dict)
+        ``(frame_index, info)`` pairs; ``info`` carries ``block_id`` and
+        ``missing_packets`` (an int count).
+    resend_stats : dict
+        ``GVSPReceiver._resend_stats`` snapshot.
+    n_requested : int
+        Number of frames originally requested (to detect frames that never
+        arrived at all).
+    """
+    per_frame_missing = {}
+    incomplete_ids = []
+    for _idx, info in per_frame_info:
+        missing = int(info.get("missing_packets", 0))
+        if missing > 0:
+            bid = int(info.get("block_id", _idx))
+            per_frame_missing[bid] = missing
+            incomplete_ids.append(bid)
+
+    n_arrived = len(per_frame_info)
+    n_incomplete = len(incomplete_ids)
+
+    return DownloadStats(
+        n_frames=n_arrived,
+        n_incomplete=n_incomplete,
+        incomplete_frame_ids=incomplete_ids,
+        per_frame_missing=per_frame_missing,
+        resend_requested=int(resend_stats.get("requested", 0)),
+        resend_recovered=int(resend_stats.get("recovered", 0)),
+        resend_failed=int(resend_stats.get("failed", 0)),
+    )
 
 
 class Camera:
