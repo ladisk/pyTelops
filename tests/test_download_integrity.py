@@ -1,4 +1,4 @@
-from pyTelops.camera import _build_integrity_report
+from pyTelops.camera import _build_integrity_report, _plan_frame_retries
 from pyTelops.errors import DownloadStats, FrameIntegrityError
 
 
@@ -53,3 +53,21 @@ def test_build_integrity_report_flags_incomplete():
     assert stats.resend_requested == 12
     assert stats.resend_recovered == 7
     assert stats.resend_failed == 5
+
+
+def test_plan_frame_retries_basic():
+    assert _plan_frame_retries([103, 101, 101], already_retried=set()) == [101, 103]
+
+
+def test_plan_frame_retries_excludes_already_retried():
+    assert _plan_frame_retries([101, 103, 105], already_retried={101}) == [103, 105]
+
+
+def test_plan_frame_retries_empty():
+    assert _plan_frame_retries([], already_retried=set()) == []
+
+
+def test_plan_frame_retries_caps_batch():
+    ids = list(range(200, 260))
+    out = _plan_frame_retries(ids, already_retried=set(), max_batch=16)
+    assert out == list(range(200, 216))

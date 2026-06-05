@@ -293,6 +293,16 @@ def _build_integrity_report(per_frame_info, resend_stats, n_requested):
     )
 
 
+def _plan_frame_retries(incomplete_ids, already_retried, max_batch=64):
+    """Return the next batch of frame IDs to re-download.
+
+    Dedupes, drops anything already retried, sorts ascending, caps at
+    *max_batch*.
+    """
+    fresh = sorted({int(i) for i in incomplete_ids} - set(already_retried))
+    return fresh[:max_batch]
+
+
 class Camera:
     """Telops FAST-series thermal camera over GigE Vision.
 
