@@ -186,3 +186,24 @@ def test_download_diagnostics_ok_path(caplog):
         Camera._download_diagnostics(data, expected=4, stats=stats)
     msgs = " ".join(r.message for r in caplog.records)
     assert "OK" in msgs or "ok" in msgs
+
+
+def test_buffer_download_retries_recover_stragglers():
+    cam = _fake_cam_for_download()
+    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(2, 1), None]
+
+    def fake_redownload(frame_ids, packet_size):
+        return {
+            fid: (np.ones((4, 4), np.uint16), {"block_id": fid, "missing_packets": 0})
+            for fid in frame_ids
+        }
+
+    cam._redownload_frames = MagicMock(side_effect=fake_redownload)
+    out = cam.buffer_download(
+        n_frames=2, convert=False, strip_header=False, verbose=False, retries=1
+    )
+    assert out is not None
+    assert out.shape[0] == 2
+    assert cam.last_download_stats.n_incomplete == 0
+    assert cam.last_download_stats.recovered_by_retry == 1
+    cam._redownload_frames.assert_called_once()

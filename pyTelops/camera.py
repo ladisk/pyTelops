@@ -3861,6 +3861,34 @@ class Camera:
                 mbps,
             )
 
+        # Frame-level retry: re-request incomplete frames from the camera
+        # buffer (frames persist until buffer_clear). Replace them in place.
+        recovered = 0
+        if retries > 0 and frames:
+            id_to_pos = {
+                info.get("block_id", idx): pos for pos, (idx, info) in enumerate(per_frame_info)
+            }
+            already_retried = set()
+            for _ in range(retries):
+                snapshot = getattr(
+                    self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
+                )
+                interim = _build_integrity_report(per_frame_info, snapshot, n_requested=n_frames)
+                todo = _plan_frame_retries(interim.incomplete_frame_ids, already_retried)
+                if not todo:
+                    break
+                already_retried.update(todo)
+                fixed = self._redownload_frames(todo, packet_size)
+                for fid, res in fixed.items():
+                    if res is None:
+                        continue
+                    frame, info = res
+                    if int(info.get("missing_packets", 1)) == 0 and fid in id_to_pos:
+                        pos = id_to_pos[fid]
+                        frames[pos] = frame
+                        per_frame_info[pos] = (per_frame_info[pos][0], info)
+                        recovered += 1
+
         resend_stats = getattr(
             self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
         )
@@ -3871,6 +3899,7 @@ class Camera:
         if elapsed > 0:
             payload = self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE)
             stats.throughput_mbps = len(frames) * payload / elapsed / 1e6
+        stats.recovered_by_retry = recovered
         self.last_download_stats = stats
 
         if not frames:
@@ -3893,6 +3922,29 @@ class Camera:
         if verbose:
             self._download_diagnostics(result, n_frames, stats)
         return result
+
+    def _redownload_frames(self, frame_ids, packet_size):
+        """Re-request specific buffer frame IDs one at a time.
+
+        Returns ``{frame_id: (frame, info) or None}``. Frames persist in the
+        camera's memory buffer until :meth:`buffer_clear`, so this re-fetches
+        the same content. Used by :meth:`buffer_download`'s retry loop.
+
+        HARDWARE-GATED: the exact register sequence to re-stream a single
+        buffered frame must be confirmed against the camera; validated by the
+        repro_dropped_frames benchmark script. Isolated here so the retry loop
+        is unit-tested with this method mocked.
+        """
+        out = {}
+        for fid in frame_ids:
+            with suppress(GVCPError):
+                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, fid)
+                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, 1)
+                self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+            out[fid] = self._gvsp.get_frame_with_info(timeout=2.0)
+            with suppress(GVCPError):
+                self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        return out
 
     @staticmethod
     def _download_diagnostics(data, expected, stats):
