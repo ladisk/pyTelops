@@ -46,7 +46,10 @@ def test_build_integrity_report_flags_incomplete():
     assert stats.n_frames == 4
     assert sorted(stats.incomplete_frame_ids) == [101, 103]
     assert stats.per_frame_missing == {101: 4, 103: 1}
-    assert stats.n_incomplete == 2
+    # 4 frames arrived, 5 requested -> 1 never arrived. n_incomplete counts
+    # both arrived-but-partial (2) AND never-arrived (1) = 3; incomplete_frame_ids
+    # lists only the retryable arrived-partial subset.
+    assert stats.n_incomplete == 3
     assert stats.resend_requested == 12
     assert stats.resend_recovered == 7
     assert stats.resend_failed == 5

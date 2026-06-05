@@ -260,6 +260,14 @@ def _build_integrity_report(per_frame_info, resend_stats, n_requested):
     n_requested : int
         Number of frames originally requested (to detect frames that never
         arrived at all).
+
+    Notes
+    -----
+    ``n_incomplete`` counts every frame that is not perfectly intact: both
+    arrived-but-partial frames and frames that never arrived
+    (``n_requested - n_arrived``). ``incomplete_frame_ids`` lists only the
+    arrived-but-partial subset (the frames that can be retried by block ID),
+    so ``n_incomplete >= len(incomplete_frame_ids)``.
     """
     per_frame_missing = {}
     incomplete_ids = []
@@ -271,7 +279,8 @@ def _build_integrity_report(per_frame_info, resend_stats, n_requested):
             incomplete_ids.append(bid)
 
     n_arrived = len(per_frame_info)
-    n_incomplete = len(incomplete_ids)
+    never_arrived = max(0, n_requested - n_arrived)
+    n_incomplete = len(incomplete_ids) + never_arrived
 
     return DownloadStats(
         n_frames=n_arrived,
