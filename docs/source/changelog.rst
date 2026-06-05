@@ -13,7 +13,7 @@ Unreleased
   wrong-subnet camera by MAC (GVCP FORCEIP).
 - Removed the host-side link-local probe that the multi-interface discovery
   makes redundant. Thanks to Lorenzo Capponi (LolloCappo) for the
-  connected-socket interface-detection approach that informed this work.
+  connected-socket interface-detection approach (PR #13) that informed this work.
 - Requires the updated pyGigEVision (multi-interface discovery, ``force_ip``).
 
 Version 0.2.1
