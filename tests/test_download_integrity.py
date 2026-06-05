@@ -1,4 +1,15 @@
-from pyTelops.camera import _build_integrity_report, _plan_frame_retries, _resolve_packet_size
+import logging
+from unittest.mock import MagicMock
+
+import numpy as np
+import pytest
+
+from pyTelops.camera import (
+    Camera,
+    _build_integrity_report,
+    _plan_frame_retries,
+    _resolve_packet_size,
+)
 from pyTelops.errors import DownloadStats, FrameIntegrityError
 
 
@@ -93,3 +104,85 @@ def test_resolve_packet_size_jumbo_unsupported_falls_back():
 def test_resolve_packet_size_probe_unknown_keeps_request():
     # probe_max None means the probe could not run; do not second-guess.
     assert _resolve_packet_size(requested=4000, probe_max=None) == (4000, None)
+
+
+def _fake_cam_for_download():
+    cam = Camera()
+    cam._connected = True
+    cam._streaming = False
+    cam._acquiring = False
+    cam._local_ip = "169.254.1.1"
+    cam._gvcp = MagicMock()
+    cam._gvcp.read_reg.return_value = 0
+    cam._gvcp.read_float.return_value = 1000.0
+    cam._gvcp._control_lost = False
+    cam._gvsp = MagicMock()
+    cam._gvsp._resend_stats = {"requested": 0, "recovered": 0, "failed": 0}
+    cam._gvsp.port = 3957
+    cam._gvsp._sock.getsockname.return_value = ("169.254.1.1", 3957)
+    cam.start_stream = MagicMock()
+    cam.stop_stream = MagicMock()
+    return cam
+
+
+def _frame(missing, bid):
+    return (np.ones((4, 4), dtype=np.uint16), {"block_id": bid, "missing_packets": missing})
+
+
+def test_buffer_download_raises_on_incomplete_by_default():
+    cam = _fake_cam_for_download()
+    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(3, 1), None]
+    with pytest.raises(FrameIntegrityError):
+        cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False, retries=0)
+    assert cam.last_download_stats is not None
+    assert cam.last_download_stats.n_incomplete >= 1
+
+
+def test_buffer_download_tolerates_when_allowed():
+    cam = _fake_cam_for_download()
+    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(3, 1), None]
+    out = cam.buffer_download(
+        n_frames=2,
+        convert=False,
+        strip_header=False,
+        verbose=False,
+        retries=0,
+        max_dropped_frames=5,
+    )
+    assert out is not None
+    assert out.shape[0] == 2
+    assert cam.last_download_stats.resend_requested == 0
+
+
+def test_buffer_download_enables_resends_when_requested():
+    cam = _fake_cam_for_download()
+    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(0, 1), None]
+    cam.buffer_download(
+        n_frames=2,
+        convert=False,
+        strip_header=False,
+        verbose=False,
+        retries=0,
+        resend=True,
+    )
+    assert cam._gvsp.resend_enabled is True
+
+
+def test_download_diagnostics_reports_incomplete(caplog):
+    data = np.zeros((3, 4, 4), dtype=np.float32)
+    stats = DownloadStats(n_frames=3, n_incomplete=1, incomplete_frame_ids=[2])
+    with caplog.at_level(logging.WARNING, logger="pyTelops.camera"):
+        Camera._download_diagnostics(data, expected=4, stats=stats)
+    msgs = " ".join(r.message for r in caplog.records)
+    assert (
+        "incomplete" in msgs.lower() or "missing" in msgs.lower() or "never arrived" in msgs.lower()
+    )
+
+
+def test_download_diagnostics_ok_path(caplog):
+    data = np.ones((4, 4, 4), dtype=np.float32)
+    stats = DownloadStats(n_frames=4, n_incomplete=0)
+    with caplog.at_level(logging.INFO, logger="pyTelops.camera"):
+        Camera._download_diagnostics(data, expected=4, stats=stats)
+    msgs = " ".join(r.message for r in caplog.records)
+    assert "OK" in msgs or "ok" in msgs

@@ -81,7 +81,7 @@ from pyGigEVision.standard import (  # noqa: E402
 )
 
 from . import registers as reg  # noqa: E402
-from .errors import DownloadStats  # noqa: E402
+from .errors import DownloadStats, FrameIntegrityError  # noqa: E402
 
 # --- Enum string resolution ---
 _ENUM_ALIASES = {
@@ -429,6 +429,8 @@ class Camera:
         self._buffer_config_kwargs: dict | None = None
         self._calibration_info: dict = {}
         self._calibration_names: dict = {}
+        self.last_download_stats = None
+        self.recommended_download_kwargs = {}
         # User-set packet delay override. None = use default (force 0 on
         # start_stream for max throughput). Int = user's chosen value,
         # preserved across stream restarts.
@@ -3623,6 +3625,9 @@ class Camera:
         strip_header: bool = True,
         convert: bool = True,
         verbose: bool = True,
+        max_dropped_frames: int = 0,
+        retries: int = 2,
+        resend: bool = True,
     ) -> np.ndarray | None:
         """Download frames from the internal memory buffer over Ethernet.
 
@@ -3660,10 +3665,12 @@ class Camera:
             ``REG_DOWNLOAD_BITRATE_MAX`` register.  Default 1000.0.
             Reduce to around 300 when network contention is a concern.
         packet_size : int, optional
-            GVSP UDP payload size in bytes.  Default 1500 (standard
-            Ethernet MTU).  Use 9000 on a jumbo-frame network for faster
-            downloads; the driver clears the DoNotFragment flag
-            automatically when *packet_size* > 1500.
+            GVSP UDP payload size in bytes.  Default 1500 (standard Ethernet
+            MTU).  Values above 1500 require jumbo-frame support end-to-end
+            (NIC, switches, and OS all configured for MTU >= packet_size).
+            Most USB-to-GigE adapters do NOT support jumbo frames.  When a
+            larger size is requested but the path cannot carry it, the driver
+            warns and falls back to 1500 rather than silently corrupting data.
         strip_header : bool, optional
             Strip the two Telops metadata rows from each frame.  Default
             ``True``.  Ignored when *convert* is ``True`` (stripping is
@@ -3674,6 +3681,17 @@ class Camera:
         verbose : bool, optional
             Show a ``tqdm`` progress bar and log a transfer summary.
             Default ``True``.
+        max_dropped_frames : int, optional
+            Maximum number of incomplete frames tolerated before raising
+            :class:`~pyTelops.FrameIntegrityError`.  Default 0 (raise on any
+            dropped or never-arrived frame).  Pass a higher value or a large
+            number to accept partial data.
+        retries : int, optional
+            Number of frame-level re-download passes for stragglers.  Default
+            2.  (Wired in a later change; accepted here for forward
+            compatibility.)
+        resend : bool, optional
+            Enable GVSP packet resends during the stream.  Default ``True``.
 
         Returns
         -------
@@ -3689,6 +3707,8 @@ class Camera:
         ------
         RuntimeError
             If the camera is not connected.
+        FrameIntegrityError
+            If more than *max_dropped_frames* frames are incomplete.
 
         Examples
         --------
@@ -3733,13 +3753,6 @@ class Camera:
 
             pbar = tqdm(total=n_frames, unit="frame", desc="Downloading")
 
-        # Suppress GVSP "packets unrecoverable" warnings during download
-        import logging
-
-        gvsp_logger = logging.getLogger("pyGigEVision.gvsp")
-        old_level = gvsp_logger.level
-        gvsp_logger.setLevel(logging.CRITICAL)
-
         # Ensure acquisition is stopped before configuring download
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
@@ -3765,7 +3778,7 @@ class Camera:
 
         # Start streaming
         self.start_stream()
-        self._gvsp.resend_enabled = False
+        self._gvsp.resend_enabled = resend
 
         # Override packet size for download (larger = faster).
         # When using packet_size > 1500 (e.g. 9000), UDP packets will be
@@ -3790,18 +3803,21 @@ class Camera:
 
         # Collect frames
         frames = []
+        per_frame_info = []
         t_start = time.monotonic()
         deadline = time.monotonic() + timeout
 
         try:
             stall_deadline = time.monotonic() + 10.0
-            for _ in range(n_frames):
+            for idx in range(n_frames):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                result = self._gvsp.get_frame(timeout=min(remaining, 5.0))
+                result = self._gvsp.get_frame_with_info(timeout=min(remaining, 5.0))
                 if result is not None:
-                    frames.append(result)
+                    frame, info = result
+                    frames.append(frame)
+                    per_frame_info.append((idx, info))
                     stall_deadline = time.monotonic() + 10.0
                     if pbar:
                         pbar.update(1)
@@ -3828,7 +3844,6 @@ class Camera:
                     self._gvsp._packet_data_size = (old_pkt_reg & SC_PACKET_SIZE_MASK) - 8
             self._gvsp.resend_enabled = True
             self.stop_stream()
-            gvsp_logger.setLevel(old_level)
 
         elapsed = time.monotonic() - t_start
         if verbose and frames:
@@ -3839,42 +3854,65 @@ class Camera:
                 else 0
             )
             logger.info(
-                "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)", len(frames), elapsed, fps, mbps
+                "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)",
+                len(frames),
+                elapsed,
+                fps,
+                mbps,
             )
+
+        resend_stats = getattr(
+            self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
+        )
+        stats = _build_integrity_report(per_frame_info, resend_stats, n_requested=n_frames)
+        stats.elapsed_s = elapsed
+        stats.packet_size_used = packet_size
+        stats.bitrate_used = bitrate_mbps
+        if elapsed > 0:
+            payload = self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE)
+            stats.throughput_mbps = len(frames) * payload / elapsed / 1e6
+        self.last_download_stats = stats
 
         if not frames:
             return None
+
+        if stats.n_incomplete > max_dropped_frames:
+            raise FrameIntegrityError(
+                f"{stats.n_incomplete} of {n_frames} frames incomplete "
+                f"(incomplete IDs: {stats.incomplete_frame_ids[:20]}). "
+                f"Pass max_dropped_frames=N to tolerate drops, or run "
+                f"tune_connection() to find stabler settings.",
+                stats=stats,
+            )
+
         result = np.stack(frames)
         if convert:
             result = self._apply_calibration(result)
         elif strip_header:
             result = self._strip_headers(result)
-
         if verbose:
-            self._download_diagnostics(result, n_frames)
-
+            self._download_diagnostics(result, n_frames, stats)
         return result
 
     @staticmethod
-    def _download_diagnostics(data: np.ndarray, expected: int) -> None:
-        """Print data integrity summary after download."""
-        n = data.shape[0]
-        frame_means = data.mean(axis=tuple(range(1, data.ndim)))
-        # For calibrated (float32) data, 0.0 is a valid temperature - skip blank-frame check.
-        zero_frames = 0 if data.dtype == np.float32 else int(np.sum(frame_means == 0))
-        row_sums = data.reshape(n, data.shape[1], -1).sum(axis=2)
-        # Same rationale for zero-row check.
-        frames_with_zero_rows = (
-            0 if data.dtype == np.float32 else int(np.sum(np.any(row_sums == 0, axis=1)))
-        )
+    def _download_diagnostics(data, expected, stats):
+        """Log a data-integrity summary using authoritative drop stats.
 
+        Works for any dtype: corruption is reported from *stats*
+        (per-frame missing packets), not pixel==0 heuristics, so a
+        legitimately 0.0 degree C frame is never misflagged and a dropped
+        packet is never missed.
+        """
+        n = data.shape[0]
         issues = []
         if n < expected:
-            issues.append(f"{expected - n} frames missing")
-        if zero_frames > 0:
-            issues.append(f"{zero_frames} blank frames")
-        if frames_with_zero_rows > 0:
-            issues.append(f"{frames_with_zero_rows} frames with zero rows")
+            issues.append(f"{expected - n} frames never arrived")
+        if stats.n_incomplete > 0:
+            issues.append(
+                f"{stats.n_incomplete} incomplete frames (IDs {stats.incomplete_frame_ids[:10]})"
+            )
+        if stats.resend_failed > 0:
+            issues.append(f"{stats.resend_failed} packet resends failed")
 
         if issues:
             logger.warning("Data check: %s", ", ".join(issues))

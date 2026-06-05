@@ -5,6 +5,7 @@ import pytest
 
 from pyTelops import registers as reg
 from pyTelops.camera import Camera, _resolve_enum
+from pyTelops.errors import DownloadStats
 
 
 class TestResolveEnum:
@@ -127,33 +128,35 @@ class TestStripHeaders:
 
 
 class TestDownloadDiagnostics:
-    """Test _download_diagnostics static method."""
+    """Test _download_diagnostics static method (stats-driven, dtype-agnostic)."""
 
     def test_clean_data(self, caplog):
         data = np.random.randint(1000, 60000, (100, 256, 320), dtype=np.uint16)
+        stats = DownloadStats(n_frames=100, n_incomplete=0)
         with caplog.at_level("INFO", logger="pyTelops.camera"):
-            Camera._download_diagnostics(data, 100)
+            Camera._download_diagnostics(data, 100, stats)
         assert "OK" in caplog.text
 
     def test_missing_frames(self, caplog):
         data = np.random.randint(1000, 60000, (90, 256, 320), dtype=np.uint16)
+        stats = DownloadStats(n_frames=90, n_incomplete=10)
         with caplog.at_level("WARNING", logger="pyTelops.camera"):
-            Camera._download_diagnostics(data, 100)
-        assert "10 frames missing" in caplog.text
+            Camera._download_diagnostics(data, 100, stats)
+        assert "never arrived" in caplog.text
 
-    def test_blank_frames(self, caplog):
-        data = np.zeros((100, 256, 320), dtype=np.uint16)
-        data[50:] = 5000
+    def test_incomplete_frames(self, caplog):
+        data = np.random.randint(1000, 60000, (100, 256, 320), dtype=np.uint16)
+        stats = DownloadStats(n_frames=100, n_incomplete=2, incomplete_frame_ids=[50, 51])
         with caplog.at_level("WARNING", logger="pyTelops.camera"):
-            Camera._download_diagnostics(data, 100)
-        assert "blank" in caplog.text
+            Camera._download_diagnostics(data, 100, stats)
+        assert "incomplete" in caplog.text
 
-    def test_zero_rows(self, caplog):
-        data = np.ones((10, 256, 320), dtype=np.uint16) * 5000
-        data[3, 100:110, :] = 0
+    def test_resend_failures(self, caplog):
+        data = np.random.randint(1000, 60000, (10, 256, 320), dtype=np.uint16)
+        stats = DownloadStats(n_frames=10, n_incomplete=0, resend_failed=3)
         with caplog.at_level("WARNING", logger="pyTelops.camera"):
-            Camera._download_diagnostics(data, 10)
-        assert "zero rows" in caplog.text
+            Camera._download_diagnostics(data, 10, stats)
+        assert "resends failed" in caplog.text
 
 
 class TestBufferConfigureDuration:
