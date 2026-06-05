@@ -1,6 +1,21 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- ``discover()`` now finds cameras on every host network interface (USB-to-GigE
+  adapters, secondary NICs), via the reworked multi-interface discovery in
+  pyGigEVision. Each result carries a ``reachable`` flag.
+- ``Camera()`` now raises an actionable error when the selected camera is on no
+  host NIC subnet, instead of failing later with a confusing OS error.
+- Added ``pyTelops.force_ip(camera, ip, mask, gateway=None)`` to re-home a
+  wrong-subnet camera by MAC (GVCP FORCEIP).
+- Removed the host-side link-local probe that the multi-interface discovery
+  makes redundant. Thanks to Lorenzo Capponi (LolloCappo) for the
+  connected-socket interface-detection approach that informed this work.
+- Requires the updated pyGigEVision (multi-interface discovery, ``force_ip``).
+
 Version 0.2.1
 -------------
 
