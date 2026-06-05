@@ -19,6 +19,8 @@ __version__ = "0.2.1"
 from pyGigEVision import GVCPClient, GVCPError
 
 from .camera import Camera, discover
+from .connection import ConnectionReport, tune_connection
+from .errors import DownloadStats, FrameIntegrityError
 from .registers import (
     CalibrationCollectionType,
     CalibrationMode,
@@ -57,5 +59,9 @@ __all__ = [
     "VoltageLocation",
     "CurrentLocation",
     "CalibrationCollectionType",
+    "ConnectionReport",
+    "DownloadStats",
+    "FrameIntegrityError",
+    "tune_connection",
     "__version__",
 ]

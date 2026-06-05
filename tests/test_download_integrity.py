@@ -224,3 +224,12 @@ def test_buffer_download_falls_back_when_jumbo_unsupported(caplog):
         )
     assert cam.last_download_stats.packet_size_used == 1500
     assert any("1500" in r.message for r in caplog.records)
+
+
+def test_public_exports():
+    import pyTelops
+
+    assert hasattr(pyTelops, "FrameIntegrityError")
+    assert hasattr(pyTelops, "DownloadStats")
+    assert hasattr(pyTelops, "tune_connection")
+    assert hasattr(pyTelops, "ConnectionReport")
