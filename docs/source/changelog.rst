@@ -1,6 +1,31 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+- ``buffer_download`` now detects dropped and corrupted frames and raises
+  ``FrameIntegrityError`` by default when any frame is incomplete. This is a
+  behavior change: pass ``max_dropped_frames=N`` to tolerate up to ``N``
+  incomplete frames, as older code relied on the method always returning an
+  array.
+- ``buffer_download`` attaches a ``DownloadStats`` integrity report to
+  ``cam.last_download_stats`` (per-frame missing packets, resend counts,
+  throughput) so callers can inspect data quality without pixel inspection.
+- ``buffer_download`` enables GVSP packet resends during the stream and
+  re-downloads incomplete frames from the camera buffer, controlled by the new
+  ``resend`` and ``retries`` parameters. It no longer suppresses the
+  ``pyGigEVision.gvsp`` packet-loss warnings.
+- Corrected the misleading ``packet_size=9000`` guidance. Oversized requests on
+  a non-jumbo path are now detected with a FireTestPacket path probe, and the
+  download warns and falls back to ``packet_size=1500`` instead of silently
+  emitting mostly-zero frames.
+- Added ``tune_connection()`` to probe the link and sweep download settings,
+  recommending a stable and fast configuration for the current adapter and
+  cable. Includes an opt-in read-only NIC diagnostics pass.
+- New public names: ``FrameIntegrityError``, ``DownloadStats``,
+  ``ConnectionReport``, ``tune_connection``.
+
 Version 0.2.1
 -------------
 
