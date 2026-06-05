@@ -56,6 +56,7 @@ pyGigEVision : underlying GigE Vision protocol layer
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import logging
 import os
 import re
@@ -66,6 +67,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 
 import numpy as np
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +177,35 @@ def _resolve_enum(value, enum_cls):
 TELOPS_MANUFACTURER = "Telops Inc."
 
 
+def _host_subnets() -> list[tuple[str, str]]:
+    """Return ``(ip, netmask)`` for every up, non-loopback host IPv4 interface."""
+    out: list[tuple[str, str]] = []
+    stats = psutil.net_if_stats()
+    for name, addrs in psutil.net_if_addrs().items():
+        st = stats.get(name)
+        if st is None or not st.isup:
+            continue
+        for a in addrs:
+            if a.family == socket.AF_INET and a.address and not a.address.startswith("127."):
+                out.append((a.address, a.netmask or "255.255.255.0"))
+    return out
+
+
+def _is_reachable(camera_ip: str, subnets: list[tuple[str, str]]) -> bool:
+    """True if *camera_ip* falls in any host subnet."""
+    try:
+        cam = ipaddress.IPv4Address(camera_ip)
+    except ValueError:
+        return False
+    for ip, mask in subnets:
+        try:
+            if cam in ipaddress.IPv4Network(f"{ip}/{mask}", strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def discover(interface_ip: str = "", timeout: float = 2.0, all_vendors: bool = False) -> list[dict]:
     """Discover Telops cameras on the network.
 
@@ -212,6 +243,10 @@ def discover(interface_ip: str = "", timeout: float = 2.0, all_vendors: bool = F
 
     if not all_vendors:
         cameras = [c for c in cameras if c.get("manufacturer") == TELOPS_MANUFACTURER]
+
+    subnets = _host_subnets()
+    for cam in cameras:
+        cam["reachable"] = _is_reachable(cam["ip"], subnets)
 
     return cameras
 
@@ -421,11 +456,18 @@ class Camera:
                     "  3. No other software has GVCP control\n"
                     "  4. Firewall allows UDP for this python.exe"
                 )
-            self._camera_ip = cameras[0]["ip"]
+            chosen = cameras[0]
+            if chosen.get("reachable") is False:
+                raise RuntimeError(
+                    f"Camera at {chosen['ip']} is not on any host NIC subnet. "
+                    f"Add a static IP in that camera's subnet to your NIC, or use "
+                    f"pyTelops.force_ip(...) to re-home the camera."
+                )
+            self._camera_ip = chosen["ip"]
             logger.info(
                 "Discovered: %s %s at %s",
-                cameras[0].get("manufacturer", ""),
-                cameras[0].get("model", ""),
+                chosen.get("manufacturer", ""),
+                chosen.get("model", ""),
                 self._camera_ip,
             )
 
