@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from pyGigEVision import GVCPError
 from pyGigEVision.standard import REG_SC_PACKET_DELAY
 
 from pyTelops import registers as reg
@@ -34,6 +35,35 @@ def _make_fake_connected_camera():
     cam._gvsp.port = 3957
     cam._gvsp._sock.getsockname.return_value = ("169.254.1.1", 3957)
     return cam
+
+
+class TestWriteRegRetry:
+    """A transient GVCPError on a register write should be retried.
+
+    The calibration block-load returns GENERIC_ERROR until the camera finishes
+    loading the collection; a short retry then succeeds (issue #14).
+    """
+
+    def test_retries_on_transient_error_then_succeeds(self):
+        cam = _make_fake_connected_camera()
+        calls = {"n": 0}
+
+        def wr(addr, value):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise GVCPError("Command 0x0082 failed", 2)
+
+        cam._gvcp.write_reg.side_effect = wr
+        with patch("pyTelops.camera.time.sleep"):
+            cam._write_reg_retry(reg.REG_CAL_BLOCK_LOAD, 1)
+        assert calls["n"] == 2  # first failed, retry succeeded
+
+    def test_reraises_after_exhausting_attempts(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.write_reg.side_effect = GVCPError("boom", 2)
+        with patch("pyTelops.camera.time.sleep"), pytest.raises(GVCPError):
+            cam._write_reg_retry(reg.REG_CAL_BLOCK_LOAD, 1, attempts=3)
+        assert cam._gvcp.write_reg.call_count == 3
 
 
 class TestCameraInit:
