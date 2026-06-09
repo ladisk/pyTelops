@@ -60,7 +60,7 @@ The 57 hardware tests need a connected Telops camera:
 
    pytest tests/test_hardware.py --hardware
 
-Stop any VPN that owns a link-local adapter first (e.g. Tailscale), or
+Stop any VPN that owns a link-local adapter first, or
 discovery will fail. See the troubleshooting guide.
 
 Code style

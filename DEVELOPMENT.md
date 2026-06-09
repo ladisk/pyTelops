@@ -5,7 +5,7 @@
 
 ## Overview
 
-**pyTelops** is a pure-Python driver for Telops FAST-series MWIR thermal cameras over GigE Vision. It communicates directly via GVCP/GVSP protocols over UDP; no vendor SDK, no compiled extensions.
+**pyTelops** is a pure-Python driver for Telops FAST-series MWIR thermal cameras over GigE Vision. It speaks GVCP/GVSP directly over UDP, with no vendor SDK and no GenTL producer.
 
 - **Camera**: Telops FAST M3k (InSb MWIR detector, 320×256, 25 mK sensitivity, 16 GB internal buffer)
 - **Connection**: GigE Vision 1.2 over Ethernet (link-local 169.254.x.x)

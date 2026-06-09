@@ -24,6 +24,9 @@ the `.html` extension with `.md`.
 | Live streaming and onboard-buffer recording | streaming_and_buffer.md |
 | Runnable scripts | examples.md |
 | Discovery / network / firewall problems | troubleshooting.md |
+| Re-homing a camera onto the right subnet by MAC (`force_ip`) | camera.md |
+| Tuning the link and download config (`tune_connection`) | camera.md |
+| Handling incomplete buffer downloads (`FrameIntegrityError`) | streaming_and_buffer.md |
 
 ## Setup
 
@@ -52,7 +55,7 @@ Hardware tests are gated behind a flag and need a connected Telops camera:
 pytest tests/test_hardware.py --hardware
 ```
 
-Stop any VPN that holds a link-local adapter (e.g. Tailscale) before running
+Stop any VPN that holds a link-local adapter before running
 hardware tests, or camera discovery fails. See troubleshooting.md.
 
 ## Conventions
