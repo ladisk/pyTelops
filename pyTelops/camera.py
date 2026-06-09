@@ -3628,7 +3628,7 @@ class Camera:
         verbose: bool = True,
         max_dropped_frames: int = 0,
         retries: int = 2,
-        resend: bool = True,
+        resend: bool = False,
     ) -> np.ndarray | None:
         """Download frames from the internal memory buffer over Ethernet.
 
@@ -3692,7 +3692,10 @@ class Camera:
             2.  (Wired in a later change; accepted here for forward
             compatibility.)
         resend : bool, optional
-            Enable GVSP packet resends during the stream.  Default ``True``.
+            Enable GVSP packet resends during the stream. Default ``False``.
+            Resends help on a lossy link with spare bandwidth, but during a
+            saturated bulk transfer they can trigger congestion collapse, so
+            bulk download keeps them off by default.
 
         Returns
         -------
@@ -3729,6 +3732,11 @@ class Camera:
         """
         self._check_connected()
         self.last_download_stats = None
+
+        # Reset resend counters so last_download_stats reflects only this call
+        # (the GVSP receiver persists across downloads and would accumulate).
+        if hasattr(self._gvsp, "reset_resend_stats"):
+            self._gvsp.reset_resend_stats()
 
         if packet_size > 1500:
             probe_max = self._probe_max_packet_size(packet_size)
