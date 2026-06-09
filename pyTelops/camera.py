@@ -1577,8 +1577,11 @@ class Camera:
         subsequent :meth:`start_stream` calls, surviving stream
         restarts and context-manager re-entry.
 
-        This setting has no effect on internal memory-buffer recording
-        or buffer download, which use separate bitrate registers.
+        This setting has no effect on internal memory-buffer recording,
+        which runs at sensor speed inside the camera. It does, however, pace
+        the buffer *download* stream (the same stream channel): a small delay
+        (around 1000 ticks) can clear host-side packet drops during download
+        while keeping more throughput than lowering the download bitrate.
 
         Returns
         -------
