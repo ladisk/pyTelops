@@ -1,7 +1,7 @@
 Examples
 ========
 
-Five runnable scripts ship in the ``examples/`` directory. Each needs a
+Seven runnable scripts ship in the ``examples/`` directory. Each needs a
 connected Telops camera.
 
 01_connect_and_grab.py
@@ -33,3 +33,17 @@ select one by lens and target temperature. See :doc:`calibration`.
 ----------------------
 
 Arm the buffer and record when an external BNC trigger fires.
+
+06_force_ip.py
+--------------
+
+Discover cameras, find one reported as not reachable (on no host subnet), and
+assign it a new IP by MAC with :func:`~pyTelops.force_ip`, then re-discover.
+See :doc:`troubleshooting`.
+
+07_robust_download.py
+---------------------
+
+Record a sequence, tune the link with :func:`~pyTelops.tune_connection`, then
+download with integrity checking and inspect
+:attr:`~pyTelops.Camera.last_download_stats`. See :doc:`streaming_and_buffer`.

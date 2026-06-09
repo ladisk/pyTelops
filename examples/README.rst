@@ -11,3 +11,7 @@ Runnable scripts demonstrating pyTelops. Each needs a connected Telops camera.
   target temperature.
 * ``05_external_trigger.py`` - buffer recording started by an external BNC
   trigger.
+* ``06_force_ip.py`` - re-home a camera that came up on the wrong subnet by
+  assigning a new IP by MAC (FORCEIP).
+* ``07_robust_download.py`` - tune the link, download from the buffer with
+  integrity checking, and inspect ``cam.last_download_stats``.

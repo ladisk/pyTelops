@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pyTelops import Camera
+from pyTelops import Camera, FrameIntegrityError
 
 
 def main() -> None:
@@ -28,7 +28,13 @@ def main() -> None:
         print("Armed, waiting for external trigger...")
         cam.buffer_wait(timeout=60.0)
 
-        data = cam.buffer_download()
+        try:
+            data = cam.buffer_download()
+        except FrameIntegrityError as exc:
+            # Some frames did not arrive intact. Inspect the report, or pass
+            # max_dropped_frames=N to buffer_download to tolerate drops.
+            print(f"Download incomplete: {exc.stats.n_incomplete} frame(s) bad")
+            raise
         np.save("triggered_data.npy", data)
         print(f"Saved {data.shape} to triggered_data.npy")
 
