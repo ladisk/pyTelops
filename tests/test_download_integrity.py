@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from pyTelops import registers as reg
 from pyTelops.camera import (
     Camera,
     _group_contiguous,
@@ -274,6 +275,50 @@ def test_buffer_download_converges_over_multiple_rounds():
     assert out.shape[0] == 3
     assert cam.last_download_stats.n_incomplete == 0
     assert state["straggler_attempts"] >= 2  # took more than one recovery round
+
+
+def _probe_cam():
+    cam = _fake_cam_for_download()
+
+    def reg_reads(r):
+        if r == reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE:
+            return 10
+        if r == reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID:
+            return 1
+        return 0
+
+    cam._gvcp.read_reg.side_effect = reg_reads
+    return cam
+
+
+def test_probe_returns_largest_size_that_delivers_complete_frames():
+    cam = _probe_cam()
+
+    def dr(frame_id, count, *, packet_size, **kw):
+        miss = 0 if packet_size <= 8000 else 5  # 9000 does not deliver here
+        return {
+            off: (np.ones((4, 4), np.uint16), {"missing_packets": miss}) for off in range(count)
+        }
+
+    cam._download_range = MagicMock(side_effect=dr)
+    assert cam._probe_max_packet_size(9000) == 8000
+
+
+def test_probe_returns_requested_when_jumbo_delivers():
+    cam = _probe_cam()
+    cam._download_range = MagicMock(
+        side_effect=lambda frame_id, count, *, packet_size, **kw: {
+            off: (np.ones((4, 4), np.uint16), {"missing_packets": 0}) for off in range(count)
+        }
+    )
+    assert cam._probe_max_packet_size(9000) == 9000
+
+
+def test_probe_returns_1500_when_buffer_empty():
+    cam = _fake_cam_for_download()  # read_reg returns 0 -> recorded size 0
+    cam._download_range = MagicMock()
+    assert cam._probe_max_packet_size(9000) == 1500
+    cam._download_range.assert_not_called()
 
 
 def test_buffer_download_falls_back_when_jumbo_unsupported(caplog):

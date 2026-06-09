@@ -78,7 +78,6 @@ from pyGigEVision.standard import (  # noqa: E402
     REG_SC_PACKET_SIZE,
     SC_PACKET_SIZE_MASK,
     SC_SCPS_DO_NOT_FRAGMENT,
-    SC_SCPS_FIRE_TEST_PACKET,
 )
 
 from . import registers as reg  # noqa: E402
@@ -3957,43 +3956,48 @@ class Camera:
             self.stop_stream()
         return out
 
-    def _probe_max_packet_size(self, desired, candidates=None):
-        """Find the largest packet size the path can carry, via FireTestPacket.
+    def _probe_max_packet_size(self, desired, candidates=None, sequence=0):
+        """Find the largest packet size the path actually delivers.
 
-        Starts a short, self-contained GVSP stream, sets DoNotFragment, requests
-        a test packet of each candidate size, and checks whether the stream
-        socket receives it. Returns the largest passing size, or ``None`` if the
-        probe cannot run.
+        Streams a few buffered frames at each candidate size (largest first) and
+        returns the first that arrives complete. Verifying real frame delivery is
+        robust where a FireTestPacket probe is not: a test packet has no leader or
+        trailer, so it never assembles into a frame, which makes such a probe
+        report 1500 even on a jumbo-capable path. Requires recorded frames in the
+        selected sequence; returns 1500 when it cannot probe (e.g. empty buffer).
 
-        HARDWARE-GATED: the exact REG_SC_PACKET_SIZE flag bit layout for the
-        test-packet trigger and the test-packet delivery path must be confirmed
-        on the camera; validated by the repro_jumbo_corruption benchmark script.
-        Self-manages its own stream so the GVSP receiver is alive during the
-        probe and the main download's frame queue is not polluted. Isolated here
-        so the jumbo decision logic is unit-tested with this method mocked.
+        HARDWARE-GATED: exercises the real download path at jumbo sizes. Isolated
+        here so :meth:`buffer_download`'s jumbo decision is unit-tested with this
+        method mocked.
         """
         if candidates is None:
-            candidates = sorted({1500, 4000, 8000, min(desired, 16260)})
+            candidates = {1500, 4000, 8000, min(desired, 16260)}
         try:
-            old = self._gvcp.read_reg(REG_SC_PACKET_SIZE)
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
+            recorded = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
+            first_frame_id = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
         except GVCPError:
-            return None
-        best = 1500
-        self.start_stream()
-        try:
-            for size in candidates:
-                flags = (old & 0xFFFF0000) | SC_SCPS_DO_NOT_FRAGMENT | SC_SCPS_FIRE_TEST_PACKET
-                value = flags | (size & SC_PACKET_SIZE_MASK)
-                with suppress(GVCPError):
-                    self._gvcp.write_reg(REG_SC_PACKET_SIZE, value)
-                got = self._gvsp.get_frame_with_info(timeout=0.5)
-                if got is not None:
-                    best = max(best, size)
-        finally:
-            with suppress(GVCPError):
-                self._gvcp.write_reg(REG_SC_PACKET_SIZE, old)
-            self.stop_stream()
-        return best
+            return 1500
+        if recorded <= 0:
+            return 1500
+
+        n_probe = min(4, int(recorded))
+        for size in sorted(candidates, reverse=True):
+            if size <= 1500:
+                break
+            got = self._download_range(
+                first_frame_id,
+                n_probe,
+                packet_size=int(size),
+                bitrate_mbps=1000,
+                resend=False,
+                timeout=5,
+            )
+            if len(got) == n_probe and all(
+                int(info.get("missing_packets", 1)) == 0 for _off, (_frame, info) in got.items()
+            ):
+                return int(size)
+        return 1500
 
     @staticmethod
     def _download_diagnostics(data, expected, stats):
