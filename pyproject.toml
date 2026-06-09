@@ -91,7 +91,6 @@ include = [
     "AGENTS.md",
     "LICENSE",
     "CONTRIBUTING.rst",
-    "DEVELOPMENT.md",
     "pyproject.toml",
     "requirements.txt",
     "requirements.dev.txt",

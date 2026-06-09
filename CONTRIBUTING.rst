@@ -4,6 +4,28 @@ Contributing to pyTelops
 Thanks for your interest in contributing. This guide covers the development
 workflow.
 
+Architecture
+------------
+
+pyTelops is the vendor layer on top of `pyGigEVision
+<https://github.com/ladisk/pyGigEVision>`_, which implements the GigE Vision
+protocol (GVCP control, GVSP streaming, GenICam XML). pyTelops adds only the
+Telops-specific parts:
+
+- ``camera.py`` - the ``Camera`` class: properties, context manager,
+  auto-discovery and connect, RT-mode Celsius conversion, and 16 GB onboard
+  buffer recording with integrity-checked download.
+- ``registers.py`` - Telops register addresses and enums.
+- ``connection.py`` - ``tune_connection`` / ``ConnectionReport`` (link probing
+  and download tuning).
+- ``errors.py`` - ``DownloadStats`` and ``FrameIntegrityError``.
+- ``provisioning.py`` - ``force_ip`` (assign a camera IP by MAC).
+- ``cli.py`` / ``gui.py`` - command-line tools and the Tkinter live viewer.
+
+Control runs over GVCP (UDP 3956, request/response with a heartbeat); frames
+arrive over GVSP (the camera pushes Leader / Data / Trailer packets that are
+reassembled into numpy arrays). Both are provided by pyGigEVision.
+
 Development setup
 -----------------
 
