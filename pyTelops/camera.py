@@ -2871,6 +2871,22 @@ class Camera:
 
         return collections
 
+    def _write_reg_retry(self, addr, value, *, attempts=3, delay=1.0):
+        """Write a register, retrying a transient :class:`GVCPError`.
+
+        Some camera operations return ``GENERIC_ERROR`` until the camera is
+        ready (e.g. loading a calibration block right after a collection load);
+        a short retry then succeeds. Re-raises if every attempt fails.
+        """
+        for i in range(attempts):
+            try:
+                self._gvcp.write_reg(addr, value)
+                return
+            except GVCPError:
+                if i == attempts - 1:
+                    raise
+                time.sleep(delay)
+
     def calibration_load(
         self, index: int | None = None, lens: str | None = None, temp: float | None = None
     ) -> dict:
@@ -3005,7 +3021,9 @@ class Camera:
             time.sleep(2.0)
 
             self._gvcp.write_reg(reg.REG_CAL_BLOCK_SELECTOR, 0)
-            self._gvcp.write_reg(reg.REG_CAL_BLOCK_LOAD, 1)
+            # The block load returns GENERIC_ERROR until the collection finishes
+            # loading; retry briefly (issue #14) instead of failing the call.
+            self._write_reg_retry(reg.REG_CAL_BLOCK_LOAD, 1)
             time.sleep(2.0)
 
         # Verify active POSIX matches what we selected
