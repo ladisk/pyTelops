@@ -1,8 +1,9 @@
 import logging
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+from pyGigEVision import GVCPError
 
 from pyTelops import registers as reg
 from pyTelops.camera import (
@@ -463,6 +464,35 @@ def test_buffer_download_explicit_bitrate_not_learned():
         n_frames=10, bitrate_mbps=1000, convert=False, strip_header=False, verbose=False
     )
     assert "bitrate_mbps" not in cam.recommended_download_kwargs
+
+
+def test_download_range_retries_transient_setup_write():
+    # Under extreme host load a control register write during download setup can
+    # transiently return GENERIC_ERROR; it must be retried, not abort the download.
+    cam = _fake_cam_for_download()
+    state = {"mode_writes": 0}
+
+    def wr(addr, value):
+        # Only the SEQUENCE setup write (not the OFF write in cleanup).
+        if (
+            addr == reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE
+            and value == reg.MemoryBufferDownloadMode.SEQUENCE
+        ):
+            state["mode_writes"] += 1
+            if state["mode_writes"] == 1:
+                raise GVCPError("Command 0x0082 failed", 2)
+
+    cam._gvcp.write_reg.side_effect = wr
+    cam._gvsp.get_frame_with_info.side_effect = [
+        (np.ones((4, 4), np.uint16), {"block_id": 1, "missing_packets": 0}),
+        None,
+    ]
+    with patch("pyTelops.camera.time.sleep"):
+        got = cam._download_range(
+            0, 1, packet_size=1500, bitrate_mbps=1000, resend=False, timeout=5
+        )
+    assert state["mode_writes"] == 2  # the transient failure was retried
+    assert 0 in got  # frame still downloaded
 
 
 def test_public_exports():

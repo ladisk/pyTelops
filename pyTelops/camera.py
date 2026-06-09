@@ -3965,7 +3965,9 @@ class Camera:
         time.sleep(0.2)
 
         # Mode MUST be set before the other registers (locked when mode == OFF).
-        self._gvcp.write_reg(
+        # Setup writes use _write_reg_retry because under heavy host load a
+        # control write can transiently return GENERIC_ERROR; a retry succeeds.
+        self._write_reg_retry(
             reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE, reg.MemoryBufferDownloadMode.SEQUENCE
         )
 
@@ -3977,8 +3979,8 @@ class Camera:
         except GVCPError:
             pass
 
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, frame_id)
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, count)
+        self._write_reg_retry(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, frame_id)
+        self._write_reg_retry(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, count)
 
         self.start_stream()
         self._gvsp.resend_enabled = resend
@@ -3991,10 +3993,10 @@ class Camera:
             new_pkt_reg = (old_pkt_reg & 0xFFFF0000) | (packet_size & SC_PACKET_SIZE_MASK)
             if packet_size > 1500:
                 new_pkt_reg &= ~SC_SCPS_DO_NOT_FRAGMENT
-            self._gvcp.write_reg(REG_SC_PACKET_SIZE, new_pkt_reg)
+            self._write_reg_retry(REG_SC_PACKET_SIZE, new_pkt_reg)
             self._gvsp._packet_data_size = packet_size - 8
 
-        self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        self._write_reg_retry(reg.REG_ACQUISITION_START, 1)
 
         out = {}
         deadline = time.monotonic() + timeout
