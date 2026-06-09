@@ -6,15 +6,40 @@ Unreleased
 
 - ``discover()`` now finds cameras on every host network interface (USB-to-GigE
   adapters, secondary NICs), via the reworked multi-interface discovery in
-  pyGigEVision. Each result carries a ``reachable`` flag.
-- ``Camera()`` now raises an actionable error when the selected camera is on no
-  host NIC subnet, instead of failing later with a confusing OS error.
+  pyGigEVision. Each result carries a ``reachable`` flag and an ``interface_ip``
+  recording the host NIC the camera replied on.
+- ``Camera()`` now connects through the interface the camera replied on during
+  discovery, so a host with multiple link-local NICs no longer needs manual
+  interface selection. It also raises an actionable error when the selected
+  camera is on no host NIC subnet, instead of failing later with a confusing
+  OS error.
 - Added ``pyTelops.force_ip(camera, ip, mask, gateway=None)`` to re-home a
   wrong-subnet camera by MAC (GVCP FORCEIP).
 - Removed the host-side link-local probe that the multi-interface discovery
   makes redundant. Thanks to Lorenzo Capponi (LolloCappo) for the
   connected-socket interface-detection approach (PR #13) that informed this work.
 - Requires the updated pyGigEVision (multi-interface discovery, ``force_ip``).
+- ``buffer_download`` now detects dropped and corrupted frames and raises
+  ``FrameIntegrityError`` by default when any frame is incomplete. This is a
+  behavior change: pass ``max_dropped_frames=N`` to tolerate up to ``N``
+  incomplete frames, as older code relied on the method always returning an
+  array.
+- ``buffer_download`` attaches a ``DownloadStats`` integrity report to
+  ``cam.last_download_stats`` (per-frame missing packets, resend counts,
+  throughput) so callers can inspect data quality without pixel inspection.
+- ``buffer_download`` enables GVSP packet resends during the stream and
+  re-downloads incomplete frames from the camera buffer, controlled by the new
+  ``resend`` and ``retries`` parameters. It no longer suppresses the
+  ``pyGigEVision.gvsp`` packet-loss warnings.
+- Corrected the misleading ``packet_size=9000`` guidance. Oversized requests on
+  a non-jumbo path are now detected with a FireTestPacket path probe, and the
+  download warns and falls back to ``packet_size=1500`` instead of silently
+  emitting mostly-zero frames.
+- Added ``tune_connection()`` to probe the link and sweep download settings,
+  recommending a stable and fast configuration for the current adapter and
+  cable. Includes an opt-in read-only NIC diagnostics pass.
+- New public names: ``FrameIntegrityError``, ``DownloadStats``,
+  ``ConnectionReport``, ``tune_connection``.
 
 Version 0.2.1
 -------------

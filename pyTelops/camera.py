@@ -83,6 +83,7 @@ from pyGigEVision.standard import (  # noqa: E402
 )
 
 from . import registers as reg  # noqa: E402
+from .errors import DownloadStats, FrameIntegrityError  # noqa: E402
 
 # --- Enum string resolution ---
 _ENUM_ALIASES = {
@@ -281,6 +282,74 @@ def _find_local_ip_for(camera_ip: str) -> str:
         s.close()
 
 
+def _missing_positions(n, complete):
+    """Return the positions in ``range(n)`` not present in *complete*, ascending.
+
+    Covers both never-arrived frames and arrived-but-incomplete ones (anything
+    not yet confirmed complete is treated as still missing).
+    """
+    return [k for k in range(n) if k not in complete]
+
+
+def _group_contiguous(positions):
+    """Group integers into ``(first, last)`` contiguous runs (input sorted here).
+
+    Used to turn a set of missing frame positions into the fewest contiguous
+    ranges so each can be re-streamed in a single acquisition.
+    """
+    runs = []
+    for p in sorted(positions):
+        if runs and p == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], p)
+        else:
+            runs.append((p, p))
+    return runs
+
+
+def _pace_bitrate(round_idx, base, floor=100.0, factor=0.5):
+    """Bitrate (Mbit/s) for recovery *round_idx*.
+
+    Round 0 (the first full pass) uses *base*; each later round halves the rate
+    geometrically toward *floor*, so re-downloads of dropped frames pace slower
+    than the first pass and converge instead of re-colliding with the same
+    congestion.
+    """
+    if round_idx <= 0:
+        return float(base)
+    return max(float(floor), float(base) * (factor**round_idx))
+
+
+def _learn_bitrate(first_pass_frac, current_bitrate, *, threshold=0.95, factor=0.5, floor=100.0):
+    """Next starting bitrate given the first-pass completeness of this download.
+
+    A clean first pass (>= *threshold* complete) keeps the rate; a lossy one paces
+    down geometrically toward *floor* so the next download starts gentler.
+    """
+    if first_pass_frac >= threshold:
+        return float(current_bitrate)
+    return max(float(floor), float(current_bitrate) * factor)
+
+
+def _resolve_packet_size(requested, probe_max):
+    """Decide the effective GVSP packet size given a path-MTU probe result.
+
+    Returns ``(effective_size, warning)`` where *warning* is ``None`` or a
+    human-readable string. Falls back to 1500 when a jumbo request exceeds the
+    probed path capacity.
+    """
+    if requested <= 1500 or probe_max is None:
+        return requested, None
+    if requested <= probe_max:
+        return requested, None
+    warning = (
+        f"Requested packet_size={requested} exceeds the path MTU "
+        f"(probed max {probe_max}). Jumbo frames need MTU>={requested} "
+        f"end-to-end (NIC, switches, OS); most USB-to-GigE adapters do not "
+        f"support them. Falling back to packet_size=1500."
+    )
+    return 1500, warning
+
+
 class Camera:
     """Telops FAST-series thermal camera over GigE Vision.
 
@@ -387,6 +456,13 @@ class Camera:
         self._buffer_config_kwargs: dict | None = None
         self._calibration_info: dict = {}
         self._calibration_names: dict = {}
+        self.last_download_stats = None
+        self.recommended_download_kwargs = {}
+        # Auto-tune: when True and no explicit packet_size/bitrate is passed,
+        # buffer_download probes jumbo once per connection and learns the
+        # bitrate from real downloads, caching both in recommended_download_kwargs.
+        self.auto_tune = True
+        self._jumbo_probed = False
         # User-set packet delay override. None = use default (force 0 on
         # start_stream for max throughput). Int = user's chosen value,
         # preserved across stream restarts.
@@ -451,6 +527,10 @@ class Camera:
         """
         if self._connected:
             return
+
+        # Fresh connection: re-probe jumbo and re-learn the bitrate (a new
+        # adapter / host may differ). Session cache lives only per connection.
+        self._reset_auto_tune_cache()
 
         discovered_interface_ip = ""
 
@@ -1563,8 +1643,11 @@ class Camera:
         subsequent :meth:`start_stream` calls, surviving stream
         restarts and context-manager re-entry.
 
-        This setting has no effect on internal memory-buffer recording
-        or buffer download, which use separate bitrate registers.
+        This setting has no effect on internal memory-buffer recording,
+        which runs at sensor speed inside the camera. It does, however, pace
+        the buffer *download* stream (the same stream channel): a small delay
+        (around 1000 ticks) can clear host-side packet drops during download
+        while keeping more throughput than lowering the download bitrate.
 
         Returns
         -------
@@ -2835,6 +2918,22 @@ class Camera:
 
         return collections
 
+    def _write_reg_retry(self, addr, value, *, attempts=3, delay=1.0):
+        """Write a register, retrying a transient :class:`GVCPError`.
+
+        Some camera operations return ``GENERIC_ERROR`` until the camera is
+        ready (e.g. loading a calibration block right after a collection load);
+        a short retry then succeeds. Re-raises if every attempt fails.
+        """
+        for i in range(attempts):
+            try:
+                self._gvcp.write_reg(addr, value)
+                return
+            except GVCPError:
+                if i == attempts - 1:
+                    raise
+                time.sleep(delay)
+
     def calibration_load(
         self, index: int | None = None, lens: str | None = None, temp: float | None = None
     ) -> dict:
@@ -2969,7 +3068,9 @@ class Camera:
             time.sleep(2.0)
 
             self._gvcp.write_reg(reg.REG_CAL_BLOCK_SELECTOR, 0)
-            self._gvcp.write_reg(reg.REG_CAL_BLOCK_LOAD, 1)
+            # The block load returns GENERIC_ERROR until the collection finishes
+            # loading; retry briefly (issue #14) instead of failing the call.
+            self._write_reg_retry(reg.REG_CAL_BLOCK_LOAD, 1)
             time.sleep(2.0)
 
         # Verify active POSIX matches what we selected
@@ -3582,17 +3683,25 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
         return self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
+    def _reset_auto_tune_cache(self) -> None:
+        """Clear the per-connection auto-tune cache (jumbo + learned bitrate)."""
+        self.recommended_download_kwargs = {}
+        self._jumbo_probed = False
+
     def buffer_download(
         self,
         sequence: int = 0,
         start_frame: int | None = None,
         n_frames: int = 0,
         timeout: float = 0,
-        bitrate_mbps: float = 1000.0,
-        packet_size: int = 1500,
+        bitrate_mbps: float | None = None,
+        packet_size: int | None = None,
         strip_header: bool = True,
         convert: bool = True,
         verbose: bool = True,
+        max_dropped_frames: int = 0,
+        retries: int = 6,
+        resend: bool = False,
     ) -> np.ndarray | None:
         """Download frames from the internal memory buffer over Ethernet.
 
@@ -3622,18 +3731,24 @@ class Camera:
             Number of frames to download.  ``0`` (default) downloads all
             recorded frames in the slot.
         timeout : float, optional
-            Total download timeout in seconds.  ``0`` (default) uses an
-            auto-calculated value based on frame count (1.5x the expected
-            transfer time, minimum 10 s).
-        bitrate_mbps : float, optional
+            Per-pass timeout in seconds. ``0`` (default) auto-sizes each
+            streaming pass from its frame count (1.5x the expected transfer
+            time, minimum 10 s).
+        bitrate_mbps : float or None, optional
             Maximum download bitrate in Mbit/s written to the camera's
-            ``REG_DOWNLOAD_BITRATE_MAX`` register.  Default 1000.0.
-            Reduce to around 300 when network contention is a concern.
-        packet_size : int, optional
-            GVSP UDP payload size in bytes.  Default 1500 (standard
-            Ethernet MTU).  Use 9000 on a jumbo-frame network for faster
-            downloads; the driver clears the DoNotFragment flag
-            automatically when *packet_size* > 1500.
+            ``REG_DOWNLOAD_BITRATE_MAX`` register. ``None`` (default)
+            auto-resolves: a value learned from earlier downloads this
+            connection (lowered after drops) when :attr:`auto_tune` is on,
+            otherwise 1000.0. Pass a number to override (e.g. 300 to ease
+            network contention) and disable learning for this call.
+        packet_size : int or None, optional
+            GVSP UDP payload size in bytes. ``None`` (default) auto-resolves:
+            with :attr:`auto_tune` on, the largest size the path delivers is
+            probed once per connection (jumbo when supported, else 1500) and
+            cached; otherwise 1500. Pass a value to override. Sizes above 1500
+            need jumbo-frame support end-to-end (NIC/switches/OS MTU >=
+            packet_size); when the path cannot carry the requested size the
+            driver warns and falls back to 1500 rather than corrupting data.
         strip_header : bool, optional
             Strip the two Telops metadata rows from each frame.  Default
             ``True``.  Ignored when *convert* is ``True`` (stripping is
@@ -3644,6 +3759,22 @@ class Camera:
         verbose : bool, optional
             Show a ``tqdm`` progress bar and log a transfer summary.
             Default ``True``.
+        max_dropped_frames : int, optional
+            Maximum number of incomplete frames tolerated before raising
+            :class:`~pyTelops.FrameIntegrityError`.  Default 0 (raise on any
+            dropped or never-arrived frame).  Pass a higher value or a large
+            number to accept partial data.
+        retries : int, optional
+            Maximum number of paced recovery rounds. After the first pass, any
+            still-missing frames (never-arrived or incomplete) are re-streamed
+            at a lower bitrate, repeating until the download is complete or this
+            many rounds are spent. Frames persist in the camera buffer, so
+            recovery converges. Default 6. Set to 0 for a single pass only.
+        resend : bool, optional
+            Enable GVSP packet resends during the stream. Default ``False``.
+            Resends help on a lossy link with spare bandwidth, but during a
+            saturated bulk transfer they can trigger congestion collapse, so
+            bulk download keeps them off by default.
 
         Returns
         -------
@@ -3659,6 +3790,8 @@ class Camera:
         ------
         RuntimeError
             If the camera is not connected.
+        FrameIntegrityError
+            If more than *max_dropped_frames* frames are incomplete.
 
         Examples
         --------
@@ -3677,6 +3810,12 @@ class Camera:
         >>> frames = cam.buffer_download(bitrate_mbps=300.0)
         """
         self._check_connected()
+        self.last_download_stats = None
+
+        # Reset resend counters so last_download_stats reflects only this call
+        # (the GVSP receiver persists across downloads and would accumulate).
+        if hasattr(self._gvsp, "reset_resend_stats"):
+            self._gvsp.reset_resend_stats()
 
         # Select sequence and get info
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
@@ -3693,8 +3832,28 @@ class Camera:
         if start_frame is None:
             start_frame = first_frame_id
 
-        if timeout <= 0:
-            timeout = max(n_frames / 200.0 * 1.5 + 5.0, 10.0)
+        # Resolve packet_size and bitrate: explicit arg > session cache > auto/default.
+        explicit_bitrate = bitrate_mbps is not None
+        if packet_size is None:
+            cached_ps = self.recommended_download_kwargs.get("packet_size")
+            if cached_ps is not None:
+                packet_size = int(cached_ps)
+            elif self.auto_tune:
+                packet_size = self._probe_max_packet_size(9000)
+                self._jumbo_probed = True
+                self.recommended_download_kwargs["packet_size"] = packet_size
+                if verbose and packet_size > 1500:
+                    logger.info("Auto-selected jumbo packet_size=%d", packet_size)
+            else:
+                packet_size = 1500
+        elif packet_size > 1500:
+            probe_max = self._probe_max_packet_size(packet_size)
+            packet_size, pkt_warn = _resolve_packet_size(packet_size, probe_max)
+            if pkt_warn:
+                logger.warning(pkt_warn)
+        if bitrate_mbps is None:
+            cached_br = self.recommended_download_kwargs.get("bitrate_mbps")
+            bitrate_mbps = float(cached_br) if cached_br is not None else 1000.0
 
         # Set up progress bar
         pbar = None
@@ -3703,25 +3862,162 @@ class Camera:
 
             pbar = tqdm(total=n_frames, unit="frame", desc="Downloading")
 
-        # Suppress GVSP "packets unrecoverable" warnings during download
-        import logging
+        # Adaptive recovery. Each frame's buffer ID is start_frame + position;
+        # the GVSP block id restarts at 1 per stream session, so within one
+        # re-streamed range, position-in-range = block_id - 1 (robust to drops).
+        # Round 0 streams the whole range; later rounds re-stream only the
+        # still-missing positions (never-arrived AND incomplete) at a paced
+        # lower bitrate, until complete or `retries` rounds are spent. Frames
+        # persist in the camera buffer, so this converges.
+        by_pos: dict[int, tuple] = {}  # position -> (frame, info), complete only
+        complete: set[int] = set()
+        recovered_by_retry = 0
+        first_pass_n_complete = 0
+        t_start = time.monotonic()
+        try:
+            round_idx = 0
+            while True:
+                missing = _missing_positions(n_frames, complete)
+                if not missing or round_idx > retries:
+                    break
+                round_bitrate = _pace_bitrate(round_idx, bitrate_mbps)
+                for lo, hi in _group_contiguous(missing):
+                    got = self._download_range(
+                        start_frame + lo,
+                        hi - lo + 1,
+                        packet_size=packet_size,
+                        bitrate_mbps=round_bitrate,
+                        resend=resend,
+                        timeout=timeout,
+                    )
+                    for offset, (frame, info) in got.items():
+                        pos = lo + offset
+                        if (
+                            0 <= pos < n_frames
+                            and pos not in complete
+                            and int(info.get("missing_packets", 1)) == 0
+                        ):
+                            complete.add(pos)
+                            by_pos[pos] = (frame, info)
+                            if round_idx > 0:
+                                recovered_by_retry += 1
+                    if pbar:
+                        pbar.n = len(complete)
+                        pbar.refresh()
+                if round_idx == 0:
+                    first_pass_n_complete = len(complete)
+                round_idx += 1
+        finally:
+            if pbar:
+                pbar.close()
+        elapsed = time.monotonic() - t_start
 
-        gvsp_logger = logging.getLogger("pyGigEVision.gvsp")
-        old_level = gvsp_logger.level
-        gvsp_logger.setLevel(logging.CRITICAL)
+        n_complete = len(complete)
+        missing_after = _missing_positions(n_frames, complete)
 
-        # Ensure acquisition is stopped before configuring download
+        resend_stats = getattr(
+            self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
+        )
+        # Read the payload-size register at most once (skip when nothing landed).
+        payload = None
+        if n_complete and elapsed > 0:
+            payload = self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE)
+
+        stats = DownloadStats(
+            n_frames=n_complete,
+            n_incomplete=len(missing_after),
+            incomplete_frame_ids=[start_frame + k for k in missing_after],
+            resend_requested=int(resend_stats.get("requested", 0)),
+            resend_recovered=int(resend_stats.get("recovered", 0)),
+            resend_failed=int(resend_stats.get("failed", 0)),
+            recovered_by_retry=recovered_by_retry,
+            first_pass_n_complete=first_pass_n_complete,
+            elapsed_s=elapsed,
+            packet_size_used=packet_size,
+            bitrate_used=bitrate_mbps,
+        )
+        if payload is not None and elapsed > 0:
+            stats.throughput_mbps = n_complete * payload / elapsed / 1e6
+        self.last_download_stats = stats
+
+        # Learn the starting bitrate from this download's first pass (auto only).
+        if self.auto_tune and not explicit_bitrate and n_frames > 0:
+            frac = stats.first_pass_n_complete / n_frames
+            learned = _learn_bitrate(frac, bitrate_mbps)
+            if verbose and learned != bitrate_mbps:
+                logger.info("Lowered learned bitrate to %.0f after first-pass drops", learned)
+            self.recommended_download_kwargs["bitrate_mbps"] = learned
+
+        if verbose and n_complete:
+            fps = n_complete / elapsed if elapsed > 0 else 0
+            logger.info(
+                "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)",
+                n_complete,
+                elapsed,
+                fps,
+                stats.throughput_mbps,
+            )
+
+        if n_complete == 0:
+            return None
+
+        if stats.n_incomplete > max_dropped_frames:
+            raise FrameIntegrityError(
+                f"{stats.n_incomplete} of {n_frames} frames could not be recovered "
+                f"after {retries} paced retry rounds (missing frame IDs: "
+                f"{stats.incomplete_frame_ids[:20]}). Pass max_dropped_frames=N to "
+                f"tolerate gaps, lower bitrate_mbps, or run tune_connection().",
+                stats=stats,
+            )
+
+        # Assemble in frame order. Under drops + recovery, arrival order is not
+        # frame order, so order by position.
+        result = np.stack([by_pos[k][0] for k in sorted(by_pos)])
+        if convert:
+            result = self._apply_calibration(result)
+        elif strip_header:
+            result = self._strip_headers(result)
+        if verbose:
+            self._download_diagnostics(result, n_frames, stats)
+        return result
+
+    def _download_range(self, frame_id, count, *, packet_size, bitrate_mbps, resend, timeout):
+        """Stream ``count`` consecutive buffer frames from ``frame_id`` in one pass.
+
+        Runs a single fresh stream session for the contiguous range and returns
+        ``{offset: (frame, info)}`` for arrived frames, where ``offset`` is the
+        0-based index within the range. The GVSP block id restarts at 1 each
+        stream session and is assigned sequentially as the camera sends, so
+        ``offset = block_id - 1`` holds even when frames inside the range are
+        dropped. Frames persist in the camera buffer until :meth:`buffer_clear`,
+        so the same range can be re-streamed to recover drops.
+
+        Handles the full download choreography (download mode before the locked
+        registers, bitrate cap, packet size / DoNotFragment for jumbo frames)
+        and restores every touched register on exit.
+
+        HARDWARE-GATED: the re-stream register sequence and the block-id->offset
+        mapping are validated against the camera by the dropped-frame benchmark.
+        Isolated here so :meth:`buffer_download`'s adaptive loop is unit-tested
+        with this method mocked.
+        """
+        if count <= 0:
+            return {}
+        if timeout <= 0:
+            timeout = max(count / 200.0 * 1.5 + 5.0, 10.0)
+
+        # Ensure acquisition is stopped before configuring download.
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         time.sleep(0.2)
 
-        # Configure download - mode MUST be set before other registers
-        # (they are locked when mode == OFF)
-        self._gvcp.write_reg(
+        # Mode MUST be set before the other registers (locked when mode == OFF).
+        # Setup writes use _write_reg_retry because under heavy host load a
+        # control write can transiently return GENERIC_ERROR; a retry succeeds.
+        self._write_reg_retry(
             reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE, reg.MemoryBufferDownloadMode.SEQUENCE
         )
 
-        # Increase download bitrate (register unlocked now that mode != OFF)
         old_bitrate = None
         try:
             old_bitrate = self._gvcp.read_float(reg.REG_DOWNLOAD_BITRATE_MAX)
@@ -3730,56 +4026,43 @@ class Camera:
         except GVCPError:
             pass
 
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, start_frame)
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, n_frames)
+        self._write_reg_retry(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, frame_id)
+        self._write_reg_retry(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, count)
 
-        # Start streaming
         self.start_stream()
-        self._gvsp.resend_enabled = False
+        self._gvsp.resend_enabled = resend
 
-        # Override packet size for download (larger = faster).
-        # When using packet_size > 1500 (e.g. 9000), UDP packets will be
-        # IP-fragmented by the camera.  If GevSCPSDoNotFragment (bit 1)
-        # is set, the camera/NIC drops oversized packets instead of
-        # fragmenting them, causing complete data loss.  We clear the
-        # flag when using large packets and restore the original register
-        # value afterwards.
+        # Larger packets are IP-fragmented by the camera; clear DoNotFragment so
+        # the path does not drop them, and restore the register afterwards.
         old_pkt_reg = None
         if packet_size != 1500:
             old_pkt_reg = self._gvcp.read_reg(REG_SC_PACKET_SIZE)
-            upper_flags = old_pkt_reg & 0xFFFF0000
-            new_pkt_reg = upper_flags | (packet_size & SC_PACKET_SIZE_MASK)
+            new_pkt_reg = (old_pkt_reg & 0xFFFF0000) | (packet_size & SC_PACKET_SIZE_MASK)
             if packet_size > 1500:
-                # Allow IP fragmentation for large packets
                 new_pkt_reg &= ~SC_SCPS_DO_NOT_FRAGMENT
-            self._gvcp.write_reg(REG_SC_PACKET_SIZE, new_pkt_reg)
+            self._write_reg_retry(REG_SC_PACKET_SIZE, new_pkt_reg)
             self._gvsp._packet_data_size = packet_size - 8
 
-        # Start download stream
-        self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        self._write_reg_retry(reg.REG_ACQUISITION_START, 1)
 
-        # Collect frames
-        frames = []
-        t_start = time.monotonic()
+        out = {}
         deadline = time.monotonic() + timeout
-
+        stall_deadline = time.monotonic() + 10.0
         try:
-            stall_deadline = time.monotonic() + 10.0
-            for _ in range(n_frames):
+            for _ in range(count):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                result = self._gvsp.get_frame(timeout=min(remaining, 5.0))
+                result = self._gvsp.get_frame_with_info(timeout=min(remaining, 5.0))
                 if result is not None:
-                    frames.append(result)
+                    frame, info = result
+                    offset = int(info.get("block_id", 0)) - 1
+                    if 0 <= offset < count:
+                        out[offset] = (frame, info)
                     stall_deadline = time.monotonic() + 10.0
-                    if pbar:
-                        pbar.update(1)
                 elif time.monotonic() > stall_deadline:
                     break  # no frames for 10s - stream is dead
         finally:
-            if pbar:
-                pbar.close()
             with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
             time.sleep(0.2)
@@ -3792,59 +4075,74 @@ class Camera:
                 )
             if old_pkt_reg is not None:
                 with suppress(GVCPError):
-                    # Restore original register value (size + flags incl.
-                    # DoNotFragment) exactly as it was before download.
                     self._gvcp.write_reg(REG_SC_PACKET_SIZE, old_pkt_reg)
                     self._gvsp._packet_data_size = (old_pkt_reg & SC_PACKET_SIZE_MASK) - 8
             self._gvsp.resend_enabled = True
             self.stop_stream()
-            gvsp_logger.setLevel(old_level)
+        return out
 
-        elapsed = time.monotonic() - t_start
-        if verbose and frames:
-            fps = len(frames) / elapsed if elapsed > 0 else 0
-            mbps = (
-                len(frames) * self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE) / elapsed / 1e6
-                if elapsed > 0
-                else 0
+    def _probe_max_packet_size(self, desired, candidates=None, sequence=0):
+        """Find the largest packet size the path actually delivers.
+
+        Streams a few buffered frames at each candidate size (largest first) and
+        returns the first that arrives complete. Verifying real frame delivery is
+        robust where a FireTestPacket probe is not: a test packet has no leader or
+        trailer, so it never assembles into a frame, which makes such a probe
+        report 1500 even on a jumbo-capable path. Requires recorded frames in the
+        selected sequence; returns 1500 when it cannot probe (e.g. empty buffer).
+
+        HARDWARE-GATED: exercises the real download path at jumbo sizes. Isolated
+        here so :meth:`buffer_download`'s jumbo decision is unit-tested with this
+        method mocked.
+        """
+        if candidates is None:
+            candidates = {1500, 4000, 8000, min(desired, 16260)}
+        try:
+            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
+            recorded = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
+            first_frame_id = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
+        except GVCPError:
+            return 1500
+        if recorded <= 0:
+            return 1500
+
+        n_probe = min(4, int(recorded))
+        for size in sorted(candidates, reverse=True):
+            if size <= 1500:
+                break
+            got = self._download_range(
+                first_frame_id,
+                n_probe,
+                packet_size=int(size),
+                bitrate_mbps=1000,
+                resend=False,
+                timeout=5,
             )
-            logger.info(
-                "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)", len(frames), elapsed, fps, mbps
-            )
-
-        if not frames:
-            return None
-        result = np.stack(frames)
-        if convert:
-            result = self._apply_calibration(result)
-        elif strip_header:
-            result = self._strip_headers(result)
-
-        if verbose:
-            self._download_diagnostics(result, n_frames)
-
-        return result
+            if len(got) == n_probe and all(
+                int(info.get("missing_packets", 1)) == 0 for _off, (_frame, info) in got.items()
+            ):
+                return int(size)
+        return 1500
 
     @staticmethod
-    def _download_diagnostics(data: np.ndarray, expected: int) -> None:
-        """Print data integrity summary after download."""
-        n = data.shape[0]
-        frame_means = data.mean(axis=tuple(range(1, data.ndim)))
-        # For calibrated (float32) data, 0.0 is a valid temperature - skip blank-frame check.
-        zero_frames = 0 if data.dtype == np.float32 else int(np.sum(frame_means == 0))
-        row_sums = data.reshape(n, data.shape[1], -1).sum(axis=2)
-        # Same rationale for zero-row check.
-        frames_with_zero_rows = (
-            0 if data.dtype == np.float32 else int(np.sum(np.any(row_sums == 0, axis=1)))
-        )
+    def _download_diagnostics(data, expected, stats):
+        """Log a data-integrity summary using authoritative drop stats.
 
+        Works for any dtype: corruption is reported from *stats*
+        (per-frame missing packets), not pixel==0 heuristics, so a
+        legitimately 0.0 degree C frame is never misflagged and a dropped
+        packet is never missed.
+        """
+        n = data.shape[0]
         issues = []
         if n < expected:
-            issues.append(f"{expected - n} frames missing")
-        if zero_frames > 0:
-            issues.append(f"{zero_frames} blank frames")
-        if frames_with_zero_rows > 0:
-            issues.append(f"{frames_with_zero_rows} frames with zero rows")
+            issues.append(f"{expected - n} frames never arrived")
+        if stats.n_incomplete > 0:
+            issues.append(
+                f"{stats.n_incomplete} incomplete frames (IDs {stats.incomplete_frame_ids[:10]})"
+            )
+        if stats.resend_failed > 0:
+            issues.append(f"{stats.resend_failed} packet resends failed")
 
         if issues:
             logger.warning("Data check: %s", ", ".join(issues))
