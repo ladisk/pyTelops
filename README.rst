@@ -30,12 +30,9 @@ Supported cameras:
 Features
 --------
 
-- **Multi-interface discovery**: finds cameras regardless of IP, including those
-  on USB-to-GigE adapters and secondary NICs
-- **Provisioning**: ``force_ip()`` re-homes a camera that came up on the wrong
-  subnet; ``tune_connection()`` finds a stable buffer-download config
-- **High-speed buffer**: record at high frame rates with integrity-checked,
-  self-recovering downloads
+- **Auto-discovery**: finds cameras on the network regardless of IP
+- **High-speed buffer**: record to the 16 GB onboard buffer at full sensor
+  speed, then download over Ethernet
 - **Live streaming**: real-time frame acquisition
 - **Subwindow**: configurable resolution for higher frame rates
 - **Diagnostics**: 13 temperature sensors, NUC trigger, timestamps, voltage/current
@@ -75,29 +72,6 @@ Documentation
 -------------
 
 Full documentation at https://pytelops.readthedocs.io.
-
-Discovery and provisioning
---------------------------
-
-``discover()`` searches all host network interfaces by default, so cameras on
-USB-to-GigE adapters and secondary NICs are found without selecting an
-interface. Each result is a dict with ``ip``, ``mac``, ``interface_ip`` (the
-host interface the camera replied on), and ``reachable`` (whether the camera
-sits on a host NIC subnet).
-
-If a camera comes up on the wrong subnet (``reachable == False``), re-home it by
-MAC with ``force_ip()``, then re-discover:
-
-.. code-block:: python
-
-   from pyTelops import discover, force_ip
-
-   cameras = discover()
-   for cam in cameras:
-       print(cam["ip"], cam["mac"], "reachable" if cam["reachable"] else "unreachable")
-
-   target = next(c for c in cameras if not c["reachable"])
-   force_ip(target, "169.254.10.50", "255.255.0.0")
 
 Streaming vs buffer
 -------------------
@@ -174,13 +148,10 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
    Downloaded 10000 frames in 36.8s (271 fps, 44.8 MB/s)
    Data check: OK - 10000 frames, range [24.9-36.2], mean 28.1
 
-``buffer_download()`` verifies frame integrity and, by default, raises
-``FrameIntegrityError`` if any frame is incomplete after recovery. Pass
-``max_dropped_frames=N`` to tolerate up to N incomplete frames and get the
-array back instead. Every call attaches ``cam.last_download_stats`` (a
-``DownloadStats`` with ``n_frames``, ``n_incomplete``, ``throughput_mbps``,
-``packet_size_used``, and more), so you can check transfer quality without
-inspecting pixels.
+If a download finishes with missing frames, ``buffer_download()`` raises
+``FrameIntegrityError`` by default. See the `documentation
+<https://pytelops.readthedocs.io/en/latest/streaming_and_buffer.html>`_ for
+tolerating drops and inspecting ``cam.last_download_stats``.
 
 External trigger
 ----------------
