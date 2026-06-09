@@ -209,20 +209,19 @@ def _is_reachable(camera_ip: str, subnets: list[tuple[str, str]]) -> bool:
 def discover(interface_ip: str = "", timeout: float = 2.0, all_vendors: bool = False) -> list[dict]:
     """Discover Telops cameras on the network.
 
-    Sends a GVCP broadcast and collects responses from GigE Vision
-    cameras. If no interface_ip is given, tries the link-local interface
-    first, then broadcasts on all interfaces.
-
-    By default only **Telops** cameras are returned -- responses from
-    other GigE Vision devices (FLIR, Basler, Allied Vision, laser
-    scanners, etc.) that happen to share the network are filtered out
-    by manufacturer string. Pass ``all_vendors=True`` to get every
-    discovered GigE Vision device regardless of vendor.
+    Sends a GVCP broadcast and collects responses from all host
+    interfaces via the protocol layer. By default only **Telops**
+    cameras are returned -- responses from other GigE Vision devices
+    (FLIR, Basler, Allied Vision, laser scanners, etc.) that happen to
+    share the network are filtered out by manufacturer string. Pass
+    ``all_vendors=True`` to get every discovered GigE Vision device
+    regardless of vendor.
 
     Parameters
     ----------
     interface_ip : str
-        Local IP to bind to (empty string = auto-detect).
+        Local IP to bind to (empty string = broadcast on all
+        interfaces).
     timeout : float
         Seconds to wait for responses.
     all_vendors : bool
@@ -233,8 +232,29 @@ def discover(interface_ip: str = "", timeout: float = 2.0, all_vendors: bool = F
     Returns
     -------
     list of dict
-        Each dict has keys: ``ip``, ``manufacturer``, ``model``,
-        ``device_version``, ``serial``, ``user_name``.
+        Each dict has keys:
+
+        ``ip``
+            IPv4 address of the camera.
+        ``manufacturer``
+            Manufacturer name string from the camera.
+        ``model``
+            Model name string from the camera.
+        ``device_version``
+            Firmware or device version string.
+        ``serial``
+            Serial number string.
+        ``user_name``
+            User-assigned name string (may be empty).
+        ``mac``
+            MAC address of the camera's network interface.
+        ``reachable``
+            True if the camera IP falls within a subnet of a host NIC,
+            False if it is on an unreachable subnet.
+        ``interface_ip``
+            IP address of the local host interface that received the
+            discovery reply from this camera. Empty string when not
+            reported by the protocol layer.
     """
     if interface_ip:
         cameras = GVCPClient.discover(interface_ip, timeout)
@@ -432,6 +452,8 @@ class Camera:
         if self._connected:
             return
 
+        discovered_interface_ip = ""
+
         # Auto-discover
         if self._camera_ip is None:
             cameras = discover(self._local_ip, self._timeout)
@@ -464,6 +486,7 @@ class Camera:
                     f"pyTelops.force_ip(...) to re-home the camera."
                 )
             self._camera_ip = chosen["ip"]
+            discovered_interface_ip = chosen.get("interface_ip") or ""
             logger.info(
                 "Discovered: %s %s at %s",
                 chosen.get("manufacturer", ""),
@@ -480,9 +503,11 @@ class Camera:
             with suppress(Exception):
                 old.disconnect()
 
-        # Auto-detect local IP if not specified
+        # Bind the local interface the camera replied on during discovery;
+        # fall back to OS routing when the reply interface is unknown
+        # (explicit camera IP, or discovery by an older protocol layer).
         if not self._local_ip:
-            self._local_ip = _find_local_ip_for(self._camera_ip)
+            self._local_ip = discovered_interface_ip or _find_local_ip_for(self._camera_ip)
 
         # GVCP connection
         self._gvcp = GVCPClient(self._camera_ip, self._local_ip, self._timeout)

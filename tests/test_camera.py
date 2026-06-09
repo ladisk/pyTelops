@@ -568,6 +568,75 @@ class TestDiscover:
             cam.connect()
 
 
+class TestConnectLocalIP:
+    """connect() binds the interface the camera replied on during discovery."""
+
+    @patch("pyTelops.camera.GVSPReceiver")
+    @patch("pyTelops.camera.GVCPClient")
+    @patch("pyTelops.camera._find_local_ip_for")
+    @patch("pyTelops.camera.discover")
+    def test_connect_binds_discovered_reply_interface(
+        self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
+    ):
+        mock_disc.return_value = [
+            {
+                "ip": "169.254.123.5",
+                "manufacturer": "Telops Inc.",
+                "model": "TS-IR",
+                "reachable": True,
+                "interface_ip": "169.254.27.140",
+            }
+        ]
+        mock_gvcp_cls.return_value.read_reg.return_value = 0  # device ready
+        cam = Camera()
+        try:
+            cam.connect()
+            assert mock_gvcp_cls.call_args[0][1] == "169.254.27.140"
+            mock_find.assert_not_called()
+        finally:
+            Camera._active_cameras.clear()
+
+    @patch("pyTelops.camera.GVSPReceiver")
+    @patch("pyTelops.camera.GVCPClient")
+    @patch("pyTelops.camera._find_local_ip_for", return_value="169.254.9.9")
+    @patch("pyTelops.camera.discover")
+    def test_connect_falls_back_when_no_interface_ip(
+        self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
+    ):
+        mock_disc.return_value = [
+            {
+                "ip": "169.254.123.5",
+                "manufacturer": "Telops Inc.",
+                "model": "TS-IR",
+                "reachable": True,
+            }
+        ]
+        mock_gvcp_cls.return_value.read_reg.return_value = 0
+        cam = Camera()
+        try:
+            cam.connect()
+            mock_find.assert_called_once_with("169.254.123.5")
+            assert mock_gvcp_cls.call_args[0][1] == "169.254.9.9"
+        finally:
+            Camera._active_cameras.clear()
+
+    @patch("pyTelops.camera.GVSPReceiver")
+    @patch("pyTelops.camera.GVCPClient")
+    @patch("pyTelops.camera._find_local_ip_for", return_value="169.254.9.9")
+    @patch("pyTelops.camera.discover")
+    def test_connect_explicit_ip_uses_find_local_ip(
+        self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
+    ):
+        mock_gvcp_cls.return_value.read_reg.return_value = 0
+        cam = Camera(ip="169.254.50.50")
+        try:
+            cam.connect()
+            mock_disc.assert_not_called()
+            mock_find.assert_called_once_with("169.254.50.50")
+        finally:
+            Camera._active_cameras.clear()
+
+
 # ============================================================
 # Hardware tests (skipped without --hardware flag)
 # ============================================================
