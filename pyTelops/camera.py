@@ -284,6 +284,17 @@ def _pace_bitrate(round_idx, base, floor=100.0, factor=0.5):
     return max(float(floor), float(base) * (factor**round_idx))
 
 
+def _learn_bitrate(first_pass_frac, current_bitrate, *, threshold=0.95, factor=0.5, floor=100.0):
+    """Next starting bitrate given the first-pass completeness of this download.
+
+    A clean first pass (>= *threshold* complete) keeps the rate; a lossy one paces
+    down geometrically toward *floor* so the next download starts gentler.
+    """
+    if first_pass_frac >= threshold:
+        return float(current_bitrate)
+    return max(float(floor), float(current_bitrate) * factor)
+
+
 def _resolve_packet_size(requested, probe_max):
     """Decide the effective GVSP packet size given a path-MTU probe result.
 
@@ -412,6 +423,11 @@ class Camera:
         self._calibration_names: dict = {}
         self.last_download_stats = None
         self.recommended_download_kwargs = {}
+        # Auto-tune: when True and no explicit packet_size/bitrate is passed,
+        # buffer_download probes jumbo once per connection and learns the
+        # bitrate from real downloads, caching both in recommended_download_kwargs.
+        self.auto_tune = True
+        self._jumbo_probed = False
         # User-set packet delay override. None = use default (force 0 on
         # start_stream for max throughput). Int = user's chosen value,
         # preserved across stream restarts.
@@ -476,6 +492,10 @@ class Camera:
         """
         if self._connected:
             return
+
+        # Fresh connection: re-probe jumbo and re-learn the bitrate (a new
+        # adapter / host may differ). Session cache lives only per connection.
+        self._reset_auto_tune_cache()
 
         # Auto-discover
         if self._camera_ip is None:
@@ -3598,14 +3618,19 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
         return self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
+    def _reset_auto_tune_cache(self) -> None:
+        """Clear the per-connection auto-tune cache (jumbo + learned bitrate)."""
+        self.recommended_download_kwargs = {}
+        self._jumbo_probed = False
+
     def buffer_download(
         self,
         sequence: int = 0,
         start_frame: int | None = None,
         n_frames: int = 0,
         timeout: float = 0,
-        bitrate_mbps: float = 1000.0,
-        packet_size: int = 1500,
+        bitrate_mbps: float | None = None,
+        packet_size: int | None = None,
         strip_header: bool = True,
         convert: bool = True,
         verbose: bool = True,
@@ -3644,17 +3669,21 @@ class Camera:
             Per-pass timeout in seconds. ``0`` (default) auto-sizes each
             streaming pass from its frame count (1.5x the expected transfer
             time, minimum 10 s).
-        bitrate_mbps : float, optional
+        bitrate_mbps : float or None, optional
             Maximum download bitrate in Mbit/s written to the camera's
-            ``REG_DOWNLOAD_BITRATE_MAX`` register.  Default 1000.0.
-            Reduce to around 300 when network contention is a concern.
-        packet_size : int, optional
-            GVSP UDP payload size in bytes.  Default 1500 (standard Ethernet
-            MTU).  Values above 1500 require jumbo-frame support end-to-end
-            (NIC, switches, and OS all configured for MTU >= packet_size).
-            Most USB-to-GigE adapters do NOT support jumbo frames.  When a
-            larger size is requested but the path cannot carry it, the driver
-            warns and falls back to 1500 rather than silently corrupting data.
+            ``REG_DOWNLOAD_BITRATE_MAX`` register. ``None`` (default)
+            auto-resolves: a value learned from earlier downloads this
+            connection (lowered after drops) when :attr:`auto_tune` is on,
+            otherwise 1000.0. Pass a number to override (e.g. 300 to ease
+            network contention) and disable learning for this call.
+        packet_size : int or None, optional
+            GVSP UDP payload size in bytes. ``None`` (default) auto-resolves:
+            with :attr:`auto_tune` on, the largest size the path delivers is
+            probed once per connection (jumbo when supported, else 1500) and
+            cached; otherwise 1500. Pass a value to override. Sizes above 1500
+            need jumbo-frame support end-to-end (NIC/switches/OS MTU >=
+            packet_size); when the path cannot carry the requested size the
+            driver warns and falls back to 1500 rather than corrupting data.
         strip_header : bool, optional
             Strip the two Telops metadata rows from each frame.  Default
             ``True``.  Ignored when *convert* is ``True`` (stripping is
@@ -3723,12 +3752,6 @@ class Camera:
         if hasattr(self._gvsp, "reset_resend_stats"):
             self._gvsp.reset_resend_stats()
 
-        if packet_size > 1500:
-            probe_max = self._probe_max_packet_size(packet_size)
-            packet_size, pkt_warn = _resolve_packet_size(packet_size, probe_max)
-            if pkt_warn:
-                logger.warning(pkt_warn)
-
         # Select sequence and get info
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
 
@@ -3743,6 +3766,29 @@ class Camera:
         first_frame_id = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
         if start_frame is None:
             start_frame = first_frame_id
+
+        # Resolve packet_size and bitrate: explicit arg > session cache > auto/default.
+        explicit_bitrate = bitrate_mbps is not None
+        if packet_size is None:
+            cached_ps = self.recommended_download_kwargs.get("packet_size")
+            if cached_ps is not None:
+                packet_size = int(cached_ps)
+            elif self.auto_tune:
+                packet_size = self._probe_max_packet_size(9000)
+                self._jumbo_probed = True
+                self.recommended_download_kwargs["packet_size"] = packet_size
+                if verbose and packet_size > 1500:
+                    logger.info("Auto-selected jumbo packet_size=%d", packet_size)
+            else:
+                packet_size = 1500
+        elif packet_size > 1500:
+            probe_max = self._probe_max_packet_size(packet_size)
+            packet_size, pkt_warn = _resolve_packet_size(packet_size, probe_max)
+            if pkt_warn:
+                logger.warning(pkt_warn)
+        if bitrate_mbps is None:
+            cached_br = self.recommended_download_kwargs.get("bitrate_mbps")
+            bitrate_mbps = float(cached_br) if cached_br is not None else 1000.0
 
         # Set up progress bar
         pbar = None
@@ -3761,6 +3807,7 @@ class Camera:
         by_pos: dict[int, tuple] = {}  # position -> (frame, info), complete only
         complete: set[int] = set()
         recovered_by_retry = 0
+        first_pass_n_complete = 0
         t_start = time.monotonic()
         try:
             round_idx = 0
@@ -3792,6 +3839,8 @@ class Camera:
                     if pbar:
                         pbar.n = len(complete)
                         pbar.refresh()
+                if round_idx == 0:
+                    first_pass_n_complete = len(complete)
                 round_idx += 1
         finally:
             if pbar:
@@ -3817,6 +3866,7 @@ class Camera:
             resend_recovered=int(resend_stats.get("recovered", 0)),
             resend_failed=int(resend_stats.get("failed", 0)),
             recovered_by_retry=recovered_by_retry,
+            first_pass_n_complete=first_pass_n_complete,
             elapsed_s=elapsed,
             packet_size_used=packet_size,
             bitrate_used=bitrate_mbps,
@@ -3824,6 +3874,14 @@ class Camera:
         if payload is not None and elapsed > 0:
             stats.throughput_mbps = n_complete * payload / elapsed / 1e6
         self.last_download_stats = stats
+
+        # Learn the starting bitrate from this download's first pass (auto only).
+        if self.auto_tune and not explicit_bitrate and n_frames > 0:
+            frac = stats.first_pass_n_complete / n_frames
+            learned = _learn_bitrate(frac, bitrate_mbps)
+            if verbose and learned != bitrate_mbps:
+                logger.info("Lowered learned bitrate to %.0f after first-pass drops", learned)
+            self.recommended_download_kwargs["bitrate_mbps"] = learned
 
         if verbose and n_complete:
             fps = n_complete / elapsed if elapsed > 0 else 0

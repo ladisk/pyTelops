@@ -21,6 +21,7 @@ class DownloadStats:
     resend_recovered: int = 0
     resend_failed: int = 0
     recovered_by_retry: int = 0
+    first_pass_n_complete: int = 0
     throughput_mbps: float = 0.0
     elapsed_s: float = 0.0
     packet_size_used: int = 1500

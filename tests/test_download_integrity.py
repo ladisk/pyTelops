@@ -8,11 +8,43 @@ from pyTelops import registers as reg
 from pyTelops.camera import (
     Camera,
     _group_contiguous,
+    _learn_bitrate,
     _missing_positions,
     _pace_bitrate,
     _resolve_packet_size,
 )
 from pyTelops.errors import DownloadStats, FrameIntegrityError
+
+
+def test_download_stats_has_first_pass_field():
+    s = DownloadStats(n_frames=5)
+    assert s.first_pass_n_complete == 0
+
+
+class TestLearnBitrate:
+    def test_clean_first_pass_keeps_bitrate(self):
+        assert _learn_bitrate(1.0, 1000) == 1000.0
+
+    def test_lossy_first_pass_halves(self):
+        assert _learn_bitrate(0.5, 1000) == 500.0
+
+    def test_clamped_to_floor(self):
+        assert _learn_bitrate(0.0, 150, floor=100.0) == 100.0
+
+
+def test_camera_auto_tune_defaults_on():
+    cam = Camera()
+    assert cam.auto_tune is True
+    assert cam._jumbo_probed is False
+
+
+def test_reset_auto_tune_cache_clears_state():
+    cam = Camera()
+    cam.recommended_download_kwargs = {"packet_size": 9000, "bitrate_mbps": 250}
+    cam._jumbo_probed = True
+    cam._reset_auto_tune_cache()
+    assert cam.recommended_download_kwargs == {}
+    assert cam._jumbo_probed is False
 
 
 class TestMissingPositions:
@@ -331,6 +363,106 @@ def test_buffer_download_falls_back_when_jumbo_unsupported(caplog):
         )
     assert cam.last_download_stats.packet_size_used == 1500
     assert any("1500" in r.message for r in caplog.records)
+
+
+def test_buffer_download_explicit_packet_size_overrides_cache():
+    cam = _fake_cam_for_download()
+    cam.recommended_download_kwargs = {"packet_size": 9000}
+    seen = {}
+
+    def dr(frame_id, count, *, packet_size, **kw):
+        seen["ps"] = packet_size
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    cam.buffer_download(
+        n_frames=2, packet_size=1500, convert=False, strip_header=False, verbose=False
+    )
+    assert seen["ps"] == 1500
+
+
+def test_buffer_download_uses_cached_packet_size_and_bitrate():
+    cam = _fake_cam_for_download()
+    cam.recommended_download_kwargs = {"packet_size": 9000, "bitrate_mbps": 250}
+    seen = {}
+
+    def dr(frame_id, count, *, packet_size, bitrate_mbps, **kw):
+        seen["ps"], seen["br"] = packet_size, bitrate_mbps
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False)
+    assert seen["ps"] == 9000
+    assert seen["br"] == 250
+
+
+def test_buffer_download_auto_tune_off_uses_defaults():
+    cam = _fake_cam_for_download()
+    cam.auto_tune = False
+    seen = {}
+
+    def dr(frame_id, count, *, packet_size, bitrate_mbps, **kw):
+        seen["ps"], seen["br"] = packet_size, bitrate_mbps
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    cam._probe_max_packet_size = MagicMock()
+    cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False)
+    assert seen["ps"] == 1500
+    assert seen["br"] == 1000.0
+    cam._probe_max_packet_size.assert_not_called()
+
+
+def test_buffer_download_probes_jumbo_once_then_caches():
+    cam = _fake_cam_for_download()
+    cam._probe_max_packet_size = MagicMock(return_value=9000)
+    cam._download_range = MagicMock(side_effect=_complete_range)
+    cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False)
+    cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False)
+    cam._probe_max_packet_size.assert_called_once()  # second call uses the cache
+    assert cam.recommended_download_kwargs["packet_size"] == 9000
+
+
+def test_buffer_download_records_first_pass_complete():
+    cam = _fake_cam_for_download()
+
+    def dr(frame_id, count, **kw):
+        if frame_id == 0 and count == 4:  # first pass: 3 of 4 arrive
+            return {off: (np.ones((4, 4), np.uint16), {"missing_packets": 0}) for off in (0, 1, 3)}
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    cam.buffer_download(n_frames=4, convert=False, strip_header=False, verbose=False)
+    assert cam.last_download_stats.first_pass_n_complete == 3
+    assert cam.last_download_stats.n_incomplete == 0
+
+
+def test_buffer_download_lowers_learned_bitrate_after_drops():
+    cam = _fake_cam_for_download()
+
+    def dr(frame_id, count, **kw):
+        if frame_id == 0 and count == 10:  # first pass: only half arrive
+            return {off: (np.ones((4, 4), np.uint16), {"missing_packets": 0}) for off in range(5)}
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    cam.buffer_download(n_frames=10, convert=False, strip_header=False, verbose=False)
+    assert cam.recommended_download_kwargs["bitrate_mbps"] == 500.0  # 1000 halved
+
+
+def test_buffer_download_explicit_bitrate_not_learned():
+    cam = _fake_cam_for_download()
+
+    def dr(frame_id, count, **kw):
+        if frame_id == 0 and count == 10:
+            return {off: (np.ones((4, 4), np.uint16), {"missing_packets": 0}) for off in range(5)}
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    cam.buffer_download(
+        n_frames=10, bitrate_mbps=1000, convert=False, strip_header=False, verbose=False
+    )
+    assert "bitrate_mbps" not in cam.recommended_download_kwargs
 
 
 def test_public_exports():
