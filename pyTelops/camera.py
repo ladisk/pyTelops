@@ -248,60 +248,41 @@ def _find_local_ip_for(camera_ip: str) -> str:
         s.close()
 
 
-def _build_integrity_report(per_frame_info, resend_stats, n_requested):
-    """Build a :class:`DownloadStats` from per-frame GVSP info.
+def _missing_positions(n, complete):
+    """Return the positions in ``range(n)`` not present in *complete*, ascending.
 
-    Parameters
-    ----------
-    per_frame_info : list of (int, dict)
-        ``(frame_index, info)`` pairs; ``info`` carries ``block_id`` and
-        ``missing_packets`` (an int count).
-    resend_stats : dict
-        ``GVSPReceiver._resend_stats`` snapshot.
-    n_requested : int
-        Number of frames originally requested (to detect frames that never
-        arrived at all).
-
-    Notes
-    -----
-    ``n_incomplete`` counts every frame that is not perfectly intact: both
-    arrived-but-partial frames and frames that never arrived
-    (``n_requested - n_arrived``). ``incomplete_frame_ids`` lists only the
-    arrived-but-partial subset (the frames that can be retried by block ID),
-    so ``n_incomplete >= len(incomplete_frame_ids)``.
+    Covers both never-arrived frames and arrived-but-incomplete ones (anything
+    not yet confirmed complete is treated as still missing).
     """
-    per_frame_missing = {}
-    incomplete_ids = []
-    for _idx, info in per_frame_info:
-        missing = int(info.get("missing_packets", 0))
-        if missing > 0:
-            bid = int(info.get("block_id", _idx))
-            per_frame_missing[bid] = missing
-            incomplete_ids.append(bid)
-
-    n_arrived = len(per_frame_info)
-    never_arrived = max(0, n_requested - n_arrived)
-    n_incomplete = len(incomplete_ids) + never_arrived
-
-    return DownloadStats(
-        n_frames=n_arrived,
-        n_incomplete=n_incomplete,
-        incomplete_frame_ids=incomplete_ids,
-        per_frame_missing=per_frame_missing,
-        resend_requested=int(resend_stats.get("requested", 0)),
-        resend_recovered=int(resend_stats.get("recovered", 0)),
-        resend_failed=int(resend_stats.get("failed", 0)),
-    )
+    return [k for k in range(n) if k not in complete]
 
 
-def _plan_frame_retries(incomplete_ids, already_retried, max_batch=64):
-    """Return the next batch of frame IDs to re-download.
+def _group_contiguous(positions):
+    """Group integers into ``(first, last)`` contiguous runs (input sorted here).
 
-    Dedupes, drops anything already retried, sorts ascending, caps at
-    *max_batch*.
+    Used to turn a set of missing frame positions into the fewest contiguous
+    ranges so each can be re-streamed in a single acquisition.
     """
-    fresh = sorted({int(i) for i in incomplete_ids} - set(already_retried))
-    return fresh[:max_batch]
+    runs = []
+    for p in sorted(positions):
+        if runs and p == runs[-1][1] + 1:
+            runs[-1] = (runs[-1][0], p)
+        else:
+            runs.append((p, p))
+    return runs
+
+
+def _pace_bitrate(round_idx, base, floor=100.0, factor=0.5):
+    """Bitrate (Mbit/s) for recovery *round_idx*.
+
+    Round 0 (the first full pass) uses *base*; each later round halves the rate
+    geometrically toward *floor*, so re-downloads of dropped frames pace slower
+    than the first pass and converge instead of re-colliding with the same
+    congestion.
+    """
+    if round_idx <= 0:
+        return float(base)
+    return max(float(floor), float(base) * (factor**round_idx))
 
 
 def _resolve_packet_size(requested, probe_max):
@@ -3627,7 +3608,7 @@ class Camera:
         convert: bool = True,
         verbose: bool = True,
         max_dropped_frames: int = 0,
-        retries: int = 2,
+        retries: int = 6,
         resend: bool = False,
     ) -> np.ndarray | None:
         """Download frames from the internal memory buffer over Ethernet.
@@ -3658,9 +3639,9 @@ class Camera:
             Number of frames to download.  ``0`` (default) downloads all
             recorded frames in the slot.
         timeout : float, optional
-            Total download timeout in seconds.  ``0`` (default) uses an
-            auto-calculated value based on frame count (1.5x the expected
-            transfer time, minimum 10 s).
+            Per-pass timeout in seconds. ``0`` (default) auto-sizes each
+            streaming pass from its frame count (1.5x the expected transfer
+            time, minimum 10 s).
         bitrate_mbps : float, optional
             Maximum download bitrate in Mbit/s written to the camera's
             ``REG_DOWNLOAD_BITRATE_MAX`` register.  Default 1000.0.
@@ -3688,9 +3669,11 @@ class Camera:
             dropped or never-arrived frame).  Pass a higher value or a large
             number to accept partial data.
         retries : int, optional
-            Number of frame-level re-download passes for stragglers.  Default
-            2.  (Wired in a later change; accepted here for forward
-            compatibility.)
+            Maximum number of paced recovery rounds. After the first pass, any
+            still-missing frames (never-arrived or incomplete) are re-streamed
+            at a lower bitrate, repeating until the download is complete or this
+            many rounds are spent. Frames persist in the camera buffer, so
+            recovery converges. Default 6. Set to 0 for a single pass only.
         resend : bool, optional
             Enable GVSP packet resends during the stream. Default ``False``.
             Resends help on a lossy link with spare bandwidth, but during a
@@ -3759,9 +3742,6 @@ class Camera:
         if start_frame is None:
             start_frame = first_frame_id
 
-        if timeout <= 0:
-            timeout = max(n_frames / 200.0 * 1.5 + 5.0, 10.0)
-
         # Set up progress bar
         pbar = None
         if verbose:
@@ -3769,18 +3749,148 @@ class Camera:
 
             pbar = tqdm(total=n_frames, unit="frame", desc="Downloading")
 
-        # Ensure acquisition is stopped before configuring download
+        # Adaptive recovery. Each frame's buffer ID is start_frame + position;
+        # the GVSP block id restarts at 1 per stream session, so within one
+        # re-streamed range, position-in-range = block_id - 1 (robust to drops).
+        # Round 0 streams the whole range; later rounds re-stream only the
+        # still-missing positions (never-arrived AND incomplete) at a paced
+        # lower bitrate, until complete or `retries` rounds are spent. Frames
+        # persist in the camera buffer, so this converges.
+        by_pos: dict[int, tuple] = {}  # position -> (frame, info), complete only
+        complete: set[int] = set()
+        recovered_by_retry = 0
+        t_start = time.monotonic()
+        try:
+            round_idx = 0
+            while True:
+                missing = _missing_positions(n_frames, complete)
+                if not missing or round_idx > retries:
+                    break
+                round_bitrate = _pace_bitrate(round_idx, bitrate_mbps)
+                for lo, hi in _group_contiguous(missing):
+                    got = self._download_range(
+                        start_frame + lo,
+                        hi - lo + 1,
+                        packet_size=packet_size,
+                        bitrate_mbps=round_bitrate,
+                        resend=resend,
+                        timeout=timeout,
+                    )
+                    for offset, (frame, info) in got.items():
+                        pos = lo + offset
+                        if (
+                            0 <= pos < n_frames
+                            and pos not in complete
+                            and int(info.get("missing_packets", 1)) == 0
+                        ):
+                            complete.add(pos)
+                            by_pos[pos] = (frame, info)
+                            if round_idx > 0:
+                                recovered_by_retry += 1
+                    if pbar:
+                        pbar.n = len(complete)
+                        pbar.refresh()
+                round_idx += 1
+        finally:
+            if pbar:
+                pbar.close()
+        elapsed = time.monotonic() - t_start
+
+        n_complete = len(complete)
+        missing_after = _missing_positions(n_frames, complete)
+
+        resend_stats = getattr(
+            self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
+        )
+        # Read the payload-size register at most once (skip when nothing landed).
+        payload = None
+        if n_complete and elapsed > 0:
+            payload = self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE)
+
+        stats = DownloadStats(
+            n_frames=n_complete,
+            n_incomplete=len(missing_after),
+            incomplete_frame_ids=[start_frame + k for k in missing_after],
+            resend_requested=int(resend_stats.get("requested", 0)),
+            resend_recovered=int(resend_stats.get("recovered", 0)),
+            resend_failed=int(resend_stats.get("failed", 0)),
+            recovered_by_retry=recovered_by_retry,
+            elapsed_s=elapsed,
+            packet_size_used=packet_size,
+            bitrate_used=bitrate_mbps,
+        )
+        if payload is not None and elapsed > 0:
+            stats.throughput_mbps = n_complete * payload / elapsed / 1e6
+        self.last_download_stats = stats
+
+        if verbose and n_complete:
+            fps = n_complete / elapsed if elapsed > 0 else 0
+            logger.info(
+                "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)",
+                n_complete,
+                elapsed,
+                fps,
+                stats.throughput_mbps,
+            )
+
+        if n_complete == 0:
+            return None
+
+        if stats.n_incomplete > max_dropped_frames:
+            raise FrameIntegrityError(
+                f"{stats.n_incomplete} of {n_frames} frames could not be recovered "
+                f"after {retries} paced retry rounds (missing frame IDs: "
+                f"{stats.incomplete_frame_ids[:20]}). Pass max_dropped_frames=N to "
+                f"tolerate gaps, lower bitrate_mbps, or run tune_connection().",
+                stats=stats,
+            )
+
+        # Assemble in frame order. Under drops + recovery, arrival order is not
+        # frame order, so order by position.
+        result = np.stack([by_pos[k][0] for k in sorted(by_pos)])
+        if convert:
+            result = self._apply_calibration(result)
+        elif strip_header:
+            result = self._strip_headers(result)
+        if verbose:
+            self._download_diagnostics(result, n_frames, stats)
+        return result
+
+    def _download_range(self, frame_id, count, *, packet_size, bitrate_mbps, resend, timeout):
+        """Stream ``count`` consecutive buffer frames from ``frame_id`` in one pass.
+
+        Runs a single fresh stream session for the contiguous range and returns
+        ``{offset: (frame, info)}`` for arrived frames, where ``offset`` is the
+        0-based index within the range. The GVSP block id restarts at 1 each
+        stream session and is assigned sequentially as the camera sends, so
+        ``offset = block_id - 1`` holds even when frames inside the range are
+        dropped. Frames persist in the camera buffer until :meth:`buffer_clear`,
+        so the same range can be re-streamed to recover drops.
+
+        Handles the full download choreography (download mode before the locked
+        registers, bitrate cap, packet size / DoNotFragment for jumbo frames)
+        and restores every touched register on exit.
+
+        HARDWARE-GATED: the re-stream register sequence and the block-id->offset
+        mapping are validated against the camera by the dropped-frame benchmark.
+        Isolated here so :meth:`buffer_download`'s adaptive loop is unit-tested
+        with this method mocked.
+        """
+        if count <= 0:
+            return {}
+        if timeout <= 0:
+            timeout = max(count / 200.0 * 1.5 + 5.0, 10.0)
+
+        # Ensure acquisition is stopped before configuring download.
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         time.sleep(0.2)
 
-        # Configure download - mode MUST be set before other registers
-        # (they are locked when mode == OFF)
+        # Mode MUST be set before the other registers (locked when mode == OFF).
         self._gvcp.write_reg(
             reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE, reg.MemoryBufferDownloadMode.SEQUENCE
         )
 
-        # Increase download bitrate (register unlocked now that mode != OFF)
         old_bitrate = None
         try:
             old_bitrate = self._gvcp.read_float(reg.REG_DOWNLOAD_BITRATE_MAX)
@@ -3789,59 +3899,43 @@ class Camera:
         except GVCPError:
             pass
 
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, start_frame)
-        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, n_frames)
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, frame_id)
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, count)
 
-        # Start streaming
         self.start_stream()
         self._gvsp.resend_enabled = resend
 
-        # Override packet size for download (larger = faster).
-        # When using packet_size > 1500 (e.g. 9000), UDP packets will be
-        # IP-fragmented by the camera.  If GevSCPSDoNotFragment (bit 1)
-        # is set, the camera/NIC drops oversized packets instead of
-        # fragmenting them, causing complete data loss.  We clear the
-        # flag when using large packets and restore the original register
-        # value afterwards.
+        # Larger packets are IP-fragmented by the camera; clear DoNotFragment so
+        # the path does not drop them, and restore the register afterwards.
         old_pkt_reg = None
         if packet_size != 1500:
             old_pkt_reg = self._gvcp.read_reg(REG_SC_PACKET_SIZE)
-            upper_flags = old_pkt_reg & 0xFFFF0000
-            new_pkt_reg = upper_flags | (packet_size & SC_PACKET_SIZE_MASK)
+            new_pkt_reg = (old_pkt_reg & 0xFFFF0000) | (packet_size & SC_PACKET_SIZE_MASK)
             if packet_size > 1500:
-                # Allow IP fragmentation for large packets
                 new_pkt_reg &= ~SC_SCPS_DO_NOT_FRAGMENT
             self._gvcp.write_reg(REG_SC_PACKET_SIZE, new_pkt_reg)
             self._gvsp._packet_data_size = packet_size - 8
 
-        # Start download stream
         self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
 
-        # Collect frames
-        frames = []
-        per_frame_info = []
-        t_start = time.monotonic()
+        out = {}
         deadline = time.monotonic() + timeout
-
+        stall_deadline = time.monotonic() + 10.0
         try:
-            stall_deadline = time.monotonic() + 10.0
-            for idx in range(n_frames):
+            for _ in range(count):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
                 result = self._gvsp.get_frame_with_info(timeout=min(remaining, 5.0))
                 if result is not None:
                     frame, info = result
-                    frames.append(frame)
-                    per_frame_info.append((idx, info))
+                    offset = int(info.get("block_id", 0)) - 1
+                    if 0 <= offset < count:
+                        out[offset] = (frame, info)
                     stall_deadline = time.monotonic() + 10.0
-                    if pbar:
-                        pbar.update(1)
                 elif time.monotonic() > stall_deadline:
                     break  # no frames for 10s - stream is dead
         finally:
-            if pbar:
-                pbar.close()
             with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
             time.sleep(0.2)
@@ -3854,130 +3948,10 @@ class Camera:
                 )
             if old_pkt_reg is not None:
                 with suppress(GVCPError):
-                    # Restore original register value (size + flags incl.
-                    # DoNotFragment) exactly as it was before download.
                     self._gvcp.write_reg(REG_SC_PACKET_SIZE, old_pkt_reg)
                     self._gvsp._packet_data_size = (old_pkt_reg & SC_PACKET_SIZE_MASK) - 8
             self._gvsp.resend_enabled = True
             self.stop_stream()
-
-        elapsed = time.monotonic() - t_start
-        # Read the payload-size register at most once; both the verbose summary
-        # and the stats throughput reuse it. Skip the read entirely when there
-        # is nothing to report (no frames or zero elapsed) so the empty path
-        # does not issue an extra register read.
-        payload = None
-        if frames and elapsed > 0:
-            payload = self._gvcp.read_reg(reg.REG_PAYLOAD_SIZE)
-        if verbose and frames:
-            fps = len(frames) / elapsed if elapsed > 0 else 0
-            mbps = len(frames) * payload / elapsed / 1e6 if payload is not None else 0
-            logger.info(
-                "Downloaded %d frames in %.1fs (%d fps, %.1f MB/s)",
-                len(frames),
-                elapsed,
-                fps,
-                mbps,
-            )
-
-        # Frame-level retry: re-request incomplete frames from the camera
-        # buffer (frames persist until buffer_clear). Replace them in place.
-        recovered = 0
-        if retries > 0 and frames:
-            id_to_pos = {
-                info.get("block_id", idx): pos for pos, (idx, info) in enumerate(per_frame_info)
-            }
-            already_retried = set()
-            for _ in range(retries):
-                interim = _build_integrity_report(
-                    per_frame_info,
-                    {"requested": 0, "recovered": 0, "failed": 0},
-                    n_requested=n_frames,
-                )
-                todo = _plan_frame_retries(interim.incomplete_frame_ids, already_retried)
-                if not todo:
-                    break
-                already_retried.update(todo)
-                fixed = self._redownload_frames(todo, packet_size)
-                for fid, res in fixed.items():
-                    if res is None:
-                        continue
-                    frame, info = res
-                    if int(info.get("missing_packets", 1)) == 0 and fid in id_to_pos:
-                        pos = id_to_pos[fid]
-                        frames[pos] = frame
-                        per_frame_info[pos] = (per_frame_info[pos][0], info)
-                        recovered += 1
-
-        resend_stats = getattr(
-            self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
-        )
-        stats = _build_integrity_report(per_frame_info, resend_stats, n_requested=n_frames)
-        stats.elapsed_s = elapsed
-        stats.packet_size_used = packet_size
-        stats.bitrate_used = bitrate_mbps
-        if payload is not None:
-            stats.throughput_mbps = len(frames) * payload / elapsed / 1e6
-        stats.recovered_by_retry = recovered
-        self.last_download_stats = stats
-
-        if not frames:
-            return None
-
-        if stats.n_incomplete > max_dropped_frames:
-            raise FrameIntegrityError(
-                f"{stats.n_incomplete} of {n_frames} frames incomplete "
-                f"(incomplete IDs: {stats.incomplete_frame_ids[:20]}). "
-                f"Pass max_dropped_frames=N to tolerate drops, or run "
-                f"tune_connection() to find stabler settings.",
-                stats=stats,
-            )
-
-        result = np.stack(frames)
-        if convert:
-            result = self._apply_calibration(result)
-        elif strip_header:
-            result = self._strip_headers(result)
-        if verbose:
-            self._download_diagnostics(result, n_frames, stats)
-        return result
-
-    def _redownload_frames(self, frame_ids, packet_size):
-        """Re-request specific buffer frame IDs one at a time.
-
-        Returns ``{frame_id: (frame, info) or None}``. Frames persist in the
-        camera's memory buffer until :meth:`buffer_clear`, so this re-fetches
-        the same content. Used by :meth:`buffer_download`'s retry loop.
-
-        HARDWARE-GATED: the exact register sequence to re-stream a single
-        buffered frame must be confirmed against the camera; validated by the
-        repro_dropped_frames benchmark script. Self-manages its own stream and
-        download mode so the GVSP receiver is alive during the re-requests.
-        Isolated here so the retry loop is unit-tested with this method mocked.
-        """
-        out = {}
-        with suppress(GVCPError):
-            self._gvcp.write_reg(
-                reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
-                reg.MemoryBufferDownloadMode.SEQUENCE,
-            )
-        self.start_stream()
-        try:
-            for fid in frame_ids:
-                with suppress(GVCPError):
-                    self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, fid)
-                    self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, 1)
-                    self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
-                out[fid] = self._gvsp.get_frame_with_info(timeout=2.0)
-                with suppress(GVCPError):
-                    self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-        finally:
-            self.stop_stream()
-            with suppress(GVCPError):
-                self._gvcp.write_reg(
-                    reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE,
-                    reg.MemoryBufferDownloadMode.OFF,
-                )
         return out
 
     def _probe_max_packet_size(self, desired, candidates=None):

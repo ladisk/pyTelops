@@ -6,11 +6,46 @@ import pytest
 
 from pyTelops.camera import (
     Camera,
-    _build_integrity_report,
-    _plan_frame_retries,
+    _group_contiguous,
+    _missing_positions,
+    _pace_bitrate,
     _resolve_packet_size,
 )
 from pyTelops.errors import DownloadStats, FrameIntegrityError
+
+
+class TestMissingPositions:
+    def test_covers_never_arrived_and_partial(self):
+        assert _missing_positions(5, {0, 2, 4}) == [1, 3]
+
+    def test_none_missing(self):
+        assert _missing_positions(3, {0, 1, 2}) == []
+
+    def test_all_missing(self):
+        assert _missing_positions(3, set()) == [0, 1, 2]
+
+
+class TestGroupContiguous:
+    def test_runs(self):
+        assert _group_contiguous([1, 2, 3, 5, 8, 9]) == [(1, 3), (5, 5), (8, 9)]
+
+    def test_empty(self):
+        assert _group_contiguous([]) == []
+
+    def test_unsorted_input(self):
+        assert _group_contiguous([9, 1, 8, 2]) == [(1, 2), (8, 9)]
+
+
+class TestPaceBitrate:
+    def test_round0_is_base(self):
+        assert _pace_bitrate(0, 1000) == 1000.0
+
+    def test_halves_each_round(self):
+        assert _pace_bitrate(1, 1000) == 500.0
+        assert _pace_bitrate(2, 1000) == 250.0
+
+    def test_clamped_to_floor(self):
+        assert _pace_bitrate(10, 1000, floor=100.0) == 100.0
 
 
 def test_download_stats_defaults():
@@ -27,61 +62,6 @@ def test_frame_integrity_error_carries_stats():
     err = FrameIntegrityError("boom", stats=s)
     assert err.stats is s
     assert "boom" in str(err)
-
-
-def test_build_integrity_report_all_perfect():
-    info = [(i, {"block_id": 100 + i, "missing_packets": 0}) for i in range(5)]
-    stats = _build_integrity_report(
-        per_frame_info=info,
-        resend_stats={"requested": 0, "recovered": 0, "failed": 0},
-        n_requested=5,
-    )
-    assert stats.n_frames == 5
-    assert stats.n_incomplete == 0
-    assert stats.incomplete_frame_ids == []
-    assert stats.per_frame_missing == {}
-
-
-def test_build_integrity_report_flags_incomplete():
-    info = [
-        (0, {"block_id": 100, "missing_packets": 0}),
-        (1, {"block_id": 101, "missing_packets": 4}),
-        (2, {"block_id": 102, "missing_packets": 0}),
-        (3, {"block_id": 103, "missing_packets": 1}),
-    ]
-    stats = _build_integrity_report(
-        per_frame_info=info,
-        resend_stats={"requested": 12, "recovered": 7, "failed": 5},
-        n_requested=5,
-    )
-    assert stats.n_frames == 4
-    assert sorted(stats.incomplete_frame_ids) == [101, 103]
-    assert stats.per_frame_missing == {101: 4, 103: 1}
-    # 4 frames arrived, 5 requested -> 1 never arrived. n_incomplete counts
-    # both arrived-but-partial (2) AND never-arrived (1) = 3; incomplete_frame_ids
-    # lists only the retryable arrived-partial subset.
-    assert stats.n_incomplete == 3
-    assert stats.resend_requested == 12
-    assert stats.resend_recovered == 7
-    assert stats.resend_failed == 5
-
-
-def test_plan_frame_retries_basic():
-    assert _plan_frame_retries([103, 101, 101], already_retried=set()) == [101, 103]
-
-
-def test_plan_frame_retries_excludes_already_retried():
-    assert _plan_frame_retries([101, 103, 105], already_retried={101}) == [103, 105]
-
-
-def test_plan_frame_retries_empty():
-    assert _plan_frame_retries([], already_retried=set()) == []
-
-
-def test_plan_frame_retries_caps_batch():
-    ids = list(range(200, 260))
-    out = _plan_frame_retries(ids, already_retried=set(), max_batch=16)
-    assert out == list(range(200, 216))
 
 
 def test_resolve_packet_size_standard_passes_through():
@@ -125,82 +105,127 @@ def _fake_cam_for_download():
     return cam
 
 
-def _frame(missing, bid):
-    return (np.ones((4, 4), dtype=np.uint16), {"block_id": bid, "missing_packets": missing})
+def _complete_range(frame_id, count, **kwargs):
+    """A ``_download_range`` mock where every position arrives complete.
+
+    Each frame's pixel value is set to its global frame id (``frame_id + off``)
+    so the assembled array's ordering can be asserted.
+    """
+    return {
+        off: (np.full((4, 4), frame_id + off, dtype=np.uint16), {"missing_packets": 0})
+        for off in range(count)
+    }
 
 
-def test_buffer_download_raises_on_incomplete_by_default():
+def test_buffer_download_clean_returns_all_in_order():
     cam = _fake_cam_for_download()
-    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(3, 1), None]
+    cam._download_range = MagicMock(side_effect=_complete_range)
+    out = cam.buffer_download(n_frames=3, convert=False, strip_header=False, verbose=False)
+    assert out.shape[0] == 3
+    assert [int(out[i, 0, 0]) for i in range(3)] == [0, 1, 2]
+    assert cam.last_download_stats.n_incomplete == 0
+
+
+def test_buffer_download_recovers_never_arrived_in_order():
+    cam = _fake_cam_for_download()
+    calls = []
+
+    def dr(frame_id, count, **kw):
+        calls.append((frame_id, count, kw["bitrate_mbps"]))
+        if frame_id == 0 and count == 5:
+            # First pass: positions 1 and 3 never arrive.
+            return {
+                off: (np.full((4, 4), off, np.uint16), {"missing_packets": 0}) for off in (0, 2, 4)
+            }
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    out = cam.buffer_download(n_frames=5, convert=False, strip_header=False, verbose=False)
+    assert out.shape[0] == 5
+    # Never-arrived frames recovered AND placed at the right positions.
+    assert [int(out[i, 0, 0]) for i in range(5)] == [0, 1, 2, 3, 4]
+    assert cam.last_download_stats.n_incomplete == 0
+    assert cam.last_download_stats.recovered_by_retry == 2
+    assert calls[0][2] == 1000.0  # first pass at base bitrate
+    assert calls[1][2] == 500.0  # recovery round paced lower
+
+
+def test_buffer_download_raises_when_unrecoverable():
+    cam = _fake_cam_for_download()
+
+    def dr(frame_id, count, **kw):
+        if frame_id == 0 and count == 4:
+            return {off: (np.ones((4, 4), np.uint16), {"missing_packets": 0}) for off in (0, 1, 3)}
+        return {}  # position 2 can never be recovered
+
+    cam._download_range = MagicMock(side_effect=dr)
     with pytest.raises(FrameIntegrityError):
-        cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False, retries=0)
-    assert cam.last_download_stats is not None
-    assert cam.last_download_stats.n_incomplete >= 1
+        cam.buffer_download(n_frames=4, retries=2, convert=False, strip_header=False, verbose=False)
+    assert cam.last_download_stats.n_incomplete == 1
+    assert cam.last_download_stats.incomplete_frame_ids == [2]  # start_frame 0 + position 2
 
 
 def test_buffer_download_tolerates_when_allowed():
     cam = _fake_cam_for_download()
-    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(3, 1), None]
+
+    def dr(frame_id, count, **kw):
+        if frame_id == 0 and count == 4:
+            return {off: (np.ones((4, 4), np.uint16), {"missing_packets": 0}) for off in (0, 1, 3)}
+        return {}
+
+    cam._download_range = MagicMock(side_effect=dr)
     out = cam.buffer_download(
-        n_frames=2,
+        n_frames=4,
+        retries=1,
+        max_dropped_frames=5,
         convert=False,
         strip_header=False,
         verbose=False,
-        retries=0,
-        max_dropped_frames=5,
     )
     assert out is not None
-    assert out.shape[0] == 2
+    assert out.shape[0] == 3  # the complete frames, in order
+    assert cam.last_download_stats.n_incomplete == 1
     assert cam.last_download_stats.resend_requested == 0
 
 
-def test_buffer_download_honors_resend_flag_during_stream():
+def test_buffer_download_passes_resend_flag():
     for want in (True, False):
         cam = _fake_cam_for_download()
-        captured = {}
+        seen = {}
 
-        def grab(timeout, _cam=cam, _cap=captured):
-            _cap["resend"] = _cam._gvsp.resend_enabled
-            _cap["calls"] = _cap.get("calls", 0) + 1
-            return _frame(0, 0) if _cap["calls"] == 1 else None
+        def dr(frame_id, count, _seen=seen, **kw):
+            _seen["resend"] = kw["resend"]
+            return _complete_range(frame_id, count)
 
-        cam._gvsp.get_frame_with_info.side_effect = grab
+        cam._download_range = MagicMock(side_effect=dr)
         cam.buffer_download(
-            n_frames=1,
-            convert=False,
-            strip_header=False,
-            verbose=False,
-            retries=0,
-            resend=want,
+            n_frames=2, resend=want, convert=False, strip_header=False, verbose=False
         )
-        assert captured["resend"] is want
+        assert seen["resend"] is want
 
 
 def test_buffer_download_default_disables_resend():
     # Resends ON during bulk download caused congestion collapse on hardware;
     # the default must keep them OFF (resend=True stays available opt-in).
     cam = _fake_cam_for_download()
-    captured = {}
+    seen = {}
 
-    def grab(timeout, _cam=cam, _cap=captured):
-        _cap["resend"] = _cam._gvsp.resend_enabled
-        _cap["calls"] = _cap.get("calls", 0) + 1
-        return _frame(0, 0) if _cap["calls"] == 1 else None
+    def dr(frame_id, count, **kw):
+        seen["resend"] = kw["resend"]
+        return _complete_range(frame_id, count)
 
-    cam._gvsp.get_frame_with_info.side_effect = grab
-    cam.buffer_download(n_frames=1, convert=False, strip_header=False, verbose=False, retries=0)
-    assert captured["resend"] is False
+    cam._download_range = MagicMock(side_effect=dr)
+    cam.buffer_download(n_frames=1, convert=False, strip_header=False, verbose=False)
+    assert seen["resend"] is False
     cam._gvsp.reset_resend_stats.assert_called_once()
 
 
 def test_buffer_download_resets_stats_on_empty_buffer():
     cam = _fake_cam_for_download()
-    # First, a normal download populates stats.
-    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), None]
-    cam.buffer_download(n_frames=1, convert=False, strip_header=False, verbose=False, retries=0)
+    cam._download_range = MagicMock(side_effect=_complete_range)
+    cam.buffer_download(n_frames=1, convert=False, strip_header=False, verbose=False)
     assert cam.last_download_stats is not None
-    # Now simulate an empty buffer: read_reg returns 0 for recorded size, so
-    # n_frames resolves to 0 and the method returns None early.
+    # Empty buffer: recorded size reads 0, so n_frames resolves to 0 -> None.
     cam._gvcp.read_reg.return_value = 0
     out = cam.buffer_download(n_frames=0, convert=False, strip_header=False, verbose=False)
     assert out is None
@@ -227,39 +252,37 @@ def test_download_diagnostics_ok_path(caplog):
     assert "OK" in msgs or "ok" in msgs
 
 
-def test_buffer_download_retries_recover_stragglers():
+def test_buffer_download_converges_over_multiple_rounds():
     cam = _fake_cam_for_download()
-    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(2, 1), None]
+    state = {"straggler_attempts": 0}
 
-    def fake_redownload(frame_ids, packet_size):
-        return {
-            fid: (np.ones((4, 4), np.uint16), {"block_id": fid, "missing_packets": 0})
-            for fid in frame_ids
-        }
+    def dr(frame_id, count, **kw):
+        if frame_id == 0 and count == 3:
+            # First pass: only position 1 is missing.
+            return {off: (np.ones((4, 4), np.uint16), {"missing_packets": 0}) for off in (0, 2)}
+        if frame_id == 1:  # the straggler range; succeeds only on the 2nd try
+            state["straggler_attempts"] += 1
+            if state["straggler_attempts"] >= 2:
+                return {0: (np.ones((4, 4), np.uint16), {"missing_packets": 0})}
+            return {}
+        return _complete_range(frame_id, count)
 
-    cam._redownload_frames = MagicMock(side_effect=fake_redownload)
+    cam._download_range = MagicMock(side_effect=dr)
     out = cam.buffer_download(
-        n_frames=2, convert=False, strip_header=False, verbose=False, retries=1
+        n_frames=3, retries=4, convert=False, strip_header=False, verbose=False
     )
-    assert out is not None
-    assert out.shape[0] == 2
+    assert out.shape[0] == 3
     assert cam.last_download_stats.n_incomplete == 0
-    assert cam.last_download_stats.recovered_by_retry == 1
-    cam._redownload_frames.assert_called_once()
+    assert state["straggler_attempts"] >= 2  # took more than one recovery round
 
 
 def test_buffer_download_falls_back_when_jumbo_unsupported(caplog):
     cam = _fake_cam_for_download()
-    cam._gvsp.get_frame_with_info.side_effect = [_frame(0, 0), _frame(0, 1), None]
     cam._probe_max_packet_size = MagicMock(return_value=1500)
+    cam._download_range = MagicMock(side_effect=_complete_range)
     with caplog.at_level(logging.WARNING, logger="pyTelops.camera"):
         cam.buffer_download(
-            n_frames=2,
-            convert=False,
-            strip_header=False,
-            verbose=False,
-            retries=0,
-            packet_size=9000,
+            n_frames=2, packet_size=9000, convert=False, strip_header=False, verbose=False
         )
     assert cam.last_download_stats.packet_size_used == 1500
     assert any("1500" in r.message for r in caplog.records)
