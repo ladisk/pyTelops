@@ -1,9 +1,10 @@
-"""Record to the onboard buffer, tune the link, and download robustly.
+"""Download from the onboard buffer robustly, with optional link tuning.
 
-``tune_connection`` probes the link and sweeps download settings, then
-``buffer_download`` checks integrity. By default it raises
-``FrameIntegrityError`` on incomplete data; here we tolerate a few drops and
-inspect ``cam.last_download_stats`` instead.
+A plain ``buffer_download()`` is already integrity-checked, self-recovering, and
+auto-tuned: it probes the path and learns a bitrate on its own, and by default
+raises ``FrameIntegrityError`` if any frame is incomplete. This script shows how
+to tolerate a few drops and read ``cam.last_download_stats``, plus how to
+escalate to ``tune_connection`` when a link is stubbornly unreliable.
 
 Run with::
 
@@ -25,11 +26,16 @@ def main() -> None:
         cam.buffer_configure(n_sequences=1, duration=5.0, moi_source="software")
         cam.buffer_record()
 
-        # Probe the link and store a recommended download config on the camera.
+        # Optional, only for a stubbornly unreliable link. buffer_download
+        # already auto-tunes on its own, so most setups can skip this. When the
+        # link is flaky, tune_connection sweeps settings once and apply() stores
+        # the winner so later downloads reuse it.
         report = tune_connection(cam)
         report.apply(cam)
         print("Recommended download config:", report.recommended)
 
+        # max_dropped_frames=0 (the default) raises on any gap; here we tolerate
+        # a few and read the integrity report instead.
         try:
             data = cam.buffer_download(max_dropped_frames=5)
         except FrameIntegrityError as exc:
