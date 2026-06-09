@@ -108,8 +108,10 @@ burst.
                              # safe up to ~400 fps
 
 Start with ``1000``; bump to ``2000`` or ``5000`` if you still see
-losses under heavy host load. No effect on buffer recording or buffer
-download, which use separate mechanisms.
+losses under heavy host load. This tunes live streaming and has no effect
+on buffer recording (the camera fills its onboard buffer at full speed
+regardless). The same ``packet_delay`` does pace buffer downloads, though;
+see the buffer-download section below.
 
 Live display lag that grows over time
 -------------------------------------
@@ -162,10 +164,18 @@ pass ``max_dropped_frames=N`` to tolerate up to ``N`` incomplete frames
 and get the array back. Every call attaches ``cam.last_download_stats``
 (a ``DownloadStats`` with ``n_incomplete``, ``throughput_mbps``,
 ``packet_size_used``, ``bitrate_used``, and more), so you can check
-download quality without inspecting pixels.
+download quality without inspecting pixels. It also auto-tunes by default:
+on the first download of a connection it probes once whether the path
+carries jumbo frames and learns a download bitrate from each transfer, so
+retrying often lets it settle on a working configuration on its own.
 
 **Fixes:**
 
+- Enable jumbo frames: set the camera NIC's MTU to 9000 (and make sure any
+  switch in the path supports them). ``buffer_download`` probes for jumbo
+  automatically and uses it when the path allows. Far fewer packets per
+  frame is the single biggest reliability win when the host or adapter is
+  CPU-bound under load.
 - Reduce competing load: close a video call or other heavy real-time
   network and CPU load entirely (not just minimize it) before the
   download.
