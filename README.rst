@@ -73,42 +73,171 @@ Documentation
 
 Full documentation at https://pytelops.readthedocs.io.
 
-Streaming vs buffer
--------------------
+The sections below walk through the camera the way you use it: find it,
+connect, configure, capture, and disconnect.
 
-pyTelops supports two acquisition modes:
+Discovery
+---------
 
-**Live streaming**: frames stream directly to PC over Ethernet.
-Limited by GigE bandwidth (~125 MB/s); on one test setup this reached about
-760 fps at full frame (320×256). Achievable rates depend on the host, NIC, and
-network path:
+``discover()`` lists the GigE Vision cameras on the network, regardless of
+their IP. It searches every host network interface, so a camera on a
+USB-to-GigE adapter or a secondary NIC is found without naming an interface:
+
+.. code-block:: python
+
+   from pyTelops import discover
+
+   for cam in discover():
+       print(cam["model"], cam["ip"], cam["serial"])
+
+Each result is a dict with ``manufacturer``, ``model``, ``ip``, and ``serial``.
+
+Connect
+-------
+
+``Camera()`` auto-discovers and connects to the first camera found; pass an IP
+to target a specific one. As a context manager it connects on entry and
+disconnects on exit:
+
+.. code-block:: python
+
+   from pyTelops import Camera
+
+   with Camera() as cam:          # or Camera(ip="169.254.1.10")
+       print(cam.info)            # all current settings as a dict
+       print(cam.state)           # "connected"
+
+Configure
+---------
+
+All settings are properties with string enum support:
+
+.. code-block:: python
+
+   cam.integration_time = 50.0            # microseconds
+   cam.frame_rate = 2000.0               # Hz (warns if above max)
+   cam.frame_rate_max                    # max Hz for current resolution/integration time
+   cam.frame_rate_mode = "fixed"         # "fixed", "fixed_locked", "maximum", "burst"
+   cam.calibration_mode = "RT"           # "RT", "NUC", "RAW", "IBR", "IBI"
+   cam.integration_time_auto = "continuous"  # "off", "once", "continuous"
+   cam.resolution = (128, 128)            # subwindow for higher fps
+   cam.roi_offset = (10, 20)             # subwindow offset (x, y)
+   cam.valid_widths                      # [64, 128, 192, 256, 320]
+   cam.valid_heights                     # [4, 8, 12, ..., 252, 256]
+   cam.bad_pixel_replacement = True      # auto-replace hot pixels (ON by default)
+   cam.reverse_x = True                  # horizontal flip
+   cam.reverse_y = True                  # vertical flip
+   cam.test_image = "static"             # "off", "static", "dynamic", "constant"
+   cam.trigger_frame_count = 10          # frames per trigger event
+   cam.temperature                       # sensor temperature in Celsius
+   cam.info                              # dict with all settings
+   cam.state                             # "disconnected", "connected", "streaming", "standby", "not_ready", "error"
+
+Calibration
+-----------
+
+Each lens + temperature range has its own calibration data on the camera.
+Load lens/temperature info from the USB drive shipped with the camera:
+
+.. code-block:: python
+
+   cam.load_calibration_info("path/to/TEL-8050 Calibration Data/")
+   cam.calibration_collections()
+   # [{'index': 0, 'lens': 'MW Microscope 1X', 'temp_range': (0, 204), ...},
+   #  {'index': 4, 'lens': 'MW 25mm',          'temp_range': (0, 184), ...},
+   #  {'index': 8, 'lens': 'MW 50mm',          'temp_range': (0, 175), ...}, ...]
+
+   # Select by lens name + target temperature
+   cam.calibration_load(lens="50mm", temp=25)       # MW 50mm, 0-175 C range
+   cam.calibration_load(lens="25mm", temp=300)       # MW 25mm, 115-376 C range
+
+   # Or by index
+   cam.calibration_load(index=4)
+
+   # Check what's loaded
+   cam.calibration_active()
+
+Resolution / subwindow
+----------------------
+
+Reduce resolution for higher frame rates. Width: step 64 (64-320).
+Height: step 4 (4-256). Heights are in usable pixels; the driver adds 2 header
+rows internally.
+
+.. code-block:: python
+
+   cam.resolution = (128, 64)             # 128x64 pixels
+   cam.roi_offset = (96, 96)              # offset within full sensor
+   cam.frame_rate_max                     # check achievable fps
+
+   cam.valid_widths                       # [64, 128, 192, 256, 320]
+   cam.valid_heights                      # [4, 8, 12, ..., 252, 256]
+
+Example frame rates measured at different resolutions on one camera and setup
+(your maximums depend on the specific unit, integration time, and firmware):
+
+==========  ==========  =========
+Resolution  Int. time   Max FPS
+==========  ==========  =========
+320x256     10 us       3,115
+320x128     10 us       5,973
+320x64      10 us       11,034
+128x64      10 us       17,836
+64x32       10 us       36,676
+64x4        10 us       64,491
+64x4        5 us        95,184
+==========  ==========  =========
+
+Grab a frame
+------------
+
+.. code-block:: python
+
+   frame = cam.grab()             # single frame -> numpy (H, W)
+   raw = cam.grab(convert=False)  # raw uint16 instead of Celsius
+
+In RT mode, ``grab()``, ``acquire()``, and ``buffer_download()`` automatically
+convert to Celsius (float32). Use ``convert=False`` for raw uint16 values.
+Header rows are stripped by default (``strip_header=True``).
+
+Live streaming
+--------------
+
+Frames stream directly to the PC over Ethernet, limited by GigE bandwidth
+(~125 MB/s). On one test setup this reached about 760 fps at full frame
+(320×256); achievable rates depend on the host, NIC, and network path.
 
 .. code-block:: python
 
    frame = cam.grab()             # single frame
-   frames = cam.acquire(100)      # 100 frames
+   frames = cam.acquire(100)      # 100 frames -> numpy (N, H, W)
 
-**Buffer recording**: the camera records to its internal 16 GB memory at full
-sensor speed, then downloads to PC. Maximum sensor rate depends on resolution
-and integration time (see the table below):
+Use streaming for continuous capture at moderate frame rates. For high-speed
+measurements (thousands of fps), record to the onboard buffer instead (below).
+
+Live viewer
+-----------
 
 .. code-block:: python
 
-   cam.frame_rate = 2000.0
-   cam.buffer_configure(n_sequences=3, duration=5.0, moi_source="software")
+   with Camera() as cam:
+       cam.live_view()
 
-   cam.buffer_record()   # records all 3 sequences automatically
-   cam.buffer_info()     # check what was recorded
-   data = cam.buffer_download(sequence=0)   # download one sequence
-   cam.buffer_clear()
+Or from the command line:
 
-Use streaming for low frame rate continuous capture. Use the buffer for
-high-speed measurements where you need thousands of fps.
+.. code-block:: bash
+
+   pytelops live
+
+Opens a Tkinter window with real-time thermal display, percentile
+normalization (handles hot pixels), and colormap selector.
 
 Buffer recording
 ----------------
 
-The buffer must be partitioned into fixed-size sequence slots before recording:
+The camera records to its internal 16 GB memory at full sensor speed, then
+downloads to the PC. The buffer must be partitioned into fixed-size sequence
+slots before recording:
 
 .. code-block:: python
 
@@ -180,90 +309,18 @@ For manual control with software MOI (instead of ``buffer_record()``):
    cam.buffer_wait(timeout=30.0)         # wait for recording to finish
    data = cam.buffer_download()
 
-Camera configuration
---------------------
+Disconnect
+----------
 
-All settings are properties with string enum support:
-
-.. code-block:: python
-
-   cam.integration_time = 50.0            # microseconds
-   cam.frame_rate = 2000.0               # Hz (warns if above max)
-   cam.frame_rate_max                    # max Hz for current resolution/integration time
-   cam.frame_rate_mode = "fixed"         # "fixed", "fixed_locked", "maximum", "burst"
-   cam.calibration_mode = "RT"           # "RT", "NUC", "RAW", "IBR", "IBI"
-   cam.integration_time_auto = "continuous"  # "off", "once", "continuous"
-   cam.resolution = (128, 128)            # subwindow for higher fps
-   cam.roi_offset = (10, 20)             # subwindow offset (x, y)
-   cam.valid_widths                      # [64, 128, 192, 256, 320]
-   cam.valid_heights                     # [4, 8, 12, ..., 252, 256]
-   cam.bad_pixel_replacement = True      # auto-replace hot pixels (ON by default)
-   cam.reverse_x = True                  # horizontal flip
-   cam.reverse_y = True                  # vertical flip
-   cam.test_image = "static"             # "off", "static", "dynamic", "constant"
-   cam.trigger_frame_count = 10          # frames per trigger event
-   cam.temperature                       # sensor temperature in Celsius
-   cam.info                              # dict with all settings
-   cam.state                             # "disconnected", "connected", "streaming", "standby", "not_ready", "error"
-
-In RT mode, ``grab()``, ``acquire()``, and ``buffer_download()`` automatically
-convert to Celsius (float32). Use ``convert=False`` for raw uint16 values.
-Header rows are stripped by default (``strip_header=True``).
-
-Resolution / subwindow
-----------------------
-
-Reduce resolution for higher frame rates. Width: step 64 (64-320).
-Height: step 4 (4-256). Heights are in usable pixels; the driver adds 2 header
-rows internally.
+The context manager disconnects automatically on exit. To manage the
+connection manually, call ``connect()`` and ``disconnect()`` yourself:
 
 .. code-block:: python
 
-   cam.resolution = (128, 64)             # 128x64 pixels
-   cam.roi_offset = (96, 96)              # offset within full sensor
-   cam.frame_rate_max                     # check achievable fps
-
-   cam.valid_widths                       # [64, 128, 192, 256, 320]
-   cam.valid_heights                      # [4, 8, 12, ..., 252, 256]
-
-Example frame rates measured at different resolutions on one camera and setup
-(your maximums depend on the specific unit, integration time, and firmware):
-
-==========  ==========  =========
-Resolution  Int. time   Max FPS
-==========  ==========  =========
-320x256     10 us       3,115
-320x128     10 us       5,973
-320x64      10 us       11,034
-128x64      10 us       17,836
-64x32       10 us       36,676
-64x4        10 us       64,491
-64x4        5 us        95,184
-==========  ==========  =========
-
-Calibration
------------
-
-Each lens + temperature range has its own calibration data on the camera.
-Load lens/temperature info from the USB drive shipped with the camera:
-
-.. code-block:: python
-
-   cam.load_calibration_info("path/to/TEL-8050 Calibration Data/")
-   cam.calibration_collections()
-   # [{'index': 0, 'lens': 'MW Microscope 1X', 'temp_range': (0, 204), ...},
-   #  {'index': 4, 'lens': 'MW 25mm',          'temp_range': (0, 184), ...},
-   #  {'index': 8, 'lens': 'MW 50mm',          'temp_range': (0, 175), ...}, ...]
-
-   # Select by lens name + target temperature
-   cam.calibration_load(lens="50mm", temp=25)       # MW 50mm, 0-175 C range
-   cam.calibration_load(lens="25mm", temp=300)       # MW 25mm, 115-376 C range
-
-   # Or by index
-   cam.calibration_load(index=4)
-
-   # Check what's loaded
-   cam.calibration_active()
+   cam = Camera()
+   cam.connect()
+   # ... use the camera ...
+   cam.disconnect()
 
 Image correction (NUC)
 ----------------------
@@ -308,23 +365,6 @@ Device management
 .. code-block:: python
 
    cam.save_config()                      # persist settings to camera memory
-
-Live viewer
------------
-
-.. code-block:: python
-
-   with Camera() as cam:
-       cam.live_view()
-
-Or from the command line:
-
-.. code-block:: bash
-
-   pytelops live
-
-Opens a Tkinter window with real-time thermal display, percentile
-normalization (handles hot pixels), and colormap selector.
 
 CLI
 ---
