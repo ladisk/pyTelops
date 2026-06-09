@@ -170,44 +170,154 @@ def tune_connection(
     return ConnectionReport.from_trials(trials, probe=probe, warnings=warnings)
 
 
-def _preflight_warnings(cam):
-    """Yield human-readable warnings for known environmental gotchas."""
+_VPN_NAME_KEYS = ("tailscale", "zerotier", "wireguard", "vpn", "wg")
+_USB_ADAPTER_KEYS = ("usb", "ax88", "asix", "rtl8153", "rtl8156", "hub")
+
+
+def _link_local_warning(interfaces):
+    """Return a warning when the camera's link-local route is ambiguous.
+
+    Parameters
+    ----------
+    interfaces : list of (str, str)
+        ``(name, ipv4)`` for each host interface.
+
+    Notes
+    -----
+    A direct camera link is itself link-local (169.254.x.x), so the presence of
+    a single link-local adapter is normal and is NOT flagged. A warning is
+    returned only when the route is genuinely ambiguous: more than one
+    link-local adapter is up, or a VPN-like adapter is present alongside one.
+    Returns ``None`` otherwise.
+    """
+    link_local = [(n, ip) for n, ip in interfaces if ip.startswith("169.254.")]
+    if not link_local:
+        return None
+    vpn = [n for n, _ in interfaces if any(k in n.lower() for k in _VPN_NAME_KEYS)]
+    if len(link_local) > 1 or vpn:
+        names = ", ".join(sorted({n for n, _ in link_local} | set(vpn)))
+        return (
+            f"Multiple link-local / VPN adapters are up ({names}); a VPN adapter "
+            f"can take over the camera route. If discovery or downloads misbehave, "
+            f"stop it or pass an explicit local_ip for the camera NIC."
+        )
+    return None
+
+
+def _is_usb_adapter(name, description=""):
+    """Return ``True`` if a NIC looks like a USB-to-Ethernet adapter.
+
+    Checks the connection *name* and the adapter *description* (the latter is
+    where Windows records "ASIX USB to Gigabit Ethernet"; the connection name is
+    just "Ethernet 7").
+    """
+    text = f"{name} {description or ''}".lower()
+    return any(k in text for k in _USB_ADAPTER_KEYS)
+
+
+def _host_interfaces():
+    """Return ``[(name, ipv4)]`` for host interfaces (best-effort, psutil)."""
     try:
         import socket
 
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip.startswith("169.254."):
-                yield (
-                    "A link-local (169.254.x.x) adapter is present; if discovery "
-                    "or downloads misbehave, a VPN adapter (e.g. Tailscale) may be "
-                    "hijacking the route - stop it during acquisition."
-                )
-                break
+        import psutil
+
+        out = []
+        for name, addrs in psutil.net_if_addrs().items():
+            for a in addrs:
+                if a.family == socket.AF_INET:
+                    out.append((name, a.address))
+        return out
     except Exception:  # noqa: BLE001
-        pass
+        return []
+
+
+def _adapter_descriptions():
+    """Return ``{connection_name: interface_description}`` on Windows.
+
+    psutil keys interfaces by connection name ("Ethernet 7"), not the adapter
+    description ("ASIX USB to Gigabit Ethernet"), so USB detection needs this
+    extra lookup. Best-effort: returns ``{}`` on non-Windows or any failure.
+    """
+    import sys
+
+    if not sys.platform.startswith("win"):
+        return {}
+    try:
+        import json
+        import subprocess
+
+        proc = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-NetAdapter | Select-Object Name,InterfaceDescription | ConvertTo-Json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        data = json.loads(proc.stdout or "[]")
+        if isinstance(data, dict):
+            data = [data]
+        return {d.get("Name", ""): d.get("InterfaceDescription", "") for d in data}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _preflight_warnings(cam):
+    """Yield human-readable warnings for common environment problems."""
+    warning = _link_local_warning(_host_interfaces())
+    if warning:
+        yield warning
 
 
 def _read_nic_info(cam, probe, warnings):
-    """Read-only NIC facts. Never changes system state. Best-effort."""
+    """Read-only NIC facts. Never changes system state. Best-effort.
+
+    Targets the NIC carrying the camera's ``local_ip`` (so the USB/speed facts
+    describe the camera link, not an unrelated WiFi adapter), and detects USB
+    adapters by their description, which is where Windows records the vendor.
+    """
     try:
+        import socket
+
         import psutil
     except Exception:  # noqa: BLE001
         warnings.append("read_nic_info=True but psutil is not installed; skipping NIC facts.")
         return
     try:
+        local_ip = getattr(cam, "_local_ip", "") or ""
         stats = psutil.net_if_stats()
-        for name, st in stats.items():
-            if st.isup and getattr(st, "speed", 0):
-                probe.adapter_name = name
-                probe.link_speed_mbps = st.speed
-                low = name.lower()
-                probe.is_usb_adapter = any(k in low for k in ("usb", "ax88", "rtl8153", "hub"))
-                if probe.is_usb_adapter:
-                    warnings.append(
-                        f"NIC '{name}' looks like a USB adapter; issue #8 documents "
-                        f"~half throughput and rare unrecoverable drops on these."
-                    )
+        addrs = psutil.net_if_addrs()
+        descriptions = _adapter_descriptions()
+
+        # Prefer the NIC carrying the camera's local_ip; else the first up NIC
+        # that reports a link speed.
+        target = None
+        for name, alist in addrs.items():
+            if any(a.family == socket.AF_INET and a.address == local_ip for a in alist):
+                target = name
                 break
+        if target is None:
+            for name, st in stats.items():
+                if st.isup and getattr(st, "speed", 0):
+                    target = name
+                    break
+        if target is None:
+            return
+
+        st = stats.get(target)
+        desc = descriptions.get(target, "")
+        probe.adapter_name = target
+        probe.link_speed_mbps = getattr(st, "speed", None) if st else None
+        probe.is_usb_adapter = _is_usb_adapter(target, desc)
+        if probe.is_usb_adapter:
+            label = f"NIC '{target}'" + (f" ({desc})" if desc else "")
+            warnings.append(
+                f"{label} looks like a USB adapter; issue #8 documents ~half "
+                f"throughput and rare unrecoverable drops on these."
+            )
     except Exception:  # noqa: BLE001
         pass

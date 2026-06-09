@@ -2,8 +2,54 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from pyTelops.connection import ConnectionReport, TrialResult, _rank_trials, tune_connection
+from pyTelops.connection import (
+    ConnectionReport,
+    TrialResult,
+    _is_usb_adapter,
+    _link_local_warning,
+    _rank_trials,
+    tune_connection,
+)
 from pyTelops.errors import DownloadStats
+
+
+class TestLinkLocalWarning:
+    """The link-local/VPN warning must not false-fire on a normal direct link."""
+
+    def test_single_link_local_no_warning(self):
+        # A single link-local NIC IS the normal direct camera connection.
+        assert _link_local_warning([("Ethernet 7", "169.254.27.140")]) is None
+
+    def test_no_link_local_no_warning(self):
+        assert _link_local_warning([("Ethernet", "192.168.1.5")]) is None
+
+    def test_multiple_link_local_warns(self):
+        w = _link_local_warning([("Ethernet 7", "169.254.27.140"), ("Tailscale", "169.254.83.107")])
+        assert w is not None
+        assert "local_ip" in w
+
+    def test_vpn_named_adapter_warns(self):
+        # Tailscale up on a routed (non-link-local) address alongside the camera.
+        w = _link_local_warning(
+            [("Ethernet 7", "169.254.27.140"), ("Tailscale", "100.102.181.121")]
+        )
+        assert w is not None
+
+
+class TestIsUsbAdapter:
+    """USB detection must use the adapter description, not just the NIC name."""
+
+    def test_asix_description_detected(self):
+        assert _is_usb_adapter("Ethernet 7", "ASIX USB to Gigabit Ethernet") is True
+
+    def test_plain_ethernet_not_usb(self):
+        assert _is_usb_adapter("Ethernet", "Intel(R) Ethernet Connection I219-V") is False
+
+    def test_usb_in_name_detected(self):
+        assert _is_usb_adapter("USB Ethernet", "") is True
+
+    def test_realtek_usb_dongle_detected(self):
+        assert _is_usb_adapter("Ethernet 3", "Realtek USB GbE Family Controller") is True
 
 
 def test_rank_prefers_zero_drops_over_speed():
