@@ -418,7 +418,7 @@ Integration
 pyTelops is designed to be used standalone or as a backend for data acquisition
 frameworks:
 
-- `openEOL <https://github.com/ladisk/openEOL>`_: industrial end-of-line testing
+- `openEOL <https://openeol.com>`_: industrial end-of-line testing
 - `LDAQ <https://github.com/ladisk/LDAQ>`_: lightweight data acquisition
 
 Disclaimer
