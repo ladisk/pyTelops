@@ -3717,8 +3717,8 @@ class Camera:
         ``DataExp`` and ``DataOffset`` fields (same path as :meth:`grab`).
 
         *bitrate_mbps* can be lowered (e.g. to ``300``) to reduce host
-        network contention on machines running video-conferencing software
-        (Teams, Zoom) during long transfers.
+        network contention from other heavy network or CPU load during
+        long transfers.
 
         Parameters
         ----------
@@ -3801,9 +3801,9 @@ class Camera:
         >>> frames.shape
         (100, 254, 320)
 
-        Download a specific sequence with jumbo frames:
+        Download a specific sequence (auto-tune selects the packet size):
 
-        >>> frames = cam.buffer_download(sequence=1, packet_size=9000)
+        >>> frames = cam.buffer_download(sequence=1)
 
         Throttle transfer rate to reduce network contention:
 

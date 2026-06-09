@@ -30,9 +30,13 @@ Supported cameras:
 Features
 --------
 
-- **Auto-discovery**: finds cameras on the network regardless of IP
-- **High-speed buffer**: record up to 95k fps, download optimized to saturate GigE bandwidth
-- **Live streaming**: real-time frame acquisition (up to ~760 fps at full resolution)
+- **Multi-interface discovery**: finds cameras regardless of IP, including those
+  on USB-to-GigE adapters and secondary NICs
+- **Provisioning**: ``force_ip()`` re-homes a camera that came up on the wrong
+  subnet; ``tune_connection()`` finds a stable buffer-download config
+- **High-speed buffer**: record at high frame rates with integrity-checked,
+  self-recovering downloads
+- **Live streaming**: real-time frame acquisition
 - **Subwindow**: configurable resolution for higher frame rates
 - **Diagnostics**: 13 temperature sensors, NUC trigger, timestamps, voltage/current
 - **GUI viewer & CLI**: live thermal display, ``pytelops discover / grab / live``
@@ -72,13 +76,38 @@ Documentation
 
 Full documentation at https://pytelops.readthedocs.io.
 
+Discovery and provisioning
+--------------------------
+
+``discover()`` searches all host network interfaces by default, so cameras on
+USB-to-GigE adapters and secondary NICs are found without selecting an
+interface. Each result is a dict with ``ip``, ``mac``, ``interface_ip`` (the
+host interface the camera replied on), and ``reachable`` (whether the camera
+sits on a host NIC subnet).
+
+If a camera comes up on the wrong subnet (``reachable == False``), re-home it by
+MAC with ``force_ip()``, then re-discover:
+
+.. code-block:: python
+
+   from pyTelops import discover, force_ip
+
+   cameras = discover()
+   for cam in cameras:
+       print(cam["ip"], cam["mac"], "reachable" if cam["reachable"] else "unreachable")
+
+   target = next(c for c in cameras if not c["reachable"])
+   force_ip(target, "169.254.10.50", "255.255.0.0")
+
 Streaming vs buffer
 -------------------
 
 pyTelops supports two acquisition modes:
 
 **Live streaming**: frames stream directly to PC over Ethernet.
-Limited by GigE bandwidth (~125 MB/s); up to ~760 fps at full frame (320×256):
+Limited by GigE bandwidth (~125 MB/s); on one test setup this reached about
+760 fps at full frame (320×256). Achievable rates depend on the host, NIC, and
+network path:
 
 .. code-block:: python
 
@@ -86,7 +115,8 @@ Limited by GigE bandwidth (~125 MB/s); up to ~760 fps at full frame (320×256):
    frames = cam.acquire(100)      # 100 frames
 
 **Buffer recording**: the camera records to its internal 16 GB memory at full
-sensor speed (up to 3100 fps at full frame), then downloads to PC:
+sensor speed, then downloads to PC. Maximum sensor rate depends on resolution
+and integration time (see the table below):
 
 .. code-block:: python
 
@@ -143,6 +173,14 @@ The buffer must be partitioned into fixed-size sequence slots before recording:
    Downloading: 100%|██████████| 10000/10000 [00:36<00:00, 271.84frame/s]
    Downloaded 10000 frames in 36.8s (271 fps, 44.8 MB/s)
    Data check: OK - 10000 frames, range [24.9-36.2], mean 28.1
+
+``buffer_download()`` verifies frame integrity and, by default, raises
+``FrameIntegrityError`` if any frame is incomplete after recovery. Pass
+``max_dropped_frames=N`` to tolerate up to N incomplete frames and get the
+array back instead. Every call attaches ``cam.last_download_stats`` (a
+``DownloadStats`` with ``n_frames``, ``n_incomplete``, ``throughput_mbps``,
+``packet_size_used``, and more), so you can check transfer quality without
+inspecting pixels.
 
 External trigger
 ----------------
@@ -217,7 +255,8 @@ rows internally.
    cam.valid_widths                       # [64, 128, 192, 256, 320]
    cam.valid_heights                      # [4, 8, 12, ..., 252, 256]
 
-Example frame rates at different resolutions:
+Example frame rates measured at different resolutions on one camera and setup
+(your maximums depend on the specific unit, integration time, and firmware):
 
 ==========  ==========  =========
 Resolution  Int. time   Max FPS
@@ -357,8 +396,9 @@ Troubleshooting
 ---------------
 
 For firewall setup, ``packets unrecoverable`` warnings at high frame rates,
-growing lag in live displays, buffer-download failures, the Tailscale
-discovery issue, and more, see the `troubleshooting guide
+growing lag in live displays, buffer-download failures, discovery problems
+caused by a VPN's virtual link-local adapter, and more, see the
+`troubleshooting guide
 <https://pytelops.readthedocs.io/en/latest/troubleshooting.html>`_.
 
 Integration

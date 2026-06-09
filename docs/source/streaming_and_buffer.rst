@@ -48,7 +48,11 @@ the burst:
     cam.packet_delay = 1000   # ~8 us between packets; safe up to ~400 fps
 
 Start with ``1000`` and increase to ``2000`` or ``5000`` under heavy host load.
-Packet delay has no effect on buffer recording or buffer download.
+Packet delay does not affect buffer recording: the camera fills its internal
+buffer at full speed regardless. It does pace buffer download, where raising it
+inserts gaps between packets and can remove dropped frames on a host or adapter
+that cannot keep up at full rate, at some cost to peak throughput. See the
+buffer-download section below.
 
 Buffer recording
 ----------------
@@ -93,16 +97,80 @@ integrity check::
 
     Downloading: 100%|██████████| 10000/10000 [00:36<00:00, 271.84frame/s]
     Downloaded 10000 frames in 36.8s (271 fps, 44.8 MB/s)
-    Data check: OK -- 10000 frames, range [24.9--36.2], mean 28.1
+    Data check: OK, 10000 frames, range [24.9, 36.2], mean 28.1
 
-If the download stalls or fails the integrity check, see
-:doc:`troubleshooting` (buffer-download section) -- the most common cause is
-competing network load from a running video-call app.  You can also lower the
-download bitrate to leave headroom:
+Download integrity and recovery
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+:meth:`pyTelops.Camera.buffer_download` checks that every frame arrived whole.
+By default (``max_dropped_frames=0``) it raises
+:exc:`pyTelops.FrameIntegrityError` if any frame is still incomplete after
+recovery, so an unnoticed gap cannot slip into your data.  Pass
+``max_dropped_frames=N`` to tolerate up to ``N`` incomplete frames and get the
+array back anyway:
 
 .. code-block:: python
 
-    data = cam.buffer_download(sequence=0, bitrate_mbps=500)
+    from pyTelops import FrameIntegrityError
+
+    try:
+        data = cam.buffer_download(sequence=0)
+    except FrameIntegrityError as exc:
+        print(f"{exc.stats.n_incomplete} frame(s) incomplete")
+        # Or tolerate a few drops:
+        data = cam.buffer_download(sequence=0, max_dropped_frames=5)
+
+The download self-recovers before it gives up: frames that arrive incomplete or
+never arrive are re-streamed at a paced lower bitrate until they are complete,
+controlled by ``retries``.  ``resend=`` toggles GVSP packet resends, which are
+off by default because resend requests can congest a healthy link.
+
+Auto-tune
+~~~~~~~~~
+
+Auto-tune is on by default.  On the first download of a connection it probes
+once whether the path carries jumbo frames, using them when supported and
+falling back to 1500 otherwise, and it learns a starting bitrate from how
+complete each download is, lowering the bitrate after drops.  You do not need to
+hand-pick a packet size.  Passing an explicit ``packet_size=`` or
+``bitrate_mbps=`` disables auto-tune for that call, and ``cam.auto_tune = False``
+disables it entirely:
+
+.. code-block:: python
+
+    data = cam.buffer_download(sequence=0, bitrate_mbps=500)   # manual override
+
+Download statistics
+~~~~~~~~~~~~~~~~~~~~
+
+Every call attaches ``cam.last_download_stats``, a
+:class:`pyTelops.DownloadStats` with fields such as ``n_frames``,
+``n_incomplete``, ``incomplete_frame_ids``, ``throughput_mbps``,
+``packet_size_used``, and ``bitrate_used``.  Callers can check transfer quality
+without inspecting pixel values:
+
+.. code-block:: python
+
+    data = cam.buffer_download(sequence=0)
+    stats = cam.last_download_stats
+    print(f"{stats.n_incomplete} incomplete, {stats.throughput_mbps:.1f} MB/s, "
+          f"packet_size={stats.packet_size_used}")
+
+If downloads are repeatedly slow or incomplete, :func:`pyTelops.tune_connection`
+probes the link and sweeps download settings, returning a
+:class:`pyTelops.ConnectionReport`.  Its ``.apply(cam)`` method stores the
+recommended configuration on the camera for later downloads:
+
+.. code-block:: python
+
+    from pyTelops import tune_connection
+
+    report = tune_connection(cam)   # camera must have frames recorded first
+    report.apply(cam)
+    data = cam.buffer_download(sequence=0)
+
+See :doc:`troubleshooting` (buffer-download section) for diagnosing a host or
+adapter that cannot keep up at full rate.
 
 External trigger
 ----------------

@@ -35,6 +35,10 @@ Unreleased
   a non-jumbo path are now detected with a FireTestPacket path probe, and the
   download warns and falls back to ``packet_size=1500`` instead of silently
   emitting mostly-zero frames.
+- ``buffer_download`` now auto-tunes by default: it probes once per connection
+  whether the path carries jumbo frames and learns a download bitrate from
+  each transfer's completeness. Pass ``packet_size`` or ``bitrate_mbps`` to
+  override, or set ``cam.auto_tune = False`` to disable.
 - Added ``tune_connection()`` to probe the link and sweep download settings,
   recommending a stable and fast configuration for the current adapter and
   cable. Includes an opt-in read-only NIC diagnostics pass.

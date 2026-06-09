@@ -30,7 +30,8 @@ First contact
     from pyTelops import discover, Camera
 
     for cam in discover():
-        print(cam["manufacturer"], cam["model"], cam["ip"])
+        state = "reachable" if cam["reachable"] else "not reachable"
+        print(cam["manufacturer"], cam["model"], cam["ip"], state)
 
     with Camera() as cam:
         cam.calibration_mode = "RT"
@@ -38,11 +39,26 @@ First contact
         frame = cam.grab()
         print(frame.shape, frame.dtype)
 
+``discover()`` searches every host network interface, so cameras on a
+secondary NIC or a USB-to-GigE adapter are found without any manual interface
+selection. Each result is a dict carrying ``manufacturer``, ``model``, ``ip``,
+``serial``, ``mac``, ``interface_ip`` (the host interface the camera replied
+on), and ``reachable``. Pass ``all_vendors=True`` to list non-Telops GigE
+Vision devices as well.
+
+``Camera()`` connects through the interface the camera replied on during
+discovery, so no manual interface selection is needed on hosts with several
+NICs. If the chosen camera is on no host subnet (its discovery entry has
+``reachable == False``), connecting raises an actionable error. In that case
+use :func:`~pyTelops.force_ip` to move the camera onto a reachable subnet; see
+:doc:`troubleshooting` for the full procedure.
+
 .. warning::
 
-   **VPNs with a link-local adapter (Tailscale) break discovery.**
+   **A VPN with a link-local adapter can break discovery.**
    pyTelops finds the camera by scanning link-local (``169.254.x.x``)
-   interfaces. Tailscale's virtual adapter also holds a ``169.254.x.x``
-   address and can shadow the camera's Ethernet adapter, so discovery finds
-   nothing. Stop the Tailscale service (and disable its adapter) before
-   running, or see :doc:`troubleshooting` for the exact commands.
+   interfaces. A VPN that creates its own virtual link-local adapter can hold
+   a ``169.254.x.x`` address and shadow the camera's Ethernet adapter, so
+   discovery finds nothing. If discovery returns no cameras, stop the VPN
+   service (and disable its virtual adapter), then retry. See
+   :doc:`troubleshooting` for more detail.

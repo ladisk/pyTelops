@@ -15,32 +15,62 @@ unreachable.
 
 **Fixes:**
 
+- ``discover()`` now searches every host network interface by default,
+  so cameras on USB-to-GigE adapters and secondary NICs are found
+  without selecting an interface by hand. Each result dict carries
+  ``reachable`` (whether the camera is on a subnet served by one of your
+  host NICs) and ``interface_ip`` (the host interface the camera replied
+  on). If discovery still returns nothing, work through the fixes below.
 - Confirm the camera has a link-local address (``169.254.x.x``) and
   your host has a matching link-local IP on the same Ethernet adapter.
   ``ipconfig`` on Windows, ``ip a`` on Linux.
-- Run ``pytelops setup`` as administrator once per environment -- it
+- Run ``pytelops setup`` as administrator once per environment; it
   prints the Windows firewall rule you need to allow inbound UDP for
   ``python.exe``. Python environment changes (new venv, Anaconda vs
   system Python) require a new rule per binary.
 - On Linux, raise the kernel UDP receive buffer:
   ``sudo sysctl -w net.core.rmem_max=16777216``.
-- Rule out Tailscale or corporate endpoint security per-binary WFP
-  filters. These can silently drop UDP for a specific ``python.exe``
-  even with Windows Firewall disabled. Test by running the same code
-  with a different Python binary.
+- Rule out corporate endpoint security per-binary WFP filters. These
+  can silently drop UDP for a specific ``python.exe`` even with Windows
+  Firewall disabled. Test by running the same code with a different
+  Python binary.
 
-VPN (Tailscale) shadows the camera adapter
--------------------------------------------
+VPN virtual adapter shadows the camera adapter
+----------------------------------------------
 
 If discovery finds no camera (or only unrelated GigE Vision devices) while
-Tailscale is running, its virtual adapter is shadowing the Ethernet adapter.
-Stop the service and tear down the adapter in one elevated PowerShell command:
+a VPN is running, its virtual link-local adapter is shadowing the Ethernet
+adapter that the camera is on. Stop the VPN service and disable its virtual
+network adapter from the Windows network settings, then retry discovery.
+Re-enable the VPN once you are done.
 
-.. code-block:: powershell
+Camera found but not reachable (wrong subnet)
+---------------------------------------------
 
-   Stop-Service Tailscale; Disable-NetAdapter Tailscale -Confirm:$false
+**Symptom:** ``discover()`` lists the camera, but its result dict has
+``reachable == False``, and ``Camera().connect()`` raises an actionable
+error explaining that the camera is on no host NIC subnet.
 
-Restore afterwards with ``Start-Service Tailscale``.
+**Cause:** the camera came up with an IP address that does not match any
+subnet served by your host network interfaces (for example, a static
+address from a previous network, or a leftover configuration). There is
+no local interface from which the host can talk to it.
+
+**Fix:** re-home the camera onto a reachable subnet with
+:func:`~pyTelops.force_ip`, which assigns a new address by MAC, then
+re-discover:
+
+.. code-block:: python
+
+   from pyTelops import discover, force_ip
+
+   camera = next(c for c in discover() if not c["reachable"])
+   force_ip(camera, "169.254.10.50", "255.255.0.0")
+   # The camera reboots its IP stack; wait a moment, then re-discover.
+
+After ``force_ip`` returns, allow about a second for the camera to apply
+the new address before calling ``discover()`` again. Choose an address on
+one of your host NIC subnets so the re-discovered result is reachable.
 
 ``ACCESS_DENIED`` on reconnect
 ------------------------------
@@ -113,28 +143,46 @@ need every frame in order.
 Buffer download fails or is unreliable
 --------------------------------------
 
-**Symptom:** ``cam.buffer_download()`` stalls partway through, completes
-with missing frames, or fails the integrity check.
+**Symptom:** ``cam.buffer_download()`` raises ``FrameIntegrityError``, or
+returns data that completed with missing frames.
 
 **Cause:** the download saturates GigE at ~45 MB/s and has effectively
-no headroom. Any competing network or CPU load -- most commonly an
-active **Microsoft Teams / Zoom / Google Meet call**, or heavy
-background processes -- can starve the receiver enough to drop frames.
-The camera has no backpressure: it pushes at the configured bitrate
-regardless of whether the host is keeping up.
+no headroom. Any competing network or CPU load, most commonly a video
+call or other heavy real-time network and CPU load, can starve the
+receiver enough to drop frames. The camera has no backpressure: it
+pushes at the configured bitrate regardless of whether the host is
+keeping up.
+
+**What ``buffer_download`` does about it:** the download verifies frame
+integrity and self-recovers. It re-streams any frame that arrived
+incomplete or never arrived, at a paced lower bitrate, until the
+transfer is complete. By default (``max_dropped_frames=0``) it raises
+``FrameIntegrityError`` if any frame is still incomplete after recovery;
+pass ``max_dropped_frames=N`` to tolerate up to ``N`` incomplete frames
+and get the array back. Every call attaches ``cam.last_download_stats``
+(a ``DownloadStats`` with ``n_incomplete``, ``throughput_mbps``,
+``packet_size_used``, ``bitrate_used``, and more), so you can check
+download quality without inspecting pixels.
 
 **Fixes:**
 
-- **Best:** close real-time communication apps entirely (not just
-  minimize them) before the download.
+- Reduce competing load: close a video call or other heavy real-time
+  network and CPU load entirely (not just minimize it) before the
+  download.
+- Find a stable configuration with :func:`~pyTelops.tune_connection`,
+  which probes the link and sweeps download settings, then store it with
+  ``report.apply(cam)`` for subsequent downloads.
+- Raise ``cam.packet_delay`` to pace the download. Inserting gaps
+  between packets gives a host or adapter that cannot keep up at full
+  rate time to drain its receive queue, at some cost to peak throughput.
 - Lower the download bitrate to leave headroom:
 
   .. code-block:: python
 
      data = cam.buffer_download(sequence=0, bitrate_mbps=500)
 
-  At 500 Mbps the download takes twice as long but is much more
-  robust to competing load.
+  At 500 Mbps the download takes longer but is much more robust to
+  competing load.
 
 - Ensure the camera adapter is on a dedicated Ethernet port, not
   shared with the internet (Wi-Fi for internet, Ethernet for camera).
