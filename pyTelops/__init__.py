@@ -1,6 +1,9 @@
 """
 pyTelops -- Pure-Python driver for Telops thermal cameras over GigE Vision.
 
+Built on pyGigEVision (the GigE Vision protocol layer); pyTelops adds the
+Telops-specific calibration, register map, and onboard-buffer support.
+
 Usage::
 
     from pyTelops import Camera, discover
