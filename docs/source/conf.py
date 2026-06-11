@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath("../.."))
 project = "pyTelops"
 author = "Jaša Šonc, Janko Slavič"
 copyright = "2026, Jaša Šonc and Ladisk group, University of Ljubljana"
-release = "0.2.1"
+release = "0.2.2"
 # -- General configuration ---------------------------------------------------
 extensions = [
     "sphinx.ext.autodoc",

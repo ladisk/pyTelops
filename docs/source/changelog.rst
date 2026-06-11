@@ -1,9 +1,12 @@
 Changelog
 =========
 
-Unreleased
-----------
+Version 0.2.2
+-------------
 
+- First release published to PyPI.
+- The pyGigEVision dependency now installs from PyPI (``pyGigEVision>=0.2.1``)
+  instead of a git URL; automated CI runs on push and pull request again.
 - ``discover()`` now finds cameras on every host network interface (USB-to-GigE
   adapters, secondary NICs), via the reworked multi-interface discovery in
   pyGigEVision. Each result carries a ``reachable`` flag and an ``interface_ip``
