@@ -583,10 +583,20 @@ class Camera:
             with suppress(Exception):
                 old.disconnect()
 
-        # Bind the local interface the camera replied on during discovery;
-        # fall back to OS routing when the reply interface is unknown
-        # (explicit camera IP, or discovery by an older protocol layer).
+        # Bind the local interface the camera replied on during discovery.
+        # When the camera was given by explicit IP, run a discovery sweep
+        # anyway to learn which interface reaches it: with several
+        # link-local interfaces (VPN, Bluetooth, virtual adapters) OS
+        # routing picks by metric, not by reachability. A camera the sweep
+        # cannot see (e.g. on a routed subnet) falls back to OS routing,
+        # which is correct for routed paths.
         if not self._local_ip:
+            if not discovered_interface_ip:
+                with suppress(Exception):
+                    for found in discover(self._local_ip, self._timeout):
+                        if found.get("ip") == self._camera_ip:
+                            discovered_interface_ip = found.get("interface_ip") or ""
+                            break
             self._local_ip = discovered_interface_ip or _find_local_ip_for(self._camera_ip)
 
         # GVCP connection

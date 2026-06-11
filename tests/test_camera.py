@@ -654,14 +654,62 @@ class TestConnectLocalIP:
     @patch("pyTelops.camera.GVCPClient")
     @patch("pyTelops.camera._find_local_ip_for", return_value="169.254.9.9")
     @patch("pyTelops.camera.discover")
-    def test_connect_explicit_ip_uses_find_local_ip(
+    def test_connect_explicit_ip_learns_interface_from_sweep(
         self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
     ):
+        # An explicit camera IP skips camera selection but still runs a
+        # discovery sweep to learn the reply interface; OS routing picks
+        # among several link-local interfaces by metric, not reachability.
+        mock_disc.return_value = [
+            {
+                "ip": "169.254.50.50",
+                "manufacturer": "Telops Inc.",
+                "model": "TS-IR",
+                "reachable": True,
+                "interface_ip": "169.254.27.140",
+            }
+        ]
         mock_gvcp_cls.return_value.read_reg.return_value = 0
         cam = Camera(ip="169.254.50.50")
         try:
             cam.connect()
-            mock_disc.assert_not_called()
+            mock_gvcp_cls.assert_called_once_with("169.254.50.50", "169.254.27.140", ANY)
+            mock_find.assert_not_called()
+        finally:
+            Camera._active_cameras.clear()
+
+    @patch("pyTelops.camera.GVSPReceiver")
+    @patch("pyTelops.camera.GVCPClient")
+    @patch("pyTelops.camera._find_local_ip_for", return_value="169.254.9.9")
+    @patch("pyTelops.camera.discover")
+    def test_connect_explicit_ip_falls_back_when_sweep_misses(
+        self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
+    ):
+        # A camera the sweep cannot see (routed subnet) falls back to OS
+        # routing, which is correct for routed paths.
+        mock_disc.return_value = []
+        mock_gvcp_cls.return_value.read_reg.return_value = 0
+        cam = Camera(ip="192.168.1.80")
+        try:
+            cam.connect()
+            mock_find.assert_called_once_with("192.168.1.80")
+            mock_gvcp_cls.assert_called_once_with("192.168.1.80", "169.254.9.9", ANY)
+        finally:
+            Camera._active_cameras.clear()
+
+    @patch("pyTelops.camera.GVSPReceiver")
+    @patch("pyTelops.camera.GVCPClient")
+    @patch("pyTelops.camera._find_local_ip_for", return_value="169.254.9.9")
+    @patch("pyTelops.camera.discover")
+    def test_connect_explicit_ip_falls_back_when_sweep_fails(
+        self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
+    ):
+        # A discovery error must not break explicit-IP connects.
+        mock_disc.side_effect = OSError("no sockets")
+        mock_gvcp_cls.return_value.read_reg.return_value = 0
+        cam = Camera(ip="169.254.50.50")
+        try:
+            cam.connect()
             mock_find.assert_called_once_with("169.254.50.50")
         finally:
             Camera._active_cameras.clear()
