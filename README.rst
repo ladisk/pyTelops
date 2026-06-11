@@ -76,7 +76,7 @@ Frames are returned as numpy arrays with Telops header rows already stripped.
 Documentation
 -------------
 
-Full documentation at https://pytelops.readthedocs.io.
+Full documentation at https://pytelops.readthedocs.io/en/latest/
 
 The sections below walk through the camera the way you use it: find it,
 connect, configure, capture, and disconnect.
