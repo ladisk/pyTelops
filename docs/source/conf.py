@@ -60,6 +60,7 @@ napoleon_use_rtype = True
 html_theme = "sphinx_book_theme"
 html_static_path = ["_static"]
 html_title = "pyTelops"
+html_logo = "_static/logo.png"
 html_css_files = ["ai-buttons.css"]
 html_js_files = ["ai-buttons.js"]
 html_theme_options = {
