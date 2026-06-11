@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyTelops"
-version = "0.2.1"
+version = "0.2.2"
 description = "Pure-Python driver for Telops thermal cameras over GigE Vision"
 readme = "PYPI_README.rst"
 license = "MIT"
