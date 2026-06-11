@@ -2360,27 +2360,27 @@ class Camera:
         dict
             A dict with the following keys:
 
-            ``"temperatures"`` : dict[str, float or None]
+            ``"temperatures"`` (dict[str, float or None])
                 Keyed by lowercase :class:`reg.TemperatureLocation` member
                 names (e.g. ``"sensor"``, ``"compressor"``,
                 ``"cold_finger"``, ``"processing_fpga"``).  Values in
                 degrees Celsius; ``None`` if the location is not supported
                 by this camera model.
-            ``"voltages"`` : dict[str, float or None]
+            ``"voltages"`` (dict[str, float or None])
                 Keyed by lowercase :class:`reg.VoltageLocation` member
                 names (e.g. ``"cooler"``, ``"supply_24v"``).  Values in
                 volts; ``None`` if unsupported.
-            ``"currents"`` : dict[str, float or None]
+            ``"currents"`` (dict[str, float or None])
                 Keyed by lowercase :class:`reg.CurrentLocation` member
                 names (e.g. ``"cooler"``, ``"supply_24v"``).  Values in
                 amps; ``None`` if unsupported.
-            ``"device_running_s"`` : int
+            ``"device_running_s"`` (int)
                 Total device uptime in seconds.
-            ``"cooler_running_s"`` : int
+            ``"cooler_running_s"`` (int)
                 Total cooler uptime in seconds.
-            ``"power_on_cycles"`` : int
+            ``"power_on_cycles"`` (int)
                 Number of times the device has been powered on.
-            ``"cooler_power_on_cycles"`` : int
+            ``"cooler_power_on_cycles"`` (int)
                 Number of times the cooler has been powered on.
 
         Raises
@@ -2842,33 +2842,33 @@ class Camera:
         list of dict
             One dict per collection.  Always-present keys:
 
-            ``"index"`` : int
+            ``"index"`` (int)
                 0-based collection index.
-            ``"timestamp"`` : datetime.datetime
+            ``"timestamp"`` (datetime.datetime)
                 Collection creation time (UTC, timezone-aware).
-            ``"posix"`` : int
+            ``"posix"`` (int)
                 Raw POSIX timestamp of the collection.
-            ``"type"`` : str or int
+            ``"type"`` (str or int)
                 Calibration type name from
                 :class:`reg.CalibrationCollectionType` (e.g.
                 ``"TELOPS_FIXED"``), or the raw integer if unknown.
-            ``"blocks"`` : int
+            ``"blocks"`` (int)
                 Number of calibration blocks in this collection.
 
             Optional keys (present when :meth:`load_calibration_info` was
             called and matched this collection):
 
-            ``"lens"`` : str
+            ``"lens"`` (str)
                 Human-readable lens name (e.g. ``"MW 50mm"``).
-            ``"fw_position"`` : int
+            ``"fw_position"`` (int)
                 0-based filter-wheel position.
-            ``"temp_range"`` : tuple[float, float]
+            ``"temp_range"`` (tuple[float, float])
                 ``(temp_min, temp_max)`` in degrees Celsius.
 
             Optional key (present when :attr:`calibration_names` includes
             this index):
 
-            ``"name"`` : str
+            ``"name"`` (str)
                 Manually assigned human-readable name.
 
         Raises
@@ -2974,9 +2974,9 @@ class Camera:
         dict
             Information about the loaded collection.  Always-present keys:
 
-            ``"index"`` : int
+            ``"index"`` (int)
                 Collection index that was loaded.
-            ``"posix"`` : int
+            ``"posix"`` (int)
                 POSIX timestamp of the loaded collection.
 
             Optional keys (present when metadata was available from
@@ -3140,32 +3140,32 @@ class Camera:
         dict
             Always-present keys:
 
-            ``"type"`` : str or int
+            ``"type"`` (str or int)
                 Calibration type name from
                 :class:`reg.CalibrationCollectionType` (e.g.
                 ``"TELOPS_FIXED"``), or the raw integer if unknown.
-            ``"collection_posix"`` : int
+            ``"collection_posix"`` (int)
                 POSIX timestamp of the active collection (``0`` if none).
-            ``"collection_timestamp"`` : datetime.datetime or None
+            ``"collection_timestamp"`` (datetime.datetime or None)
                 UTC datetime for the active collection, or ``None`` when
                 the POSIX value is zero.
-            ``"block_posix"`` : int
+            ``"block_posix"`` (int)
                 POSIX timestamp of the active block (``0`` if none).
-            ``"block_timestamp"`` : datetime.datetime or None
+            ``"block_timestamp"`` (datetime.datetime or None)
                 UTC datetime for the active block, or ``None`` when the
                 POSIX value is zero.
 
             Optional keys (present when metadata is available):
 
-            ``"index"`` : int
+            ``"index"`` (int)
                 Matched collection index.
-            ``"lens"`` : str
+            ``"lens"`` (str)
                 Lens name from :meth:`load_calibration_info`.
-            ``"fw_position"`` : int
+            ``"fw_position"`` (int)
                 0-based filter-wheel position.
-            ``"temp_range"`` : tuple[float, float]
+            ``"temp_range"`` (tuple[float, float])
                 ``(temp_min, temp_max)`` in degrees Celsius.
-            ``"name"`` : str
+            ``"name"`` (str)
                 Manually assigned name from :attr:`calibration_names`.
 
         Raises
@@ -3583,19 +3583,19 @@ class Camera:
         dict
             A dict with the following keys:
 
-            ``"status"`` : str
+            ``"status"`` (str)
                 Name of the current :class:`reg.MemoryBufferStatus` value
                 (e.g. ``"IDLE"``, ``"HOLDING"``, ``"RECORDING"``).
-            ``"n_sequences"`` : int
+            ``"n_sequences"`` (int)
                 Number of sequence slots configured via
                 :meth:`buffer_configure`.
-            ``"recorded"`` : list[int]
+            ``"recorded"`` (list[int])
                 Frame count for each sequence slot (0-based index).
                 Entries may be 0 if a slot has not been used or if the
                 camera returns a :class:`GVCPError` for that slot.
-            ``"total_bytes"`` : int
+            ``"total_bytes"`` (int)
                 Total capacity of the onboard buffer in bytes.
-            ``"free_bytes"`` : int
+            ``"free_bytes"`` (int)
                 Remaining free space in the buffer in bytes.
 
         Raises
