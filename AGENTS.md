@@ -35,11 +35,7 @@ pip install -e ".[dev,gui]"
 ```
 
 This pulls the dev tools (pytest, ruff, sphinx) and the optional GUI extras.
-
-Note: while pyGigEVision is pre-release, this resolves it over SSH from GitHub
-(`git+ssh://git@github.com/ladisk/pyGigEVision`), so the install needs an SSH
-key with access to that repo. Once pyGigEVision is on PyPI the pin becomes a
-normal version and no SSH access is required.
+The pyGigEVision dependency installs from PyPI like any other package.
 
 ## Test, lint, format
 
@@ -75,7 +71,7 @@ hardware tests, or camera discovery fails. See troubleshooting.md.
 ```
 pyTelops/        driver package: camera.py, registers.py, cli.py, gui.py
 tests/           pytest suite (test_hardware.py is camera-gated)
-examples/        runnable scripts (01_connect_and_grab.py ... 05_external_trigger.py)
+examples/        runnable scripts (01_connect_and_grab.py ... 07_robust_download.py)
 docs/source/     Sphinx docs (RST source)
 ```
 
