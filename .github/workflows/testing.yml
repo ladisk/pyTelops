@@ -1,10 +1,9 @@
 name: Tests
 
-# Manual-only while pyTelops depends on the private pyGigEVision repo via
-# git+ssh. Automated CI on a private dependency needs deploy keys or PAT
-# secrets. Re-enable the push/pull_request triggers when pyGigEVision is on
-# PyPI and the dependency pin is switched (the coordinated public release).
 on:
+  push:
+    branches: [master]
+  pull_request:
   workflow_dispatch:
 
 jobs:
