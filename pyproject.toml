@@ -77,9 +77,6 @@ ignore = ["E501", "N999"]
 [tool.ruff.format]
 quote-style = "double"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [tool.hatch.build.targets.sdist]
 include = [
     "pyTelops/",
