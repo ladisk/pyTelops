@@ -494,8 +494,10 @@ def test_buffer_download_splits_into_chunks():
 
     def dr(frame_id, count, **kw):
         calls.append((frame_id, count))
-        return {off: (np.full((4, 4), frame_id + off, np.uint16),
-                      {"missing_packets": 0}) for off in range(count)}
+        return {
+            off: (np.full((4, 4), frame_id + off, np.uint16), {"missing_packets": 0})
+            for off in range(count)
+        }
 
     cam._download_range = MagicMock(side_effect=dr)
     out = cam.buffer_download(
@@ -517,10 +519,15 @@ def test_buffer_download_recovers_missing_across_chunks_in_order():
 
     def dr(frame_id, count, **kw):
         if frame_id == 1000 and count == 1000:  # 2nd chunk first pass drops position 1500
-            return {off: (np.full((4, 4), 1000 + off, np.uint16), {"missing_packets": 0})
-                    for off in range(1000) if off != 500}
-        return {off: (np.full((4, 4), frame_id + off, np.uint16), {"missing_packets": 0})
-                for off in range(count)}
+            return {
+                off: (np.full((4, 4), 1000 + off, np.uint16), {"missing_packets": 0})
+                for off in range(1000)
+                if off != 500
+            }
+        return {
+            off: (np.full((4, 4), frame_id + off, np.uint16), {"missing_packets": 0})
+            for off in range(count)
+        }
 
     cam._download_range = MagicMock(side_effect=dr)
     out = cam.buffer_download(
@@ -545,7 +552,9 @@ def test_download_range_discards_stale_frame_from_prior_session():
     cam = _fake_cam_for_download()
     q: Queue = Queue()
     # A stale frame left over from a prior session: block_id 3, marker pixel 999.
-    q.put((np.full((4, 4), 999, np.uint16), {"block_id": 3, "missing_packets": 0, "timestamp": 500}))
+    q.put(
+        (np.full((4, 4), 999, np.uint16), {"block_id": 3, "missing_packets": 0, "timestamp": 500})
+    )
 
     cam._gvsp.get_frame_with_info.side_effect = lambda timeout=5.0: (
         q.get_nowait() if not q.empty() else None
@@ -565,8 +574,10 @@ def test_download_range_discards_stale_frame_from_prior_session():
         if addr == reg.REG_ACQUISITION_START and value == 1:
             for bid in (1, 2, 3):
                 q.put(
-                    (np.full((4, 4), bid, np.uint16),
-                     {"block_id": bid, "missing_packets": 0, "timestamp": 1000 + bid})
+                    (
+                        np.full((4, 4), bid, np.uint16),
+                        {"block_id": bid, "missing_packets": 0, "timestamp": 1000 + bid},
+                    )
                 )
 
     cam._gvcp.write_reg.side_effect = wr
@@ -574,7 +585,9 @@ def test_download_range_discards_stale_frame_from_prior_session():
     cam._gvcp.read_float.return_value = 1000.0
 
     with patch("pyTelops.camera.time.sleep"):
-        got = cam._download_range(100, 3, packet_size=1500, bitrate_mbps=500, resend=False, timeout=5)
+        got = cam._download_range(
+            100, 3, packet_size=1500, bitrate_mbps=500, resend=False, timeout=5
+        )
 
     # Only the 3 fresh frames, each at its correct offset; the stale block_id-3
     # frame (pixel 999) must not have been mapped onto position 2.
@@ -660,13 +673,21 @@ def test_buffer_download_raises_on_strided_first_pass_then_recovered_tail():
 
     def dr(frame_id, count, **kw):
         if frame_id == 0 and count == 8:  # first pass: stride-2, only positions 0..3
-            return {off: (np.full((4, 4), off, np.uint16),
-                          {"missing_packets": 0, "timestamp": 1000 + 20 * off})
-                    for off in range(4)}
+            return {
+                off: (
+                    np.full((4, 4), off, np.uint16),
+                    {"missing_packets": 0, "timestamp": 1000 + 20 * off},
+                )
+                for off in range(4)
+            }
         # recovery of the missing tail positions 4..7, addressed by absolute id
-        return {off: (np.full((4, 4), frame_id + off, np.uint16),
-                      {"missing_packets": 0, "timestamp": 1000 + 10 * (frame_id + off)})
-                for off in range(count)}
+        return {
+            off: (
+                np.full((4, 4), frame_id + off, np.uint16),
+                {"missing_packets": 0, "timestamp": 1000 + 10 * (frame_id + off)},
+            )
+            for off in range(count)
+        }
 
     cam._download_range = MagicMock(side_effect=dr)
     with pytest.raises(FrameIntegrityError, match="order"):
@@ -693,8 +714,10 @@ def _dr_with_one_order_blip(n):
 
     def dr(frame_id, count, **kw):
         return {
-            off: (np.full((4, 4), frame_id + off, np.uint16),
-                  {"missing_packets": 0, "timestamp": ts[frame_id + off]})
+            off: (
+                np.full((4, 4), frame_id + off, np.uint16),
+                {"missing_packets": 0, "timestamp": ts[frame_id + off]},
+            )
             for off in range(count)
         }
 
