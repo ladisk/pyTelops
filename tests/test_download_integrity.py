@@ -11,8 +11,8 @@ from pyTelops.camera import (
     _group_contiguous,
     _learn_bitrate,
     _missing_positions,
-    _pace_bitrate,
     _resolve_packet_size,
+    _timestamp_order_report,
 )
 from pyTelops.errors import DownloadStats, FrameIntegrityError
 
@@ -68,18 +68,6 @@ class TestGroupContiguous:
 
     def test_unsorted_input(self):
         assert _group_contiguous([9, 1, 8, 2]) == [(1, 2), (8, 9)]
-
-
-class TestPaceBitrate:
-    def test_round0_is_base(self):
-        assert _pace_bitrate(0, 1000) == 1000.0
-
-    def test_halves_each_round(self):
-        assert _pace_bitrate(1, 1000) == 500.0
-        assert _pace_bitrate(2, 1000) == 250.0
-
-    def test_clamped_to_floor(self):
-        assert _pace_bitrate(10, 1000, floor=100.0) == 100.0
 
 
 def test_download_stats_defaults():
@@ -181,7 +169,7 @@ def test_buffer_download_recovers_never_arrived_in_order():
     assert cam.last_download_stats.n_incomplete == 0
     assert cam.last_download_stats.recovered_by_retry == 2
     assert calls[0][2] == 1000.0  # first pass at base bitrate
-    assert calls[1][2] == 500.0  # recovery round paced lower
+    assert calls[1][2] == 1000.0  # recovery stays at base (lowering it causes striding)
 
 
 def test_buffer_download_raises_when_unrecoverable():
@@ -466,6 +454,150 @@ def test_buffer_download_explicit_bitrate_not_learned():
     assert "bitrate_mbps" not in cam.recommended_download_kwargs
 
 
+def test_download_range_forces_packet_delay_zero():
+    # A high packet_delay (SCPD) makes the camera silently DECIMATE the buffer
+    # download by 2 (confirmed on hardware). _download_range must force SCPD to 0
+    # for the transfer regardless of the user's live streaming packet_delay, and
+    # restore it afterwards.
+    from pyGigEVision.standard import REG_SC_PACKET_DELAY
+
+    cam = _fake_cam_for_download()
+    cam._packet_delay_override = 1000
+    delay_writes = []
+
+    def rd(addr):
+        return 1000 if addr == REG_SC_PACKET_DELAY else 0
+
+    def wr(addr, value):
+        if addr == REG_SC_PACKET_DELAY:
+            delay_writes.append(value)
+
+    cam._gvcp.read_reg.side_effect = rd
+    cam._gvcp.write_reg.side_effect = wr
+    cam._gvcp.read_float.return_value = 1000.0
+    cam._gvsp.get_frame_with_info.side_effect = [
+        (np.ones((4, 4), np.uint16), {"block_id": 1, "missing_packets": 0}),
+        None,
+    ]
+    with patch("pyTelops.camera.time.sleep"):
+        cam._download_range(0, 1, packet_size=1500, bitrate_mbps=500, resend=False, timeout=5)
+    assert 0 in delay_writes, "download must force packet_delay (SCPD) to 0"
+    assert delay_writes[-1] == 1000, "must restore the user's packet_delay after the download"
+
+
+def test_buffer_download_splits_into_chunks():
+    # A large download must be streamed in <= chunk_size sessions: one huge
+    # session overruns the host receive path and loses/mis-orders most frames,
+    # while small sessions come back complete.
+    cam = _fake_cam_for_download()
+    calls = []
+
+    def dr(frame_id, count, **kw):
+        calls.append((frame_id, count))
+        return {
+            off: (np.full((4, 4), frame_id + off, np.uint16), {"missing_packets": 0})
+            for off in range(count)
+        }
+
+    cam._download_range = MagicMock(side_effect=dr)
+    out = cam.buffer_download(
+        n_frames=2500, chunk_size=1000, convert=False, strip_header=False, verbose=False
+    )
+    # First pass: 3 sessions of at most 1000 frames (1000 + 1000 + 500).
+    assert [c[1] for c in calls] == [1000, 1000, 500]
+    assert [c[0] for c in calls] == [0, 1000, 2000]  # consecutive, correctly offset
+    assert out.shape[0] == 2500
+    # Assembled in global frame order across chunk boundaries.
+    assert [int(out[i, 0, 0]) for i in (0, 999, 1000, 2499)] == [0, 999, 1000, 2499]
+    assert cam.last_download_stats.n_incomplete == 0
+
+
+def test_buffer_download_recovers_missing_across_chunks_in_order():
+    # A frame dropped in one chunk's first pass is re-streamed (still <= chunk)
+    # and lands at its correct global position.
+    cam = _fake_cam_for_download()
+
+    def dr(frame_id, count, **kw):
+        if frame_id == 1000 and count == 1000:  # 2nd chunk first pass drops position 1500
+            return {
+                off: (np.full((4, 4), 1000 + off, np.uint16), {"missing_packets": 0})
+                for off in range(1000)
+                if off != 500
+            }
+        return {
+            off: (np.full((4, 4), frame_id + off, np.uint16), {"missing_packets": 0})
+            for off in range(count)
+        }
+
+    cam._download_range = MagicMock(side_effect=dr)
+    out = cam.buffer_download(
+        n_frames=2500, chunk_size=1000, convert=False, strip_header=False, verbose=False
+    )
+    assert out.shape[0] == 2500
+    assert int(out[1500, 0, 0]) == 1500  # recovered frame at its correct position
+    assert cam.last_download_stats.n_incomplete == 0
+    assert cam.last_download_stats.recovered_by_retry == 1
+
+
+def test_download_range_discards_stale_frame_from_prior_session():
+    # Under heavy host load the GVSP receiver falls behind and can leave a frame
+    # from the PREVIOUS download session queued (or unread in the socket buffer).
+    # Block ids restart at 1 each session and _download_range maps
+    # offset = block_id - 1, so that stale frame would be read first and mapped
+    # to the WRONG position in this range (the out-of-order/strided corruption
+    # seen on large downloads under load). The session must flush stale residue
+    # before streaming.
+    from queue import Queue
+
+    cam = _fake_cam_for_download()
+    q: Queue = Queue()
+    # A stale frame left over from a prior session: block_id 3, marker pixel 999.
+    q.put(
+        (np.full((4, 4), 999, np.uint16), {"block_id": 3, "missing_packets": 0, "timestamp": 500})
+    )
+
+    cam._gvsp.get_frame_with_info.side_effect = lambda timeout=5.0: (
+        q.get_nowait() if not q.empty() else None
+    )
+
+    def flush():
+        n = 0
+        while not q.empty():
+            q.get_nowait()
+            n += 1
+        return n
+
+    cam._gvsp.flush.side_effect = flush
+
+    # The camera streams this range's 3 fresh frames when acquisition starts.
+    def wr(addr, value):
+        if addr == reg.REG_ACQUISITION_START and value == 1:
+            for bid in (1, 2, 3):
+                q.put(
+                    (
+                        np.full((4, 4), bid, np.uint16),
+                        {"block_id": bid, "missing_packets": 0, "timestamp": 1000 + bid},
+                    )
+                )
+
+    cam._gvcp.write_reg.side_effect = wr
+    cam._gvcp.read_reg.return_value = 0
+    cam._gvcp.read_float.return_value = 1000.0
+
+    with patch("pyTelops.camera.time.sleep"):
+        got = cam._download_range(
+            100, 3, packet_size=1500, bitrate_mbps=500, resend=False, timeout=5
+        )
+
+    # Only the 3 fresh frames, each at its correct offset; the stale block_id-3
+    # frame (pixel 999) must not have been mapped onto position 2.
+    assert set(got.keys()) == {0, 1, 2}
+    assert int(got[0][0][0, 0]) == 1
+    assert int(got[1][0][0, 0]) == 2
+    assert int(got[2][0][0, 0]) == 3
+    assert all(int(frame[0, 0]) != 999 for frame, _info in got.values())
+
+
 def test_download_range_retries_transient_setup_write():
     # Under extreme host load a control register write during download setup can
     # transiently return GENERIC_ERROR; it must be retried, not abort the download.
@@ -502,3 +634,160 @@ def test_public_exports():
     assert hasattr(pyTelops, "DownloadStats")
     assert hasattr(pyTelops, "tune_connection")
     assert hasattr(pyTelops, "ConnectionReport")
+
+
+def _range_with_ts(pos_to_ts):
+    """Build a ``_download_range`` return dict from ``{position: timestamp}``.
+
+    Every frame is packet-complete; only the leader timestamp varies, so these
+    exercise the ordering check without any packet loss.
+    """
+    return {
+        pos: (np.full((4, 4), pos, np.uint16), {"missing_packets": 0, "timestamp": ts})
+        for pos, ts in pos_to_ts.items()
+    }
+
+
+def test_buffer_download_raises_on_strided_order():
+    # The large-download bug: the camera streams every other buffer frame
+    # (stride-2) for the first pass, then the paced recovery re-streams the tail
+    # by absolute frame id. Every frame is packet-complete, so the old
+    # completeness-only check passed silently. The leader timestamps expose it:
+    # the first block steps by 2x the frame period and the tail restarts the
+    # timeline, so the timestamp drops back (a non-monotonic step) at the splice.
+    cam = _fake_cam_for_download()
+    order = {0: 1000, 1: 1020, 2: 1040, 3: 1060, 4: 1030, 5: 1040, 6: 1050, 7: 1060}
+    cam._download_range = MagicMock(side_effect=lambda frame_id, count, **kw: _range_with_ts(order))
+    with pytest.raises(FrameIntegrityError, match="order"):
+        cam.buffer_download(n_frames=8, convert=False, strip_header=False, verbose=False)
+    assert cam.last_download_stats.n_out_of_order >= 1
+
+
+def test_buffer_download_raises_on_strided_first_pass_then_recovered_tail():
+    # Faithful reproduction of the reported bug through the real recovery loop:
+    # the first full-range pass returns every other buffer frame (stride-2,
+    # timestamps for phys 0,2,4,6) and drops the rest; the paced recovery then
+    # re-streams the tail by absolute frame id (phys 4,5,6,7). The assembled
+    # array is packet-complete but its timestamps drop back at the splice.
+    cam = _fake_cam_for_download()
+
+    def dr(frame_id, count, **kw):
+        if frame_id == 0 and count == 8:  # first pass: stride-2, only positions 0..3
+            return {
+                off: (
+                    np.full((4, 4), off, np.uint16),
+                    {"missing_packets": 0, "timestamp": 1000 + 20 * off},
+                )
+                for off in range(4)
+            }
+        # recovery of the missing tail positions 4..7, addressed by absolute id
+        return {
+            off: (
+                np.full((4, 4), frame_id + off, np.uint16),
+                {"missing_packets": 0, "timestamp": 1000 + 10 * (frame_id + off)},
+            )
+            for off in range(count)
+        }
+
+    cam._download_range = MagicMock(side_effect=dr)
+    with pytest.raises(FrameIntegrityError, match="order"):
+        cam.buffer_download(n_frames=8, convert=False, strip_header=False, verbose=False)
+    assert cam.last_download_stats.n_incomplete == 0  # every frame was packet-complete
+    assert cam.last_download_stats.n_out_of_order >= 1
+
+
+def test_buffer_download_clean_timestamps_pass():
+    cam = _fake_cam_for_download()
+    order = {i: 1000 + 10 * i for i in range(8)}  # evenly spaced, monotonic
+    cam._download_range = MagicMock(side_effect=lambda frame_id, count, **kw: _range_with_ts(order))
+    out = cam.buffer_download(n_frames=8, convert=False, strip_header=False, verbose=False)
+    assert out.shape[0] == 8
+    assert cam.last_download_stats.n_out_of_order == 0
+    assert cam.last_download_stats.n_stride_gaps == 0
+
+
+def _dr_with_one_order_blip(n):
+    """A ``_download_range`` mock returning *n* clean frames with a single
+    backward timestamp blip at position 50 (~2 anomalies -> ~2% for n=100)."""
+    ts = {i: 1000 + 10 * i for i in range(n)}
+    ts[50] = 1000 + 10 * 48  # dip below its neighbours -> 1 out-of-order + 1 stride
+
+    def dr(frame_id, count, **kw):
+        return {
+            off: (
+                np.full((4, 4), frame_id + off, np.uint16),
+                {"missing_packets": 0, "timestamp": ts[frame_id + off]},
+            )
+            for off in range(count)
+        }
+
+    return dr
+
+
+def test_buffer_download_tolerates_minor_order_residual():
+    # A small mis-ordered fraction (below order_tolerance) is recorded and logged
+    # but does NOT raise -- large chunked downloads carry an irreducible ~1%
+    # cross-session residual that should not fail every download.
+    cam = _fake_cam_for_download()
+    cam._download_range = MagicMock(side_effect=_dr_with_one_order_blip(100))
+    out = cam.buffer_download(n_frames=100, convert=False, strip_header=False, verbose=False)
+    assert out is not None and out.shape[0] == 100  # did not raise
+    assert cam.last_download_stats.n_out_of_order >= 1  # residual still recorded
+
+
+def test_buffer_download_order_tolerance_zero_is_strict():
+    cam = _fake_cam_for_download()
+    cam._download_range = MagicMock(side_effect=_dr_with_one_order_blip(100))
+    with pytest.raises(FrameIntegrityError, match="order"):
+        cam.buffer_download(
+            n_frames=100, order_tolerance=0.0, convert=False, strip_header=False, verbose=False
+        )
+
+
+def test_buffer_download_gross_decimation_still_raises_under_tolerance():
+    # ~half the frames strided (packet_delay/low-bitrate decimation) exceeds any
+    # sane tolerance and must still raise.
+    cam = _fake_cam_for_download()
+    # stride-2: every position two periods apart, then the tail restarts
+    order = {i: 1000 + 20 * i for i in range(50)}
+    order.update({50 + i: 1000 + 10 * i for i in range(50)})  # backward splice
+    cam._download_range = MagicMock(side_effect=lambda frame_id, count, **kw: _range_with_ts(order))
+    with pytest.raises(FrameIntegrityError, match="order"):
+        cam.buffer_download(n_frames=100, convert=False, strip_header=False, verbose=False)
+
+
+def test_buffer_download_verify_order_false_bypasses():
+    cam = _fake_cam_for_download()
+    order = {0: 1000, 1: 1020, 2: 1040, 3: 1060, 4: 1030, 5: 1040, 6: 1050, 7: 1060}
+    cam._download_range = MagicMock(side_effect=lambda frame_id, count, **kw: _range_with_ts(order))
+    out = cam.buffer_download(
+        n_frames=8, verify_order=False, convert=False, strip_header=False, verbose=False
+    )
+    assert out.shape[0] == 8  # corruption is still reported in stats, but not raised
+    assert cam.last_download_stats.n_out_of_order >= 1
+
+
+class TestTimestampOrderReport:
+    def test_clean_monotonic_is_ok(self):
+        assert _timestamp_order_report([0, 1, 2, 3, 4], [1000, 1010, 1020, 1030, 1040]) == (0, 0)
+
+    def test_backward_step_and_stride_flagged(self):
+        # first block stride-2 (step 20), tail restarts the timeline (step back)
+        n_back, n_stride = _timestamp_order_report(
+            [0, 1, 2, 3, 4, 5, 6, 7], [1000, 1020, 1040, 1060, 1030, 1040, 1050, 1060]
+        )
+        assert n_back >= 1
+        assert n_stride >= 1
+
+    def test_tolerated_drops_not_flagged(self):
+        # positions 2 and 5 dropped (tolerated); the present frames are still
+        # evenly spaced once normalised by the position gap -> no false positive.
+        assert _timestamp_order_report(
+            [0, 1, 3, 4, 6, 7], [1000, 1010, 1030, 1040, 1060, 1070]
+        ) == (0, 0)
+
+    def test_absent_timestamps_skip(self):
+        assert _timestamp_order_report([0, 1, 2, 3], [0, 0, 0, 0]) == (0, 0)
+
+    def test_too_few_frames_skip(self):
+        assert _timestamp_order_report([0, 1], [5, 6]) == (0, 0)

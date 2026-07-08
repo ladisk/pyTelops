@@ -1,6 +1,60 @@
 Changelog
 =========
 
+Version 0.2.3 (unreleased)
+--------------------------
+
+- **Fixed silent frame decimation of buffer downloads when a non-zero**
+  ``packet_delay`` **is set.** A live-streaming ``packet_delay`` (GVSP
+  inter-packet delay / SCPD) was being applied to memory-buffer downloads too,
+  where it makes the camera silently return **every other frame** (a 2x, or with
+  heavy throttling higher, decimation): the throttled transmit desyncs from the
+  camera's buffer-read clock, so it skips frames -- with contiguous block-ids and
+  no error, so the data looked valid but was time-aliased (a signal at frequency
+  ``f`` appeared at ``2f``). ``buffer_download`` now forces SCPD to 0 for the
+  transfer and restores the user's value afterwards, so downloads are correct
+  regardless of the live ``packet_delay``. For host-side packet loss during
+  download use jumbo packets and/or a lower ``bitrate_mbps`` (both proven), NOT
+  ``packet_delay``. Confirmed on hardware (FAST-M3k, firmware 3.1.13.2): with
+  ``packet_delay=1000`` the same recording strided before the fix and downloads
+  cleanly after.
+- **Large buffer downloads are now streamed in chunks (default 1000 frames per
+  session).** A single large acquisition session overruns the host receive path
+  and the camera's paced readout: an 8000-frame session lost most of its frames
+  (thousands incomplete at idle on a USB-GigE host) and returned them
+  mis-ordered, whereas sessions of at most a thousand frames come back complete.
+  ``buffer_download`` now splits the range into ``chunk_size`` pieces, so large
+  downloads are **100% complete** at idle and under CPU load (validated on
+  hardware). The recovery loop also no longer paces the bitrate *down* between
+  rounds -- a low download bitrate is what makes the camera stride (skip frames),
+  so lowering it to fight packet loss was counter-productive; it stays at the
+  base rate. Use jumbo packets and/or a lower base ``bitrate_mbps`` for loss.
+- ``buffer_download`` now verifies frame **ordering** using the per-frame camera
+  leader timestamps and raises ``FrameIntegrityError`` when more than
+  ``order_tolerance`` (default 5%) of the frames are mis-ordered, duplicated, or
+  strided (new ``verify_order`` parameter, default ``True``). This backstop
+  catches gross corruption such as the decimation above (which mis-orders ~half
+  the frames) even though every packet arrives complete. A small (~1%)
+  irreducible residual of cross-session mis-ordering remains on large downloads
+  -- the camera does not halt a download session promptly, so a session's tail
+  can leak into the next -- and is recorded and logged but tolerated rather than
+  failing every download. The anomaly counts are on ``cam.last_download_stats``
+  (``n_out_of_order``, ``n_stride_gaps``); the check is skipped when the camera
+  does not populate timestamps. Pass ``order_tolerance=0`` for strict behaviour
+  or ``verify_order=False`` to accept frames as delivered.
+- **Fixed stale frames leaking between recovery rounds of a buffer download on a
+  heavily loaded host.** Each paced recovery round re-streams the still-missing
+  frames in a fresh GVSP session, and the session's block id (which restarts at 1)
+  is used to place each frame at ``offset = block_id - 1``. Under host CPU
+  saturation the GVSP receiver could fall behind and leave a frame from the
+  previous session queued -- or unread in the OS socket buffer -- so the next
+  session read it first and mapped it to the **wrong position** (packet-complete
+  but out-of-order / strided frames, which ``verify_order`` above then reported).
+  The receiver now exposes ``flush()`` and ``buffer_download`` drains the frame
+  queue, partial frame buffers, and the socket receive buffer at each session
+  boundary, so recovery is correct under load. Requires
+  ``pyGigEVision>=0.2.2`` (``GVSPReceiver.flush``).
+
 Version 0.2.2
 -------------
 
