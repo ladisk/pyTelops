@@ -52,8 +52,8 @@ Version 0.2.3 (unreleased)
   but out-of-order / strided frames, which ``verify_order`` above then reported).
   The receiver now exposes ``flush()`` and ``buffer_download`` drains the frame
   queue, partial frame buffers, and the socket receive buffer at each session
-  boundary, so recovery is correct under load. Requires the updated pyGigEVision
-  (``GVSPReceiver.flush``).
+  boundary, so recovery is correct under load. Requires
+  ``pyGigEVision>=0.2.2`` (``GVSPReceiver.flush``).
 
 Version 0.2.2
 -------------
