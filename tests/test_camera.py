@@ -742,6 +742,92 @@ class TestConnectLocalIP:
             Camera._active_cameras.clear()
 
 
+class TestDevicePowerControl:
+    """Software power-state control (standby/on) and firmware reset."""
+
+    def test_power_state_returns_enum(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.ON)
+        assert cam.power_state == reg.DevicePowerState.ON
+
+    def test_standby_commands_setpoint_when_on(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.ON)
+        cam.standby()
+        cam._gvcp.write_reg.assert_any_call(
+            reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.STANDBY)
+        )
+
+    def test_standby_idempotent_when_already_standby(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.STANDBY)
+        cam.standby()
+        assert not any(
+            c.args and c.args[0] == reg.REG_DEVICE_POWER_STATE_SETPOINT
+            for c in cam._gvcp.write_reg.call_args_list
+        )
+
+    def test_power_on_commands_setpoint_and_waits(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.STANDBY)
+        cam.wait_until_ready = MagicMock()
+        cam.power_on(timeout=300)
+        cam._gvcp.write_reg.assert_any_call(
+            reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.ON)
+        )
+        cam.wait_until_ready.assert_called_once_with(timeout=300)
+
+    def test_power_on_wait_false_skips_ready(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.STANDBY)
+        cam.wait_until_ready = MagicMock()
+        cam.power_on(wait=False)
+        cam.wait_until_ready.assert_not_called()
+
+    def test_power_on_idempotent_when_already_on(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.ON)
+        cam.wait_until_ready = MagicMock()
+        cam.power_on(wait=False)
+        assert not any(
+            c.args and c.args[0] == reg.REG_DEVICE_POWER_STATE_SETPOINT
+            for c in cam._gvcp.write_reg.call_args_list
+        )
+
+    def test_reset_commands_reset_then_disconnects(self):
+        cam = _make_fake_connected_camera()
+        gvcp = cam._gvcp
+        cam.reset()
+        gvcp.write_reg.assert_any_call(reg.REG_DEVICE_RESET, 1)
+        assert cam.is_connected is False
+
+    def test_reset_requires_connection(self):
+        with pytest.raises(RuntimeError):
+            Camera().reset()
+
+
+class TestConnectTimeout:
+    @patch("pyTelops.camera.GVSPReceiver")
+    @patch("pyTelops.camera.GVCPClient")
+    @patch("pyTelops.camera._find_local_ip_for", return_value="169.254.9.9")
+    @patch("pyTelops.camera.discover")
+    def test_connect_forwards_timeout_to_wait_until_ready(
+        self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
+    ):
+        # issue #15: a from-cold camera needs more than the fixed 120 s, so
+        # connect(timeout=...) must reach wait_until_ready.
+        mock_disc.return_value = []
+        mock_gvcp_cls.return_value.read_reg.return_value = 1  # DEVICE_NOT_READY
+        mock_gvcp_cls.return_value._control_lost = False
+        cam = Camera(ip="169.254.50.50")
+        with patch.object(Camera, "wait_until_ready") as wur:
+            try:
+                cam.connect(timeout=600)
+                wur.assert_called_once_with(timeout=600)
+            finally:
+                Camera._active_cameras.clear()
+
+
 # ============================================================
 # Hardware tests (skipped without --hardware flag)
 # ============================================================

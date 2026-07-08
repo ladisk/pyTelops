@@ -1,6 +1,25 @@
 Changelog
 =========
 
+Version 0.2.3 (unreleased)
+--------------------------
+
+- Added software **power-state control**. ``Camera.standby()`` spins the
+  Stirling cooler down while keeping the GVCP connection open;
+  ``Camera.power_on(wait=True)`` brings it back and waits for the detector to
+  re-cool; and the read-only ``Camera.power_state`` property reports the current
+  ``DevicePowerState``. Standby is the way to quiet the camera and cut power
+  during genuine idle periods without unplugging it -- coolers have a finite
+  cycle life (the camera counts them, see ``diagnostics()``
+  ``cooler_power_on_cycles``), so use it for real idle time, not rapid cycling.
+- Added ``Camera.reset()`` to issue a firmware reset via ``REG_DEVICE_RESET``
+  (0xD340). The camera reboots and the control channel is dropped, so the call
+  marks the camera disconnected; reconnect after it reboots. Prefer
+  ``standby()``/``power_on()`` for routine idling.
+- ``Camera.connect()`` gained a ``timeout`` keyword, forwarded to
+  ``wait_until_ready``, so connecting to a freshly powered (still-cooling)
+  camera no longer fails at the fixed 120 s (issue #15).
+
 Version 0.2.2
 -------------
 

@@ -492,7 +492,7 @@ class Camera:
     # Connection
     # ==========================================================
 
-    def connect(self) -> None:
+    def connect(self, timeout: float = 120.0) -> None:
         """Discover the camera (if needed) and establish GVCP control.
 
         If no IP was supplied at construction time, a GVCP broadcast is
@@ -509,6 +509,15 @@ class Camera:
         image off) and, if the camera reports ``REG_DEVICE_NOT_READY``,
         blocks in :meth:`wait_until_ready` until it is ready. Idempotent
         when already connected.
+
+        Parameters
+        ----------
+        timeout : float, optional
+            Seconds to wait for the camera to finish cooling/initialising if
+            it is not ready when connecting, passed to :meth:`wait_until_ready`.
+            Default ``120.0``. A from-ambient cooldown takes several minutes, so
+            pass a larger value (e.g. ``600``) when connecting to a freshly
+            powered camera.
 
         Raises
         ------
@@ -625,7 +634,7 @@ class Camera:
         # Auto-wait if camera is not ready (cooling down, initializing, etc.)
         with suppress(GVCPError):
             if self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY):
-                self.wait_until_ready()
+                self.wait_until_ready(timeout=timeout)
 
         # Apply sensible defaults (after camera is ready so writes succeed)
         with suppress(GVCPError):
@@ -2447,6 +2456,105 @@ class Camera:
     # ==========================================================
     # Device Management
     # ==========================================================
+
+    @property
+    def power_state(self) -> reg.DevicePowerState:
+        """Current device power state (read-only).
+
+        Reads ``REG_DEVICE_POWER_STATE``: ``STANDBY`` (cooler off), ``ON``
+        (cooler on, operational), or ``IN_TRANSITION``. Set it with
+        :meth:`standby` / :meth:`power_on`.
+
+        Returns
+        -------
+        DevicePowerState
+            The current power state.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
+        self._check_connected()
+        return reg.DevicePowerState(self._gvcp.read_reg(reg.REG_DEVICE_POWER_STATE))
+
+    def standby(self) -> None:
+        """Put the camera into standby (spins the Stirling cooler down).
+
+        Commands ``REG_DEVICE_POWER_STATE_SETPOINT`` to ``STANDBY``. The GVCP
+        connection stays open (this is not a reset), so :meth:`power_on` brings
+        it back. No-op if already in standby.
+
+        Standby is the way to quiet the camera and cut power during genuine idle
+        periods without unplugging it. Coolers have a finite cycle life (the
+        camera counts them; see :meth:`diagnostics`
+        ``cooler_power_on_cycles``), so use it for real idle time, not rapid
+        cycling.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
+        self._check_connected()
+        if self.power_state == reg.DevicePowerState.STANDBY:
+            return
+        self._gvcp.write_reg(
+            reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.STANDBY)
+        )
+
+    def power_on(self, wait: bool = True, timeout: float = 120.0) -> None:
+        """Bring the camera out of standby (spins the cooler back up).
+
+        Commands ``REG_DEVICE_POWER_STATE_SETPOINT`` to ``ON`` (a no-op if
+        already on) and, when *wait* is ``True``, blocks in
+        :meth:`wait_until_ready` until the detector has re-cooled. Coming out of
+        standby the detector must cool for several minutes before it is usable,
+        so raise *timeout* if the default is not enough.
+
+        Parameters
+        ----------
+        wait : bool, optional
+            Block in :meth:`wait_until_ready` until the camera is ready.
+            Default ``True``.
+        timeout : float, optional
+            Seconds passed to :meth:`wait_until_ready`. Default ``120.0``.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        TimeoutError
+            If *wait* is ``True`` and the camera is not ready within *timeout*.
+        """
+        self._check_connected()
+        if self.power_state != reg.DevicePowerState.ON:
+            self._gvcp.write_reg(
+                reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.ON)
+            )
+        if wait:
+            self.wait_until_ready(timeout=timeout)
+
+    def reset(self) -> None:
+        """Issue a device reset (firmware reboot) and disconnect.
+
+        Writes the ``REG_DEVICE_RESET`` command register. The camera reboots and
+        the GVCP control channel is torn down, so this marks the :class:`Camera`
+        disconnected; call :meth:`connect` again once the camera has rebooted
+        (and re-cooled) to resume. For routine idling prefer
+        :meth:`standby`/:meth:`power_on`, which keep the connection and are
+        gentler on the cooler.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
+        self._check_connected()
+        # The reboot drops GVCP mid-write, so the command itself may error.
+        with suppress(GVCPError):
+            self._gvcp.write_reg(reg.REG_DEVICE_RESET, 1)
+        self.disconnect()
 
     def save_config(self) -> None:
         """Save the current configuration to camera non-volatile memory.
