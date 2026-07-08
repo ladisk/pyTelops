@@ -2499,9 +2499,7 @@ class Camera:
         self._check_connected()
         if self.power_state == reg.DevicePowerState.STANDBY:
             return
-        self._gvcp.write_reg(
-            reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.STANDBY)
-        )
+        self._gvcp.write_reg(reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.STANDBY))
 
     def power_on(self, wait: bool = True, timeout: float = 120.0) -> None:
         """Bring the camera out of standby (spins the cooler back up).
@@ -2529,9 +2527,7 @@ class Camera:
         """
         self._check_connected()
         if self.power_state != reg.DevicePowerState.ON:
-            self._gvcp.write_reg(
-                reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.ON)
-            )
+            self._gvcp.write_reg(reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.ON))
         if wait:
             self.wait_until_ready(timeout=timeout)
 
