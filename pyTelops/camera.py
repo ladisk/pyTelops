@@ -85,6 +85,12 @@ from pyGigEVision.standard import (  # noqa: E402
 from . import registers as reg  # noqa: E402
 from .errors import DownloadStats, FrameIntegrityError  # noqa: E402
 
+# The TS-IR returns this exact value (the raw ADC floor converted to Celsius)
+# from REG_DEVICE_TEMPERATURE_READOUT for temperature locations the model does
+# not have, instead of rejecting the read. diagnostics() maps it back to None to
+# honour the documented "unsupported -> None" contract (issue #16).
+_TEMPERATURE_UNSUPPORTED_SENTINEL = -138.30128479003906
+
 # --- Enum string resolution ---
 _ENUM_ALIASES = {
     reg.CalibrationMode: {
@@ -2496,7 +2502,12 @@ class Camera:
         for loc in reg.TemperatureLocation:
             try:
                 self._gvcp.write_reg(reg.REG_DEVICE_TEMPERATURE_SELECTOR, int(loc))
-                temps[loc.name.lower()] = self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE_READOUT)
+                value = self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE_READOUT)
+                # An unsupported location is reported as the ADC-floor sentinel
+                # rather than a GVCPError; map it to the documented None (#16).
+                if abs(value - _TEMPERATURE_UNSUPPORTED_SENTINEL) < 1e-4:
+                    value = None
+                temps[loc.name.lower()] = value
             except GVCPError:
                 temps[loc.name.lower()] = None
 

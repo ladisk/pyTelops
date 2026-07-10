@@ -902,6 +902,24 @@ class TestWaitUntilReady:
         assert clk.t < 600
 
 
+class TestDiagnosticsSentinel:
+    """Unsupported temperature locations must map to None, not the raw ADC-floor
+    sentinel the camera returns instead (issue #16)."""
+
+    def test_temperature_sentinel_maps_to_none(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_float.return_value = -138.30128479003906
+        d = cam.diagnostics()
+        assert d["temperatures"]
+        assert all(v is None for v in d["temperatures"].values())
+
+    def test_real_temperature_preserved(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_float.return_value = -196.3
+        d = cam.diagnostics()
+        assert all(v == -196.3 for v in d["temperatures"].values())
+
+
 # ============================================================
 # Hardware tests (skipped without --hardware flag)
 # ============================================================
