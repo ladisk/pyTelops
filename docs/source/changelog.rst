@@ -1,8 +1,8 @@
 Changelog
 =========
 
-Version 0.2.3 (unreleased)
---------------------------
+Version 0.2.3
+-------------
 
 - **Fixed silent frame decimation of buffer downloads when a non-zero**
   ``packet_delay`` **is set.** A live-streaming ``packet_delay`` (GVSP
