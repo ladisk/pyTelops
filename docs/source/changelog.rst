@@ -66,9 +66,15 @@ Version 0.2.3 (unreleased)
   (0xD340). The camera reboots and the control channel is dropped, so the call
   marks the camera disconnected; reconnect after it reboots. Prefer
   ``standby()``/``power_on()`` for routine idling.
-- ``Camera.connect()`` gained a ``timeout`` keyword, forwarded to
-  ``wait_until_ready``, so connecting to a freshly powered (still-cooling)
-  camera no longer fails at the fixed 120 s (issue #15).
+- ``connect()`` / ``wait_until_ready()`` no longer time out while the camera is
+  cooling. The old fixed 120 s wait failed on a freshly powered camera (an
+  from-ambient cooldown takes minutes) yet made you wait a full two minutes on a
+  genuinely absent one. There are now two budgets: a short ``timeout``
+  (default 10 s) that applies while the camera is unresponsive or stuck -- so a
+  missing camera fails fast -- and a long ``cooling_timeout`` (default 600 s)
+  that applies while the camera reports it is actively cooling or initialising
+  (from its TDC status). Both are keyword arguments on ``connect()`` and
+  ``wait_until_ready()`` (issue #15).
 
 Version 0.2.2
 -------------
