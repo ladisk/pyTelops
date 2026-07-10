@@ -662,13 +662,15 @@ class TestPowerCycle:
     def test_reset_reboots_then_reconnect(self, cam):
         cam.reset()
         assert cam.is_connected is False
-        # The camera reboots and drops off the network; wait for it to reappear,
-        # then reconnect and let it re-cool so the fixture stays usable.
-        deadline = time.monotonic() + 600
+        assert cam.camera_ip is None  # cached address cleared for re-discovery
+        # The camera reboots (possibly onto a new link-local IP) and re-cools;
+        # retry connect() -- it re-discovers -- until it comes back ready, so the
+        # fixture stays usable.
+        deadline = time.monotonic() + 700
         while time.monotonic() < deadline:
-            if discover(timeout=3.0):
+            with contextlib.suppress(Exception):
+                cam.connect(cooling_timeout=900)
                 break
-            time.sleep(3.0)
-        cam.connect(timeout=600)
+            time.sleep(5.0)
         assert cam.is_connected
         assert cam.power_state == reg.DevicePowerState.ON

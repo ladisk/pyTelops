@@ -64,8 +64,10 @@ Version 0.2.3 (unreleased)
   ``cooler_power_on_cycles``), so use it for real idle time, not rapid cycling.
 - Added ``Camera.reset()`` to issue a firmware reset via ``REG_DEVICE_RESET``
   (0xD340). The camera reboots and the control channel is dropped, so the call
-  marks the camera disconnected; reconnect after it reboots. Prefer
-  ``standby()``/``power_on()`` for routine idling.
+  marks the camera disconnected; reconnect after it reboots. The reboot can bring
+  the camera up on a new link-local IP, so ``reset()`` clears the cached address
+  and the next ``connect()`` re-discovers it. Prefer ``standby()``/``power_on()``
+  for routine idling.
 - ``connect()`` / ``wait_until_ready()`` no longer time out while the camera is
   cooling. The old fixed 120 s wait failed on a freshly powered camera (an
   from-ambient cooldown takes minutes) yet made you wait a full two minutes on a

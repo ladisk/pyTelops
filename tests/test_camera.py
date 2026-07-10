@@ -796,10 +796,13 @@ class TestDevicePowerControl:
 
     def test_reset_commands_reset_then_disconnects(self):
         cam = _make_fake_connected_camera()
+        cam._camera_ip = "169.254.1.5"
         gvcp = cam._gvcp
         cam.reset()
         gvcp.write_reg.assert_any_call(reg.REG_DEVICE_RESET, 1)
         assert cam.is_connected is False
+        # cached IP cleared so the next connect() re-discovers the rebooted camera
+        assert cam.camera_ip is None
 
     def test_reset_requires_connection(self):
         with pytest.raises(RuntimeError):

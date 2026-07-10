@@ -2611,7 +2611,9 @@ class Camera:
         Writes the ``REG_DEVICE_RESET`` command register. The camera reboots and
         the GVCP control channel is torn down, so this marks the :class:`Camera`
         disconnected; call :meth:`connect` again once the camera has rebooted
-        (and re-cooled) to resume. For routine idling prefer
+        (and re-cooled) to resume. The reboot can bring the camera up on a new
+        (link-local) IP, so the cached address is cleared and the next
+        :meth:`connect` re-discovers the camera. For routine idling prefer
         :meth:`standby`/:meth:`power_on`, which keep the connection and are
         gentler on the cooler.
 
@@ -2625,6 +2627,10 @@ class Camera:
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_DEVICE_RESET, 1)
         self.disconnect()
+        # The camera may reboot onto a different link-local IP; forget the cached
+        # address so the next connect() re-discovers it instead of chasing the
+        # old (now dead) one.
+        self._camera_ip = None
 
     def save_config(self) -> None:
         """Save the current configuration to camera non-volatile memory.
