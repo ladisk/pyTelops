@@ -742,6 +742,166 @@ class TestConnectLocalIP:
             Camera._active_cameras.clear()
 
 
+class TestDevicePowerControl:
+    """Software power-state control (standby/on) and firmware reset."""
+
+    def test_power_state_returns_enum(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.ON)
+        assert cam.power_state == reg.DevicePowerState.ON
+
+    def test_standby_commands_setpoint_when_on(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.ON)
+        cam.standby()
+        cam._gvcp.write_reg.assert_any_call(
+            reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.STANDBY)
+        )
+
+    def test_standby_idempotent_when_already_standby(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.STANDBY)
+        cam.standby()
+        assert not any(
+            c.args and c.args[0] == reg.REG_DEVICE_POWER_STATE_SETPOINT
+            for c in cam._gvcp.write_reg.call_args_list
+        )
+
+    def test_power_on_commands_setpoint_and_waits(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.STANDBY)
+        cam.wait_until_ready = MagicMock()
+        cam.power_on(timeout=300)
+        cam._gvcp.write_reg.assert_any_call(
+            reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.ON)
+        )
+        cam.wait_until_ready.assert_called_once_with(cooling_timeout=300)
+
+    def test_power_on_wait_false_skips_ready(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.STANDBY)
+        cam.wait_until_ready = MagicMock()
+        cam.power_on(wait=False)
+        cam.wait_until_ready.assert_not_called()
+
+    def test_power_on_idempotent_when_already_on(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = int(reg.DevicePowerState.ON)
+        cam.wait_until_ready = MagicMock()
+        cam.power_on(wait=False)
+        assert not any(
+            c.args and c.args[0] == reg.REG_DEVICE_POWER_STATE_SETPOINT
+            for c in cam._gvcp.write_reg.call_args_list
+        )
+
+    def test_reset_commands_reset_then_disconnects(self):
+        cam = _make_fake_connected_camera()
+        cam._camera_ip = "169.254.1.5"
+        gvcp = cam._gvcp
+        cam.reset()
+        gvcp.write_reg.assert_any_call(reg.REG_DEVICE_RESET, 1)
+        assert cam.is_connected is False
+        # cached IP cleared so the next connect() re-discovers the rebooted camera
+        assert cam.camera_ip is None
+
+    def test_reset_requires_connection(self):
+        with pytest.raises(RuntimeError):
+            Camera().reset()
+
+
+class TestConnectTimeout:
+    @patch("pyTelops.camera.GVSPReceiver")
+    @patch("pyTelops.camera.GVCPClient")
+    @patch("pyTelops.camera._find_local_ip_for", return_value="169.254.9.9")
+    @patch("pyTelops.camera.discover")
+    def test_connect_forwards_timeouts_to_wait_until_ready(
+        self, mock_disc, mock_find, mock_gvcp_cls, mock_gvsp_cls
+    ):
+        # issue #15: connect() must forward the readiness timeouts so a
+        # from-cold camera is waited out.
+        mock_disc.return_value = []
+        mock_gvcp_cls.return_value.read_reg.return_value = 1  # DEVICE_NOT_READY
+        mock_gvcp_cls.return_value._control_lost = False
+        cam = Camera(ip="169.254.50.50")
+        with patch.object(Camera, "wait_until_ready") as wur:
+            try:
+                cam.connect(timeout=30, cooling_timeout=900)
+                wur.assert_called_once_with(timeout=30, cooling_timeout=900)
+            finally:
+                Camera._active_cameras.clear()
+
+
+class _FakeClock:
+    """Deterministic clock: each sleep() advances monotonic() by that much."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, dt):
+        self.t += dt
+
+
+class TestWaitUntilReady:
+    """Short budget when the camera is stuck/unresponsive; long budget while it
+    is actively cooling or initialising (issue #15 follow-up)."""
+
+    def test_returns_when_ready(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = 0  # DEVICE_NOT_READY = 0
+        cam.wait_until_ready(verbose=False)  # returns without raising
+
+    def test_fails_fast_when_not_progressing(self):
+        # not_ready but TDC shows no cooling/init activity -> stuck -> short budget
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.side_effect = lambda a: 1 if a == reg.REG_DEVICE_NOT_READY else 0
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", clk.sleep),
+            pytest.raises(TimeoutError),
+        ):
+            cam.wait_until_ready(timeout=10, cooling_timeout=600, verbose=False)
+        assert 10 <= clk.t < 600  # bailed on the short budget, not the long one
+
+    def test_patient_while_cooling(self):
+        # not_ready + cooling well past the short budget, then ready -> no raise
+        cam = _make_fake_connected_camera()
+        state = {"n": 0}
+
+        def rd(addr):
+            if addr == reg.REG_DEVICE_NOT_READY:
+                state["n"] += 1
+                return 0 if state["n"] > 20 else 1
+            return reg.TDC_WAITING_FOR_COOLER  # actively cooling -> progressing
+
+        cam._gvcp.read_reg.side_effect = rd
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", clk.sleep),
+        ):
+            cam.wait_until_ready(timeout=10, cooling_timeout=600, verbose=False)
+        assert clk.t > 10  # waited past the short budget because it was cooling
+
+    def test_invalid_params_is_not_progressing(self):
+        # "invalid parameters" is an error state that won't resolve by waiting
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.side_effect = lambda a: (
+            1 if a == reg.REG_DEVICE_NOT_READY else reg.TDC_WAITING_FOR_VALID_PARAMS
+        )
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", clk.sleep),
+            pytest.raises(TimeoutError),
+        ):
+            cam.wait_until_ready(timeout=10, cooling_timeout=600, verbose=False)
+        assert clk.t < 600
+
+
 class TestDiagnosticsSentinel:
     """Unsupported temperature locations must map to None, not the raw ADC-floor
     sentinel the camera returns instead (issue #16)."""

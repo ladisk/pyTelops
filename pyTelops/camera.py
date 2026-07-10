@@ -533,7 +533,7 @@ class Camera:
     # Connection
     # ==========================================================
 
-    def connect(self) -> None:
+    def connect(self, timeout: float = 10.0, cooling_timeout: float = 600.0) -> None:
         """Discover the camera (if needed) and establish GVCP control.
 
         If no IP was supplied at construction time, a GVCP broadcast is
@@ -550,6 +550,18 @@ class Camera:
         image off) and, if the camera reports ``REG_DEVICE_NOT_READY``,
         blocks in :meth:`wait_until_ready` until it is ready. Idempotent
         when already connected.
+
+        Parameters
+        ----------
+        timeout : float, optional
+            Readiness budget while the camera is not making progress toward ready
+            (unresponsive / stuck). Default ``10.0`` -- a genuinely absent camera
+            fails fast rather than blocking. Forwarded to :meth:`wait_until_ready`.
+        cooling_timeout : float, optional
+            Readiness budget while the camera is actively cooling or initialising.
+            Default ``600.0``, so connecting to a freshly powered, still-cooling
+            camera waits it out instead of timing out. Forwarded to
+            :meth:`wait_until_ready`.
 
         Raises
         ------
@@ -666,7 +678,7 @@ class Camera:
         # Auto-wait if camera is not ready (cooling down, initializing, etc.)
         with suppress(GVCPError):
             if self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY):
-                self.wait_until_ready()
+                self.wait_until_ready(timeout=timeout, cooling_timeout=cooling_timeout)
 
         # Apply sensible defaults (after camera is ready so writes succeed)
         with suppress(GVCPError):
@@ -678,27 +690,37 @@ class Camera:
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_TEST_IMAGE_SELECTOR, reg.TestImageSelector.OFF)
 
-    def wait_until_ready(self, timeout: float = 120.0, verbose: bool = True) -> None:
-        """Block until the camera finishes cooling down and initialising.
+    def wait_until_ready(
+        self, timeout: float = 10.0, cooling_timeout: float = 600.0, verbose: bool = True
+    ) -> None:
+        """Block until the camera is ready, with two separate time budgets.
 
-        Polls ``REG_DEVICE_NOT_READY`` every two seconds. If ``verbose``
-        is ``True``, the current TDC status bits (e.g. "Cooling down
-        (18.5 C)") are printed on a single overwriting line so the
-        terminal is not flooded. Called automatically by :meth:`connect`,
-        :meth:`grab`, :meth:`acquire`, and :meth:`buffer_record` when
-        the camera is not yet ready.
+        Polls ``REG_DEVICE_NOT_READY``. While the camera reports it is actively
+        cooling or initialising (its TDC status shows a "getting ready" reason),
+        it is waited out for up to *cooling_timeout* -- a from-ambient cooldown
+        legitimately takes several minutes. Otherwise -- the camera is not
+        responding, is wedged, or reports a non-recoverable state such as invalid
+        parameters -- only the short *timeout* is allowed, so a genuinely absent
+        or stuck camera fails fast instead of blocking for minutes. Once the
+        camera has shown any active-progress state the long budget applies for
+        the rest of the wait. Called automatically by :meth:`connect`,
+        :meth:`grab`, :meth:`acquire`, and :meth:`buffer_record`.
 
         Parameters
         ----------
         timeout : float, optional
-            Maximum seconds to wait before raising. Default ``120.0``.
+            Seconds to wait while the camera is NOT making progress toward ready
+            (unresponsive, wedged, or an error state). Default ``10.0``.
+        cooling_timeout : float, optional
+            Seconds to wait while the camera IS actively cooling or initialising.
+            Default ``600.0``.
         verbose : bool, optional
             Print a live status line while waiting. Default ``True``.
 
         Raises
         ------
         TimeoutError
-            If the camera is still not ready after *timeout* seconds.
+            If the camera is still not ready after the applicable budget.
         RuntimeError
             If the camera is not connected.
         """
@@ -717,40 +739,57 @@ class Camera:
             reg.TDC_WAITING_FOR_FLASH_SETTINGS: "Loading saved settings",
             reg.TDC_WAITING_FOR_VALID_PARAMS: "Invalid parameters",
         }
+        # "Progressing" = the camera is actively getting ready and will resolve
+        # on its own: every reason above except the invalid-parameters error.
+        progressing_mask = 0
+        for _flag in _tdc_reasons:
+            if _flag != reg.TDC_WAITING_FOR_VALID_PARAMS:
+                progressing_mask |= _flag
 
-        deadline = time.monotonic() + timeout
+        start = time.monotonic()
         printed = False
+        progressing_seen = False
 
-        while time.monotonic() < deadline:
+        while True:
             not_ready = self._gvcp.read_reg(reg.REG_DEVICE_NOT_READY)
             if not not_ready:
                 if verbose and printed:
-                    elapsed = timeout - (deadline - time.monotonic())
-                    print(f"\rCamera ready. ({elapsed:.0f}s)          ", flush=True)
+                    print(
+                        f"\rCamera ready. ({time.monotonic() - start:.0f}s)          ",
+                        flush=True,
+                    )
                 return
 
-            # Build status message
-            tdc = self._gvcp.read_reg(reg.REG_TDC_STATUS)
-            tdc &= ~reg.TDC_ACQUISITION_STARTED
+            try:
+                tdc = self._gvcp.read_reg(reg.REG_TDC_STATUS) & ~reg.TDC_ACQUISITION_STARTED
+            except GVCPError:
+                tdc = 0
+            if tdc & progressing_mask:
+                progressing_seen = True
 
-            reasons = [desc for flag, desc in _tdc_reasons.items() if tdc & flag]
-            msg = ", ".join(reasons) if reasons else "Not ready"
+            elapsed = time.monotonic() - start
+            budget = cooling_timeout if progressing_seen else timeout
+            if elapsed > budget:
+                reasons = [desc for flag, desc in _tdc_reasons.items() if tdc & flag]
+                why = ", ".join(reasons) if reasons else "not responding"
+                hint = (
+                    "still cooling -- raise cooling_timeout"
+                    if progressing_seen
+                    else "not making progress -- check power, cabling, and that no other "
+                    "application holds control"
+                )
+                raise TimeoutError(f"Camera not ready after {elapsed:.0f}s ({why}); {hint}.")
 
-            if tdc & reg.TDC_WAITING_FOR_COOLER:
-                try:
-                    temp = self.sensor_temperature("sensor")
-                    msg += f" ({temp:.1f} C)"
-                except Exception:
-                    pass
-
-            elapsed = timeout - (deadline - time.monotonic())
             if verbose:
+                reasons = [desc for flag, desc in _tdc_reasons.items() if tdc & flag]
+                msg = ", ".join(reasons) if reasons else "Not ready"
+                if tdc & reg.TDC_WAITING_FOR_COOLER:
+                    with suppress(Exception):
+                        msg += f" ({self.sensor_temperature('sensor'):.1f} C)"
                 print(f"\rWaiting: {msg} [{elapsed:.0f}s]          ", end="", flush=True)
                 printed = True
 
             time.sleep(2.0)
-
-        raise TimeoutError(f"Camera not ready after {timeout:.0f}s")
 
     @property
     def tdc_status(self) -> int:
@@ -2501,6 +2540,108 @@ class Camera:
     # ==========================================================
     # Device Management
     # ==========================================================
+
+    @property
+    def power_state(self) -> reg.DevicePowerState:
+        """Current device power state (read-only).
+
+        Reads ``REG_DEVICE_POWER_STATE``: ``STANDBY`` (cooler off), ``ON``
+        (cooler on, operational), or ``IN_TRANSITION``. Set it with
+        :meth:`standby` / :meth:`power_on`.
+
+        Returns
+        -------
+        DevicePowerState
+            The current power state.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
+        self._check_connected()
+        return reg.DevicePowerState(self._gvcp.read_reg(reg.REG_DEVICE_POWER_STATE))
+
+    def standby(self) -> None:
+        """Put the camera into standby (spins the Stirling cooler down).
+
+        Commands ``REG_DEVICE_POWER_STATE_SETPOINT`` to ``STANDBY``. The GVCP
+        connection stays open (this is not a reset), so :meth:`power_on` brings
+        it back. No-op if already in standby.
+
+        Standby is the way to quiet the camera and cut power during genuine idle
+        periods without unplugging it. Coolers have a finite cycle life (the
+        camera counts them; see :meth:`diagnostics`
+        ``cooler_power_on_cycles``), so use it for real idle time, not rapid
+        cycling.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
+        self._check_connected()
+        if self.power_state == reg.DevicePowerState.STANDBY:
+            return
+        self._gvcp.write_reg(reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.STANDBY))
+
+    def power_on(self, wait: bool = True, timeout: float = 600.0) -> None:
+        """Bring the camera out of standby (spins the cooler back up).
+
+        Commands ``REG_DEVICE_POWER_STATE_SETPOINT`` to ``ON`` (a no-op if
+        already on) and, when *wait* is ``True``, blocks in
+        :meth:`wait_until_ready` until the detector has re-cooled. Coming out of
+        standby the detector must cool for several minutes before it is usable,
+        so *timeout* is the cooling budget; raise it if the default is not enough.
+
+        Parameters
+        ----------
+        wait : bool, optional
+            Block in :meth:`wait_until_ready` until the camera is ready.
+            Default ``True``.
+        timeout : float, optional
+            Seconds to wait for the detector to re-cool, passed as
+            :meth:`wait_until_ready`'s ``cooling_timeout``. Default ``600.0``.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        TimeoutError
+            If *wait* is ``True`` and the camera is not ready within *timeout*.
+        """
+        self._check_connected()
+        if self.power_state != reg.DevicePowerState.ON:
+            self._gvcp.write_reg(reg.REG_DEVICE_POWER_STATE_SETPOINT, int(reg.DevicePowerState.ON))
+        if wait:
+            self.wait_until_ready(cooling_timeout=timeout)
+
+    def reset(self) -> None:
+        """Issue a device reset (firmware reboot) and disconnect.
+
+        Writes the ``REG_DEVICE_RESET`` command register. The camera reboots and
+        the GVCP control channel is torn down, so this marks the :class:`Camera`
+        disconnected; call :meth:`connect` again once the camera has rebooted
+        (and re-cooled) to resume. The reboot can bring the camera up on a new
+        (link-local) IP, so the cached address is cleared and the next
+        :meth:`connect` re-discovers the camera. For routine idling prefer
+        :meth:`standby`/:meth:`power_on`, which keep the connection and are
+        gentler on the cooler.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        """
+        self._check_connected()
+        # The reboot drops GVCP mid-write, so the command itself may error.
+        with suppress(GVCPError):
+            self._gvcp.write_reg(reg.REG_DEVICE_RESET, 1)
+        self.disconnect()
+        # The camera may reboot onto a different link-local IP; forget the cached
+        # address so the next connect() re-discovers it instead of chasing the
+        # old (now dead) one.
+        self._camera_ip = None
 
     def save_config(self) -> None:
         """Save the current configuration to camera non-volatile memory.

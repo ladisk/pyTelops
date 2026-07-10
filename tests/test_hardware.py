@@ -618,3 +618,59 @@ class TestFullWorkflow:
         assert data.shape[0] >= 15  # allow frame loss in download
 
         cam.buffer_clear()
+
+
+# ============================================================
+# Power-state control (issue power management)
+# ============================================================
+
+
+@pytest.mark.hardware
+class TestPowerControl:
+    """Non-cycling power checks: safe to run in the routine hardware suite."""
+
+    def test_power_state_readable(self, cam):
+        assert isinstance(cam.power_state, reg.DevicePowerState)
+
+    def test_power_on_idempotent_when_ready(self, cam):
+        # The shared camera is connected and ON; power_on() must be a no-op that
+        # neither errors nor changes the state (no cooler cycle).
+        cam.power_on(wait=False)
+        assert cam.power_state == reg.DevicePowerState.ON
+
+
+@pytest.mark.hardware
+@pytest.mark.power_cycle
+class TestPowerCycle:
+    """Physically cycles the cooler / reboots the camera. Gated behind
+    --power-cycle: each run wears the Stirling cooler and takes minutes to
+    re-cool. Both tests restore the shared camera to a ready state on exit.
+    """
+
+    def test_standby_then_power_on(self, cam):
+        assert cam.power_state == reg.DevicePowerState.ON
+        cam.standby()
+        for _ in range(30):  # allow the power-state transition to settle
+            if cam.power_state == reg.DevicePowerState.STANDBY:
+                break
+            time.sleep(1.0)
+        assert cam.power_state == reg.DevicePowerState.STANDBY
+        # Bring it back and wait for the detector to re-cool.
+        cam.power_on(wait=True, timeout=600)
+        assert cam.power_state == reg.DevicePowerState.ON
+
+    def test_reset_reboots_then_reconnect(self, cam):
+        cam.reset()
+        assert cam.is_connected is False
+        assert cam.camera_ip is None  # cached address cleared for re-discovery
+        # The camera reboots (possibly onto a new link-local IP) and re-cools;
+        # retry connect() -- it re-discovers -- until it comes back ready, so the
+        # fixture stays usable.
+        deadline = time.monotonic() + 700
+        while time.monotonic() < deadline:
+            with contextlib.suppress(Exception):
+                cam.connect(cooling_timeout=900)
+                break
+            time.sleep(5.0)
+        assert cam.is_connected
+        assert cam.power_state == reg.DevicePowerState.ON

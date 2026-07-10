@@ -54,6 +54,29 @@ Version 0.2.3 (unreleased)
   queue, partial frame buffers, and the socket receive buffer at each session
   boundary, so recovery is correct under load. Requires
   ``pyGigEVision>=0.2.2`` (``GVSPReceiver.flush``).
+- Added software **power-state control**. ``Camera.standby()`` spins the
+  Stirling cooler down while keeping the GVCP connection open;
+  ``Camera.power_on(wait=True)`` brings it back and waits for the detector to
+  re-cool; and the read-only ``Camera.power_state`` property reports the current
+  ``DevicePowerState``. Standby is the way to quiet the camera and cut power
+  during genuine idle periods without unplugging it -- coolers have a finite
+  cycle life (the camera counts them, see ``diagnostics()``
+  ``cooler_power_on_cycles``), so use it for real idle time, not rapid cycling.
+- Added ``Camera.reset()`` to issue a firmware reset via ``REG_DEVICE_RESET``
+  (0xD340). The camera reboots and the control channel is dropped, so the call
+  marks the camera disconnected; reconnect after it reboots. The reboot can bring
+  the camera up on a new link-local IP, so ``reset()`` clears the cached address
+  and the next ``connect()`` re-discovers it. Prefer ``standby()``/``power_on()``
+  for routine idling.
+- ``connect()`` / ``wait_until_ready()`` no longer time out while the camera is
+  cooling. The old fixed 120 s wait failed on a freshly powered camera (an
+  from-ambient cooldown takes minutes) yet made you wait a full two minutes on a
+  genuinely absent one. There are now two budgets: a short ``timeout``
+  (default 10 s) that applies while the camera is unresponsive or stuck -- so a
+  missing camera fails fast -- and a long ``cooling_timeout`` (default 600 s)
+  that applies while the camera reports it is actively cooling or initialising
+  (from its TDC status). Both are keyword arguments on ``connect()`` and
+  ``wait_until_ready()`` (issue #15).
 - ``diagnostics()`` now returns ``None`` for temperature locations the camera
   model does not support, as its docstring already promised. On the TS-IR the
   unsupported thermistor locations reported the raw ADC-floor sentinel
