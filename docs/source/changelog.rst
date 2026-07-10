@@ -54,6 +54,11 @@ Version 0.2.3 (unreleased)
   queue, partial frame buffers, and the socket receive buffer at each session
   boundary, so recovery is correct under load. Requires
   ``pyGigEVision>=0.2.2`` (``GVSPReceiver.flush``).
+- ``diagnostics()`` now returns ``None`` for temperature locations the camera
+  model does not support, as its docstring already promised. On the TS-IR the
+  unsupported thermistor locations reported the raw ADC-floor sentinel
+  (``-138.3`` C) instead of rejecting the read, leaking through as a bogus
+  temperature; it is now detected and mapped to ``None`` (issue #16).
 
 Version 0.2.2
 -------------
