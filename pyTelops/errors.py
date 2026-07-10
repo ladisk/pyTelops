@@ -17,6 +17,12 @@ class DownloadStats:
     n_incomplete: int = 0
     incomplete_frame_ids: list[int] = field(default_factory=list)
     per_frame_missing: dict[int, int] = field(default_factory=dict)
+    #: Non-monotonic timestamp steps among assembled frames (duplicated or
+    #: reordered frames). Zero for a correctly ordered download.
+    n_out_of_order: int = 0
+    #: Consecutive frames whose per-position timestamp step is a multiple of the
+    #: base frame period, i.e. the camera skipped frames (strided read).
+    n_stride_gaps: int = 0
     resend_requested: int = 0
     resend_recovered: int = 0
     resend_failed: int = 0

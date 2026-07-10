@@ -312,19 +312,6 @@ def _group_contiguous(positions):
     return runs
 
 
-def _pace_bitrate(round_idx, base, floor=100.0, factor=0.5):
-    """Bitrate (Mbit/s) for recovery *round_idx*.
-
-    Round 0 (the first full pass) uses *base*; each later round halves the rate
-    geometrically toward *floor*, so re-downloads of dropped frames pace slower
-    than the first pass and converge instead of re-colliding with the same
-    congestion.
-    """
-    if round_idx <= 0:
-        return float(base)
-    return max(float(floor), float(base) * (factor**round_idx))
-
-
 def _learn_bitrate(first_pass_frac, current_bitrate, *, threshold=0.95, factor=0.5, floor=100.0):
     """Next starting bitrate given the first-pass completeness of this download.
 
@@ -334,6 +321,54 @@ def _learn_bitrate(first_pass_frac, current_bitrate, *, threshold=0.95, factor=0
     if first_pass_frac >= threshold:
         return float(current_bitrate)
     return max(float(floor), float(current_bitrate) * factor)
+
+
+def _timestamp_order_report(positions, timestamps):
+    """Check assembled buffer-download frames for ordering corruption.
+
+    The camera leader timestamp is a monotonic hardware clock; consecutive
+    buffer frames are one frame period apart. In a correct download the
+    timestamp therefore increases with assembled position at a constant
+    per-position rate. Two failure modes break that invariant even when every
+    packet arrived (so a completeness-only check misses them):
+
+    * frames the camera **skipped** (a strided read, observed on very large
+      single-session downloads) show a per-position step that is a multiple of
+      the base period;
+    * **duplicated or reordered** frames show a non-increasing step.
+
+    Legitimate tolerated drops leave a proportionally larger *position* gap, so
+    normalising the timestamp step by the position delta keeps them from being
+    flagged.
+
+    Parameters
+    ----------
+    positions : sequence of int
+        Assembled frame positions, ascending.
+    timestamps : sequence of int
+        Camera leader timestamp for each position (same order).
+
+    Returns
+    -------
+    tuple of (int, int)
+        ``(n_out_of_order, n_stride_gaps)``. Both zero when there is nothing to
+        check or the camera did not populate timestamps (all zero) -- the check
+        makes no claim rather than a false one.
+    """
+    if len(positions) < 3:
+        return (0, 0)
+    pos = np.asarray(positions, dtype=np.float64)
+    ts = np.asarray(timestamps, dtype=np.float64)
+    if np.any(ts <= 0):
+        return (0, 0)
+    step = np.diff(ts) / np.diff(pos)
+    n_out_of_order = int(np.sum(step <= 0))
+    positive = step[step > 0]
+    if positive.size == 0:
+        return (n_out_of_order, 0)
+    base = float(np.percentile(positive, 25))  # robust estimate of the true period
+    n_stride = int(np.sum(step > 1.5 * base)) if base > 0 else 0
+    return (n_out_of_order, n_stride)
 
 
 def _resolve_packet_size(requested, probe_max):
@@ -1659,11 +1694,19 @@ class Camera:
         subsequent :meth:`start_stream` calls, surviving stream
         restarts and context-manager re-entry.
 
-        This setting has no effect on internal memory-buffer recording,
-        which runs at sensor speed inside the camera. It does, however, pace
-        the buffer *download* stream (the same stream channel): a small delay
-        (around 1000 ticks) can clear host-side packet drops during download
-        while keeping more throughput than lowering the download bitrate.
+        This setting has no effect on internal memory-buffer recording, which
+        runs at sensor speed inside the camera.
+
+        .. warning::
+           A non-zero ``packet_delay`` must **not** be used for buffer
+           *downloads*: the camera responds by silently **decimating** the
+           download (returning every other frame, a 2x -- or worse -- temporal
+           aliasing) instead of just slowing it. :meth:`buffer_download`
+           therefore forces the delay to 0 for the transfer and restores your
+           value afterwards, so this setting is ignored during downloads. To
+           relieve host-side packet drops during a download, use jumbo packets
+           and/or a lower ``bitrate_mbps`` instead. This ``packet_delay`` is for
+           live streaming only.
 
         Returns
         -------
@@ -3723,6 +3766,9 @@ class Camera:
         max_dropped_frames: int = 0,
         retries: int = 6,
         resend: bool = False,
+        verify_order: bool = True,
+        order_tolerance: float = 0.05,
+        chunk_size: int = 1000,
     ) -> np.ndarray | None:
         """Download frames from the internal memory buffer over Ethernet.
 
@@ -3796,6 +3842,36 @@ class Camera:
             Resends help on a lossy link with spare bandwidth, but during a
             saturated bulk transfer they can trigger congestion collapse, so
             bulk download keeps them off by default.
+        verify_order : bool, optional
+            Verify that the assembled frames are in monotonic, evenly spaced
+            order using the per-frame leader timestamps, and raise
+            :class:`~pyTelops.FrameIntegrityError` on a mis-ordered, duplicated,
+            or strided sequence. Default ``True``. This catches corruption that
+            the packet-completeness check cannot (every packet can arrive while
+            the camera still returns the wrong frames), which has been observed
+            on very large single-session downloads. The check is skipped
+            silently when the camera does not populate timestamps. Pass
+            ``False`` to accept the frames as delivered; the anomaly counts are
+            still recorded on :attr:`last_download_stats`
+            (``n_out_of_order``/``n_stride_gaps``).
+        order_tolerance : float, optional
+            Fraction of frames allowed to be mis-ordered before *verify_order*
+            raises. Default ``0.05``. Gross corruption such as the
+            ``packet_delay``/low-bitrate decimation mis-orders ~half the frames
+            and always raises; large chunked downloads carry a small (~1%)
+            irreducible residual of cross-session mis-ordering (the camera does
+            not halt a download session promptly, so a session's tail can leak
+            into the next) that is recorded and logged but not raised. Pass
+            ``0.0`` for strict behaviour (raise on any mis-ordering), or a larger
+            value to tolerate more. Ignored when *verify_order* is ``False``.
+        chunk_size : int, optional
+            Maximum frames streamed per acquisition session. Default 1000. A
+            single large session overruns the host receive path and the camera's
+            paced readout -- an 8000-frame session can lose most of its frames
+            and return them mis-ordered -- whereas sessions of at most a
+            thousand frames come back complete, so the range is downloaded in
+            ``chunk_size`` pieces. Lower it if large downloads still show drops
+            on a constrained host; there is rarely a reason to raise it.
 
         Returns
         -------
@@ -3883,13 +3959,21 @@ class Camera:
 
             pbar = tqdm(total=n_frames, unit="frame", desc="Downloading")
 
-        # Adaptive recovery. Each frame's buffer ID is start_frame + position;
-        # the GVSP block id restarts at 1 per stream session, so within one
-        # re-streamed range, position-in-range = block_id - 1 (robust to drops).
-        # Round 0 streams the whole range; later rounds re-stream only the
-        # still-missing positions (never-arrived AND incomplete) at a paced
-        # lower bitrate, until complete or `retries` rounds are spent. Frames
+        # Adaptive, chunked recovery. Each frame's buffer ID is
+        # start_frame + position; the GVSP block id restarts at 1 per stream
+        # session, so within one re-streamed range position-in-range =
+        # block_id - 1 (robust to drops). Round 0 streams the whole range; later
+        # rounds re-stream only the still-missing positions (never-arrived AND
+        # incomplete), until complete or `retries` rounds are spent. Frames
         # persist in the camera buffer, so this converges.
+        #
+        # Each contiguous range is streamed in <= chunk_size pieces. A single
+        # large session overruns the host receive path and loses most of its
+        # frames (thousands incomplete for an 8000-frame session on a USB-GigE
+        # host), while <= 1000-frame sessions come back complete; splitting is
+        # what makes large downloads reliable. The bitrate is never paced below
+        # the base rate -- lowering it to fight packet loss is what makes the
+        # camera stride (skip frames), so recovery keeps the base rate.
         by_pos: dict[int, tuple] = {}  # position -> (frame, info), complete only
         complete: set[int] = set()
         recovered_by_retry = 0
@@ -3901,30 +3985,31 @@ class Camera:
                 missing = _missing_positions(n_frames, complete)
                 if not missing or round_idx > retries:
                     break
-                round_bitrate = _pace_bitrate(round_idx, bitrate_mbps)
                 for lo, hi in _group_contiguous(missing):
-                    got = self._download_range(
-                        start_frame + lo,
-                        hi - lo + 1,
-                        packet_size=packet_size,
-                        bitrate_mbps=round_bitrate,
-                        resend=resend,
-                        timeout=timeout,
-                    )
-                    for offset, (frame, info) in got.items():
-                        pos = lo + offset
-                        if (
-                            0 <= pos < n_frames
-                            and pos not in complete
-                            and int(info.get("missing_packets", 1)) == 0
-                        ):
-                            complete.add(pos)
-                            by_pos[pos] = (frame, info)
-                            if round_idx > 0:
-                                recovered_by_retry += 1
-                    if pbar:
-                        pbar.n = len(complete)
-                        pbar.refresh()
+                    for c_lo in range(lo, hi + 1, chunk_size):
+                        c_hi = min(c_lo + chunk_size - 1, hi)
+                        got = self._download_range(
+                            start_frame + c_lo,
+                            c_hi - c_lo + 1,
+                            packet_size=packet_size,
+                            bitrate_mbps=bitrate_mbps,
+                            resend=resend,
+                            timeout=timeout,
+                        )
+                        for offset, (frame, info) in got.items():
+                            pos = c_lo + offset
+                            if (
+                                0 <= pos < n_frames
+                                and pos not in complete
+                                and int(info.get("missing_packets", 1)) == 0
+                            ):
+                                complete.add(pos)
+                                by_pos[pos] = (frame, info)
+                                if round_idx > 0:
+                                    recovered_by_retry += 1
+                        if pbar:
+                            pbar.n = len(complete)
+                            pbar.refresh()
                 if round_idx == 0:
                     first_pass_n_complete = len(complete)
                 round_idx += 1
@@ -3935,6 +4020,17 @@ class Camera:
 
         n_complete = len(complete)
         missing_after = _missing_positions(n_frames, complete)
+
+        # Ordering integrity: packet-complete frames can still be MISpositioned
+        # if the camera streamed a strided or duplicated sequence (observed on
+        # very large single-session downloads, where the first pass returns
+        # every other buffer frame). The leader timestamp is the ground truth
+        # for frame identity; verify it rises monotonically with position.
+        n_out_of_order = n_stride_gaps = 0
+        if by_pos:
+            _order_pos = sorted(by_pos)
+            _order_ts = [by_pos[k][1].get("timestamp", 0) for k in _order_pos]
+            n_out_of_order, n_stride_gaps = _timestamp_order_report(_order_pos, _order_ts)
 
         resend_stats = getattr(
             self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
@@ -3956,6 +4052,8 @@ class Camera:
             elapsed_s=elapsed,
             packet_size_used=packet_size,
             bitrate_used=bitrate_mbps,
+            n_out_of_order=n_out_of_order,
+            n_stride_gaps=n_stride_gaps,
         )
         if payload is not None and elapsed > 0:
             stats.throughput_mbps = n_complete * payload / elapsed / 1e6
@@ -3990,6 +4088,28 @@ class Camera:
                 f"tolerate gaps, lower bitrate_mbps, or run tune_connection().",
                 stats=stats,
             )
+
+        n_misordered = n_out_of_order + n_stride_gaps
+        if verify_order and n_misordered:
+            frac = n_misordered / n_complete if n_complete else 0.0
+            if frac > order_tolerance:
+                raise FrameIntegrityError(
+                    f"Frame ordering corruption: {n_out_of_order} out-of-order "
+                    f"timestamp step(s) and {n_stride_gaps} strided gap(s) among "
+                    f"{n_complete} frames ({frac:.1%} > order_tolerance "
+                    f"{order_tolerance:.1%}). Every packet arrived, but the camera "
+                    f"returned a mis-ordered or strided sequence (e.g. the "
+                    f"packet_delay/low-bitrate decimation). Lower bitrate_mbps or "
+                    f"chunk_size, raise order_tolerance, or pass verify_order=False.",
+                    stats=stats,
+                )
+            if verbose:
+                logger.warning(
+                    "%d minor frame-order anomalies (%.2f%%) within tolerance; see "
+                    "last_download_stats.n_out_of_order/n_stride_gaps",
+                    n_misordered,
+                    100 * frac,
+                )
 
         # Assemble in frame order. Under drops + recovery, arrival order is not
         # frame order, so order by position.
@@ -4050,8 +4170,33 @@ class Camera:
         self._write_reg_retry(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_ID, frame_id)
         self._write_reg_retry(reg.REG_MEMORY_BUFFER_DOWNLOAD_FRAME_COUNT, count)
 
+        # Each stream session restarts the GVSP block id at 1, and this method
+        # maps offset = block_id - 1. Under heavy host load the receiver can fall
+        # behind and leave a frame from the PREVIOUS session's range queued (or
+        # unread in the socket buffer); read first here, it would be mapped to the
+        # wrong position in this range (observed as out-of-order/strided frames on
+        # large downloads under load). Flush stale residue before streaming. The
+        # receiver thread is stopped at this point (the prior session's
+        # stop_stream joined it) and the camera is not yet acquiring, so the drain
+        # does not race the receiver and cannot discard this session's frames.
+        self._gvsp.flush()
+
         self.start_stream()
         self._gvsp.resend_enabled = resend
+
+        # A non-zero GVSP inter-packet delay (SCPD / packet_delay) makes the
+        # camera silently DECIMATE the buffer download by 2 (or more): it throttles
+        # transmit while the buffer-read engine runs near the recording rate, so
+        # the camera skips frames to stay in sync (contiguous block-ids, timestamps
+        # 2x apart). start_stream() applies the user's live streaming packet_delay,
+        # which is wrong here. Force SCPD to 0 for the transfer and restore it.
+        old_delay_reg = None
+        try:
+            old_delay_reg = self._gvcp.read_reg(REG_SC_PACKET_DELAY)
+            if old_delay_reg != 0:
+                self._gvcp.write_reg(REG_SC_PACKET_DELAY, 0)
+        except GVCPError:
+            old_delay_reg = None
 
         # Larger packets are IP-fragmented by the camera; clear DoNotFragment so
         # the path does not drop them, and restore the register afterwards.
@@ -4098,6 +4243,9 @@ class Camera:
                 with suppress(GVCPError):
                     self._gvcp.write_reg(REG_SC_PACKET_SIZE, old_pkt_reg)
                     self._gvsp._packet_data_size = (old_pkt_reg & SC_PACKET_SIZE_MASK) - 8
+            if old_delay_reg:
+                with suppress(GVCPError):
+                    self._gvcp.write_reg(REG_SC_PACKET_DELAY, old_delay_reg)
             self._gvsp.resend_enabled = True
             self.stop_stream()
         return out
