@@ -32,6 +32,22 @@ Errors and results
 .. autoexception:: FrameIntegrityError
    :members:
 
+Frame headers
+-------------
+
+.. autoclass:: FrameHeader
+   :members:
+
+.. autoclass:: BufferingFlag
+
+.. autofunction:: parse_header
+
+.. autofunction:: parse_headers
+
+.. autofunction:: header_timestamps
+
+.. autofunction:: header_frame_ids
+
 Enumerations
 ------------
 

@@ -1,5 +1,9 @@
 """Buffer recording started by an external BNC trigger.
 
+The camera fills its buffer as a ring from the moment it is armed. The BNC edge
+is the MOI, and ``pre_moi=1000`` keeps the 1000 frames recorded BEFORE that
+edge, plus the rest of the sequence after it.
+
 Run with::
 
     python examples/05_external_trigger.py

@@ -172,6 +172,138 @@ recommended configuration on the camera for later downloads:
 See :doc:`troubleshooting` (buffer-download section) for diagnosing a host or
 adapter that cannot keep up at full rate.
 
+Pre-trigger recording (pre-MOI)
+-------------------------------
+
+Once armed, the camera fills the onboard buffer as a ring and keeps
+overwriting it.  The MOI (moment of interest) fixes what is kept: the
+``pre_moi`` frames recorded before the MOI, and the rest of the sequence after
+it.  An event can therefore be recorded from before it started, as long as the
+MOI is fired at the event and not earlier.
+
+``pre_moi`` is a frame count, not a duration.  Convert it with the frame rate:
+
+.. code-block:: python
+
+    cam.frame_rate = 2000.0
+    cam.buffer_configure(frames_per_seq=400,
+                         pre_moi=int(0.05 * cam.frame_rate),   # 50 ms before
+                         moi_source="software")
+
+The MOI source is set in :meth:`pyTelops.Camera.buffer_configure`: a BNC edge
+(``"external"``), acquisition start (``"acquisition_started"``) or software
+(``"software"``).  All of them honour ``pre_moi``.
+
+With a software MOI there are two ways to fire it.  The manual flow keeps
+arming and firing as separate steps:
+
+.. code-block:: python
+
+    cam.buffer_arm()            # the ring starts filling here
+    wait_for_my_event()         # your own code: a DAQ callback, input(), ...
+    cam.buffer_fire_moi()
+    cam.buffer_wait(timeout=30.0)
+    data = cam.buffer_download()
+
+:meth:`pyTelops.Camera.buffer_record` is a shortcut over exactly that
+sequence, and takes the waiting step as its ``wait_for`` argument.  It accepts
+a delay in seconds or a callable that returns at the event:
+
+.. code-block:: python
+
+    cam.buffer_record(wait_for=0.5)                   # fire 0.5 s after arming
+    cam.buffer_record(wait_for=lambda: my_event.wait())
+    cam.buffer_record(wait_for=input)                 # fire on Enter
+
+The callable runs once per sequence, with no arguments, after arming and
+before the MOI is fired.  Its return value is ignored.
+
+Without ``wait_for``, ``buffer_record()`` fires the MOI as soon as the camera
+is ready, which is what you want when ``pre_moi`` is 0.  With ``pre_moi > 0``
+it warns, because the split point is then placed by a timer and not by an
+event, and it first waits until ``pre_moi / frame_rate`` seconds have passed
+since arming, so the pre-trigger window is at least full.  Pass ``wait_for=0``
+to fire immediately without the warning.
+
+Use ``buffer_record()`` when the recording is self-timed, and the manual flow
+when the event and the camera are driven by separate parts of your program.
+``examples/08_pretrigger_software_moi.py`` shows both.
+
+Frame headers and timestamps
+----------------------------
+
+Every frame carries a 256-byte Telops header in the two metadata rows the
+driver normally strips.  The camera writes it at exposure time, so the
+timestamp in it is the time the frame was taken, without the transfer and
+scheduling delay a host-side clock reading would add.  The header also holds
+the frame id, the exposure time, the frame rate and the geometry.
+
+The timestamp comes from the camera clock.  Call
+:meth:`pyTelops.Camera.sync_time` before recording to set that clock from the
+host, otherwise the absolute time can be off by however far the camera has
+drifted.  ``sync_time()`` writes whole seconds, so absolute timestamps are good
+to about 1 s.  Differences between frames are exact either way.  Sub-second
+alignment to the host clock is not available from the driver yet: the camera
+sub-second register is read-only, and ``cam.posix_time = ...`` also writes
+whole seconds only.
+
+Pass ``return_headers=True`` to :meth:`pyTelops.Camera.buffer_download` to get
+one :class:`pyTelops.FrameHeader` per frame:
+
+.. code-block:: python
+
+    import numpy as np
+
+    cam.sync_time()
+    cam.buffer_record(wait_for=0.5)
+
+    data, headers = cam.buffer_download(sequence=0, return_headers=True)
+    print(headers[0].datetime)          # 2026-09-08 08:00:00.123456+00:00
+    print(headers[0].frame_id, headers[0].frame_rate_hz)
+
+    t = np.array([h.timestamp for h in headers])
+    t -= t[0]                           # seconds from the first frame
+
+Entry ``i`` belongs to frame ``i`` of the array.  A frame whose header does not
+parse gives ``None`` in the list, and the download warns once with the count.
+
+Parsing builds one Python object per frame.  For a download of tens of
+thousands of frames, take the raw frames and use the vectorised helpers
+instead:
+
+.. code-block:: python
+
+    from pyTelops import header_timestamps, header_frame_ids
+
+    raw = cam.buffer_download(sequence=0, strip_header=False, convert=False)
+    t = header_timestamps(raw, relative=True)   # float64 seconds from frame 0
+    ids = header_frame_ids(raw)                 # uint32 frame ids
+
+To find the moment of interest in a recording, ask the camera:
+
+.. code-block:: python
+
+    moi = cam.buffer_moi_index(0)       # index of the MOI frame in the download
+    if 0 <= moi < len(headers):
+        event_time = headers[moi].timestamp
+
+The camera reports the MOI as a frame id in its own register id space.  How
+that id maps onto the download index is not yet verified on hardware, so treat
+``buffer_moi_index()`` as an estimate and check the bounds before you use it.
+A non-default ``start_frame`` shifts the index as well.
+
+From header version 12.9 on, each header also flags its own position with
+:class:`pyTelops.BufferingFlag` (``PRE_MOI``, ``MOI``, ``POST_MOI``):
+
+.. code-block:: python
+
+    print(headers[0].header_version)    # the FAST-M3k reports device XML 12.7,
+                                        # so expect (12, 7)
+    print(headers[0].buffering_flag)    # None below 12.9
+
+On header 12.7 byte 74 is still reserved, so ``buffering_flag`` is ``None``
+there and ``buffer_moi_index()`` is the way to locate the event.
+
 External trigger
 ----------------
 
@@ -191,11 +323,13 @@ For triggered recording from an external BNC signal:
         data = cam.buffer_download()
 
 For manual control with a software MOI instead of
-:meth:`pyTelops.Camera.buffer_record`:
+:meth:`pyTelops.Camera.buffer_record`, fire the MOI at the event so the
+``pre_moi`` frames before it are the ones you want:
 
 .. code-block:: python
 
     cam.buffer_arm()
+    wait_for_my_event()          # your own code returns at the event
     cam.buffer_fire_moi()
     cam.buffer_wait(timeout=30.0)
     data = cam.buffer_download()

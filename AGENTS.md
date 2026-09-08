@@ -71,7 +71,7 @@ hardware tests, or camera discovery fails. See troubleshooting.md.
 ```
 pyTelops/        driver package: camera.py, registers.py, cli.py, gui.py
 tests/           pytest suite (test_hardware.py is camera-gated)
-examples/        runnable scripts (01_connect_and_grab.py ... 07_robust_download.py)
+examples/        runnable scripts (01_connect_and_grab.py ... 08_pretrigger_software_moi.py)
 docs/source/     Sphinx docs (RST source)
 ```
 

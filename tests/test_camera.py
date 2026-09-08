@@ -3,6 +3,8 @@
 Unit tests use mocking. Hardware tests require --hardware flag.
 """
 
+import struct
+import warnings
 from unittest.mock import ANY, MagicMock, patch
 
 import numpy as np
@@ -11,7 +13,17 @@ from pyGigEVision import GVCPError
 from pyGigEVision.standard import REG_SC_PACKET_DELAY
 
 from pyTelops import registers as reg
-from pyTelops.camera import Camera, discover
+from pyTelops.camera import Camera, _parse_download_headers, discover
+from pyTelops.header import (
+    HDR_FRAME_ID,
+    HDR_POSIX_TIME,
+    HDR_SIGNATURE,
+    HDR_SUBSECOND,
+    HDR_XML_MAJOR,
+    HDR_XML_MINOR,
+    HEADER_BYTES,
+    SIGNATURE,
+)
 
 
 def _make_fake_connected_camera():
@@ -918,6 +930,425 @@ class TestDiagnosticsSentinel:
         cam._gvcp.read_float.return_value = -196.3
         d = cam.diagnostics()
         assert all(v == -196.3 for v in d["temperatures"].values())
+
+
+def _make_buffer_camera(
+    pre_moi: int = 100,
+    frames_per_seq: int | None = None,
+    fps: float = 2000.0,
+    n_sequences: int = 1,
+    moi_source: str = "software",
+    config_kwargs: bool = True,
+):
+    """Fake camera configured for buffer recording.
+
+    ``read_reg`` answers from a register map (the global 0 of
+    :func:`_make_fake_connected_camera` would make buffer_record hang on the
+    sequence counter), and ``read_float`` returns the frame rate.
+    ``frames_per_seq`` defaults to a slot that can hold ``pre_moi``, which is
+    what :meth:`buffer_configure` would enforce.
+    """
+    if frames_per_seq is None:
+        frames_per_seq = max(400, pre_moi)
+    cam = _make_fake_connected_camera()
+    registers = {
+        reg.REG_DEVICE_NOT_READY: 0,
+        reg.REG_TDC_STATUS: 0,
+        reg.REG_MEMORY_BUFFER_SEQ_SIZE: frames_per_seq,
+        reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE: frames_per_seq,
+        reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE: pre_moi,
+        reg.REG_MEMORY_BUFFER_MOI_SOURCE: int(reg.MemoryBufferMOISource.SOFTWARE),
+        reg.REG_MEMORY_BUFFER_SEQ_COUNT: 10**6,
+    }
+    cam._gvcp.read_reg.side_effect = lambda addr: registers.get(addr, 0)
+    cam._gvcp.read_float.return_value = fps
+    cam._buffer_n_sequences = n_sequences
+    if config_kwargs:
+        cam._buffer_config_kwargs = dict(
+            n_sequences=n_sequences,
+            frames_per_seq=frames_per_seq,
+            pre_moi=pre_moi,
+            moi_source=moi_source,
+        )
+    return cam
+
+
+def _written(cam):
+    """Addresses written through the mock GVCP, in order."""
+    return [call.args[0] for call in cam._gvcp.write_reg.call_args_list]
+
+
+class TestBufferRecordWaitFor:
+    """buffer_record(wait_for=...) places the software MOI at the event.
+
+    Without it the MOI fires right after arming, so a pre_moi window holds
+    only whatever the ring happened to contain.
+    """
+
+    def test_callable_runs_once_per_sequence_before_the_moi(self):
+        cam = _make_buffer_camera(n_sequences=2)
+        calls = []
+        with patch("pyTelops.camera.time.sleep"), patch.object(Camera, "_buffer_wait_sequence"):
+            cam.buffer_record(verbose=False, wait_for=lambda: calls.append(len(_written(cam))))
+        assert len(calls) == 2
+        order = _written(cam)
+        moi_writes = [
+            i for i, addr in enumerate(order) if addr == reg.REG_MEMORY_BUFFER_MOI_SOFTWARE
+        ]
+        assert order.index(reg.REG_ACQUISITION_ARM) < calls[0] <= moi_writes[0]
+        assert moi_writes[0] < calls[1] <= moi_writes[1]
+
+    def test_number_sleeps_once_per_sequence(self):
+        cam = _make_buffer_camera(pre_moi=0, n_sequences=3)
+        with (
+            patch("pyTelops.camera.time.sleep") as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            cam.buffer_record(verbose=False, wait_for=2.0)
+        assert [c.args[0] for c in slp.call_args_list].count(2.0) == 3
+
+    def test_pre_moi_without_wait_for_warns_and_fills_the_window(self):
+        # 2000 frames at 2000 fps need 1.0 s; the 0.5 s settle covers half.
+        cam = _make_buffer_camera(pre_moi=2000, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.warns(UserWarning, match="wait_for"),
+        ):
+            cam.buffer_record(verbose=False)
+        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.5, 0.3]
+
+    def test_settle_counts_towards_the_pre_moi_window(self):
+        # 100 frames at 2000 fps need 0.05 s, which the settle already covered.
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.warns(UserWarning, match="wait_for"),
+        ):
+            cam.buffer_record(verbose=False)
+        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]  # settle, post-stop
+
+    def test_later_sequences_get_no_settle_head_start(self):
+        # Sequence 0 is covered by the settle; sequence 1 has to wait in full.
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0, n_sequences=2)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.warns(UserWarning, match="wait_for"),
+        ):
+            cam.buffer_record(verbose=False)
+        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.05, 0.3]
+
+    def test_no_pre_moi_behaves_as_before(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.sleep") as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False)
+        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]  # settle, post-stop
+
+    def test_zero_is_a_silent_escape_hatch(self):
+        cam = _make_buffer_camera(pre_moi=100)
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.sleep") as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False, wait_for=0)
+        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]
+
+    def test_too_short_wait_warns(self):
+        cam = _make_buffer_camera(pre_moi=4000, fps=2000.0)  # needs 2.0 s
+        with (
+            patch("pyTelops.camera.time.sleep"),
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.warns(UserWarning, match="will not be full"),
+        ):
+            cam.buffer_record(verbose=False, wait_for=0.1)
+
+    def test_short_wait_covered_by_the_settle_does_not_warn(self):
+        # 1000 frames at 2000 fps need 0.5 s; wait_for 0.1 s plus the 0.5 s
+        # settle fills the window on the only sequence, so there is nothing
+        # to warn about.
+        cam = _make_buffer_camera(pre_moi=1000, fps=2000.0)
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.sleep"),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False, wait_for=0.1)
+
+    def test_short_wait_warns_when_more_sequences_follow(self):
+        # Sequences after the first get no settle, so 0.1 s is short for all.
+        cam = _make_buffer_camera(pre_moi=1000, fps=2000.0, n_sequences=2)
+        with (
+            patch("pyTelops.camera.time.sleep"),
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.warns(UserWarning, match="will not be full"),
+        ):
+            cam.buffer_record(verbose=False, wait_for=0.1)
+
+    def test_quick_callable_still_fills_the_window(self):
+        # 2000 frames at 2000 fps need 1.0 s; the settle spent 0.5 s of it.
+        cam = _make_buffer_camera(pre_moi=2000, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False, wait_for=lambda: None)
+        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.5, 0.3]
+
+    def test_slow_callable_gets_no_top_up(self):
+        cam = _make_buffer_camera(pre_moi=2000, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            # The callable advances the clock itself, past the 1.0 s fill time.
+            cam.buffer_record(verbose=False, wait_for=lambda: clk.sleep(3.0))
+        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]  # settle, post-stop
+
+    def test_rejects_bad_wait_for(self):
+        cam = _make_buffer_camera()
+        with pytest.raises(TypeError):
+            cam.buffer_record(verbose=False, wait_for="0.5")
+        with pytest.raises(TypeError):
+            cam.buffer_record(verbose=False, wait_for=True)
+        with pytest.raises(ValueError, match=">= 0"):
+            cam.buffer_record(verbose=False, wait_for=-1.0)
+
+    def test_rejects_non_software_moi_source(self):
+        cam = _make_buffer_camera(moi_source="external")
+        with pytest.raises(ValueError, match="EXTERNAL_SIGNAL"):
+            cam.buffer_record(verbose=False)
+
+    def test_reads_moi_source_from_the_camera_when_unconfigured(self):
+        cam = _make_buffer_camera(config_kwargs=False)
+        cam._gvcp.read_reg.side_effect = lambda addr: (
+            int(reg.MemoryBufferMOISource.EXTERNAL_SIGNAL)
+            if addr == reg.REG_MEMORY_BUFFER_MOI_SOURCE
+            else 0
+        )
+        with pytest.raises(ValueError, match="EXTERNAL_SIGNAL"):
+            cam.buffer_record(verbose=False)
+
+    def test_interrupt_in_wait_for_stops_acquisition(self):
+        cam = _make_buffer_camera()
+
+        def boom():
+            raise KeyboardInterrupt
+
+        with (
+            patch("pyTelops.camera.time.sleep"),
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            cam.buffer_record(verbose=False, wait_for=boom)
+        assert reg.REG_ACQUISITION_STOP in _written(cam)
+        assert reg.REG_MEMORY_BUFFER_MOI_SOFTWARE not in _written(cam)
+
+
+class TestBufferConfigurePreMOI:
+    """pre_moi is a frame count inside the sequence slot."""
+
+    def test_rejects_pre_moi_larger_than_sequence(self):
+        cam = _make_fake_connected_camera()
+        with pytest.raises(ValueError, match="exceeds frames_per_seq"):
+            cam.buffer_configure(frames_per_seq=100, pre_moi=101)
+
+    def test_rejects_negative_pre_moi(self):
+        cam = _make_fake_connected_camera()
+        with pytest.raises(ValueError, match="pre_moi must be"):
+            cam.buffer_configure(frames_per_seq=100, pre_moi=-1)
+
+    def test_full_slot_pre_moi_is_allowed(self):
+        cam = _make_fake_connected_camera()
+        cam.buffer_configure(frames_per_seq=100, pre_moi=100)
+        cam._gvcp.write_reg.assert_any_call(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, 100)
+
+
+class TestBufferMOIPosition:
+    """The camera reports where the MOI sits inside a recorded sequence."""
+
+    def test_moi_frame_id_selects_the_sequence_first(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.side_effect = lambda addr: {
+            reg.REG_MEMORY_BUFFER_SEQ_MOI_FRAME_ID: 5100,
+        }.get(addr, 0)
+
+        assert cam.buffer_moi_frame_id(sequence=2) == 5100
+        cam._gvcp.write_reg.assert_called_once_with(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, 2)
+
+    def test_moi_index_is_the_offset_from_the_first_frame(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.side_effect = lambda addr: {
+            reg.REG_MEMORY_BUFFER_SEQ_MOI_FRAME_ID: 5100,
+            reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID: 5000,
+        }.get(addr, 0)
+
+        assert cam.buffer_moi_index() == 100
+        cam._gvcp.write_reg.assert_called_once_with(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, 0)
+        read = [call.args[0] for call in cam._gvcp.read_reg.call_args_list]
+        assert read == [
+            reg.REG_MEMORY_BUFFER_SEQ_MOI_FRAME_ID,
+            reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID,
+        ]
+
+
+HEADER_WIDTH = 64  # 2 rows x 64 uint16 = the 256 header bytes
+
+
+def _header_frame(frame_id, posix_time, subsecond_raw, signature=SIGNATURE, height=4):
+    """Build one raw uint16 frame with a Telops header in its first two rows."""
+    raw = bytearray(HEADER_BYTES)
+    raw[HDR_SIGNATURE : HDR_SIGNATURE + 2] = signature
+    raw[HDR_XML_MINOR] = 7
+    raw[HDR_XML_MAJOR] = 12
+    struct.pack_into("<I", raw, HDR_FRAME_ID, frame_id)
+    struct.pack_into("<I", raw, HDR_POSIX_TIME, posix_time)
+    struct.pack_into("<I", raw, HDR_SUBSECOND, subsecond_raw)
+
+    frame = np.zeros((2 + height, HEADER_WIDTH), dtype="<u2")
+    frame[:2, :] = np.frombuffer(bytes(raw), dtype=np.uint8).view("<u2").reshape(2, HEADER_WIDTH)
+    frame[2:, :] = frame_id
+    return frame
+
+
+def _cam_for_header_download(n_frames, bad_positions=(), drop_positions=()):
+    """Fake camera whose _download_range hands back frames with headers.
+
+    ``bad_positions`` get a broken signature; ``drop_positions`` never arrive,
+    which is what a tolerated dropped frame looks like to buffer_download.
+    """
+    cam = _make_fake_connected_camera()
+    cam._gvsp._resend_stats = {"requested": 0, "recovered": 0, "failed": 0}
+
+    def fake_range(frame_id, count, **kwargs):
+        out = {}
+        for off in range(count):
+            pos = frame_id + off
+            if pos in drop_positions:
+                continue
+            signature = b"XX" if pos in bad_positions else SIGNATURE
+            frame = _header_frame(1000 + pos, 1_757_318_400, 10_000 * pos, signature)
+            out[off] = (frame, {"missing_packets": 0, "timestamp": pos})
+        return out
+
+    cam._download_range = MagicMock(side_effect=fake_range)
+    return cam
+
+
+class TestBufferDownloadHeaders:
+    """buffer_download(return_headers=True) returns one header per frame."""
+
+    def test_headers_align_with_the_frames(self):
+        cam = _cam_for_header_download(3)
+        data, headers = cam.buffer_download(
+            n_frames=3, convert=False, verbose=False, return_headers=True
+        )
+        assert data.shape == (3, 4, HEADER_WIDTH)  # header rows stripped
+        assert [h.frame_id for h in headers] == [1000, 1001, 1002]
+        assert [int(data[i, 0, 0]) for i in range(3)] == [1000, 1001, 1002]
+        assert headers[1].timestamp == pytest.approx(1_757_318_400 + 0.001, abs=1e-6)
+
+    def test_headers_survive_conversion_and_stripping(self):
+        cam = _cam_for_header_download(2)
+        data, headers = cam.buffer_download(
+            n_frames=2, convert=True, verbose=False, return_headers=True
+        )
+        assert data.shape[0] == len(headers) == 2
+        assert [h.frame_id for h in headers] == [1000, 1001]
+
+    def test_dropped_frame_keeps_headers_aligned(self):
+        cam = _cam_for_header_download(4, drop_positions=(2,))
+        data, headers = cam.buffer_download(
+            n_frames=4,
+            retries=0,
+            max_dropped_frames=1,
+            convert=False,
+            verbose=False,
+            return_headers=True,
+        )
+        assert len(headers) == data.shape[0] == 3
+        assert [h.frame_id for h in headers] == [1000, 1001, 1003]
+        assert [int(data[i, 0, 0]) for i in range(3)] == [1000, 1001, 1003]
+
+    def test_headers_follow_start_frame_and_n_frames(self):
+        cam = _cam_for_header_download(3)
+        data, headers = cam.buffer_download(
+            start_frame=5, n_frames=3, convert=False, verbose=False, return_headers=True
+        )
+        assert data.shape[0] == len(headers) == 3
+        assert [h.frame_id for h in headers] == [1005, 1006, 1007]
+
+    def test_bad_header_gives_none_and_one_warning(self):
+        cam = _cam_for_header_download(3, bad_positions=(1,))
+        with pytest.warns(UserWarning, match="1 of 3 frame headers"):
+            data, headers = cam.buffer_download(
+                n_frames=3, convert=False, verbose=False, return_headers=True
+            )
+        assert headers[1] is None
+        assert [h.frame_id for h in headers if h is not None] == [1000, 1002]
+        assert data.shape[0] == 3
+
+    def test_nothing_recorded_returns_none_and_empty_list(self):
+        cam = _make_fake_connected_camera()  # recorded size register reads 0
+        assert cam.buffer_download(verbose=False, return_headers=True) == (None, [])
+
+    def test_nothing_received_returns_none_and_empty_list(self):
+        cam = _make_fake_connected_camera()
+        cam._gvsp._resend_stats = {"requested": 0, "recovered": 0, "failed": 0}
+        cam._download_range = MagicMock(return_value={})
+        out = cam.buffer_download(
+            n_frames=2, retries=0, max_dropped_frames=2, verbose=False, return_headers=True
+        )
+        assert out == (None, [])
+
+    def test_default_still_returns_only_the_array(self):
+        cam = _cam_for_header_download(2)
+        out = cam.buffer_download(n_frames=2, convert=False, verbose=False)
+        assert isinstance(out, np.ndarray)
+
+
+class TestParseDownloadHeaders:
+    """The per-frame parsing helper used by buffer_download."""
+
+    def test_all_good(self):
+        raw = np.stack([_header_frame(10 + i, 1_757_318_400, 0) for i in range(4)])
+        headers = _parse_download_headers(raw)
+        assert [h.frame_id for h in headers] == [10, 11, 12, 13]
+
+    def test_counts_bad_headers_in_one_warning(self):
+        raw = np.stack(
+            [
+                _header_frame(1, 0, 0, signature=b"XX"),
+                _header_frame(2, 0, 0),
+                _header_frame(3, 0, 0, signature=b"\x00\x00"),
+            ]
+        )
+        with pytest.warns(UserWarning, match="2 of 3 frame headers"):
+            headers = _parse_download_headers(raw)
+        assert [h is None for h in headers] == [True, False, True]
 
 
 # ============================================================

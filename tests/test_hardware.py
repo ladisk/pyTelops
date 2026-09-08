@@ -382,6 +382,56 @@ class TestBuffer:
             cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         cam.buffer_clear()
 
+    def test_pretrigger_record_headers_and_moi_index(self, cam):
+        """Pre-trigger recording: frame count, camera timestamps, MOI position."""
+        cam.integration_time = 30.0
+        cam.frame_rate = 2000.0
+        cam.sync_time()
+        cam.buffer_configure(
+            n_sequences=1,
+            frames_per_seq=400,
+            pre_moi=100,
+            moi_source="software",
+        )
+
+        recorded = cam.buffer_record(verbose=False, wait_for=0.5)
+        assert recorded == 400
+
+        data, headers = cam.buffer_download(sequence=0, verbose=False, return_headers=True)
+        assert data is not None
+        assert data.shape[0] == 400
+        assert len(headers) == data.shape[0]
+        assert all(h is not None for h in headers)
+        # The FAST-M3k reports device XML 12.7; any 12.x layout parses here.
+        assert headers[0].header_version[0] >= 12
+
+        t = np.array([h.timestamp for h in headers])
+        assert np.all(np.diff(t) > 0)
+        # Frame spacing is 1 / frame_rate; allow 20 % for clock jitter.
+        assert np.median(np.diff(t)) == pytest.approx(1 / 2000.0, rel=0.2)
+
+        # First hardware check of the MOI id mapping: the camera's MOI frame id
+        # minus the slot's first frame id should land on the configured pre_moi.
+        assert abs(cam.buffer_moi_index(0) - 100) <= 2
+
+        cam.buffer_clear()
+
+    def test_pretrigger_without_wait_for_warns(self, cam):
+        """pre_moi > 0 and no wait_for puts the split point on a timer."""
+        cam.integration_time = 30.0
+        cam.frame_rate = 2000.0
+        cam.buffer_configure(
+            n_sequences=1,
+            frames_per_seq=20,
+            pre_moi=10,
+            moi_source="software",
+        )
+
+        with pytest.warns(UserWarning, match="wait_for"):
+            cam.buffer_record(verbose=False)
+
+        cam.buffer_clear()
+
     def test_buffer_status(self, cam):
         status = cam.buffer_status()
         assert isinstance(status, reg.MemoryBufferStatus)

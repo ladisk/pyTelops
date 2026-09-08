@@ -1,6 +1,49 @@
 Changelog
 =========
 
+Version 0.2.4
+-------------
+
+- ``buffer_record()`` takes a keyword-only ``wait_for``: a delay in seconds or
+  a zero-argument callable that returns at the moment of interest. It runs once
+  per sequence, after arming and before the software MOI is fired, so a
+  ``pre_moi`` window can be placed around a real event instead of around the
+  arming call. Previously the MOI fired about 0.5 s after arming for the first
+  sequence and immediately for the following ones, which left the pre-trigger
+  frames as whatever the ring happened to hold.
+- ``buffer_record()`` now warns when ``pre_moi > 0`` and no ``wait_for`` is
+  given, since the split point is then set by a timer and not by an event, and
+  it waits ``pre_moi / frame_rate`` seconds first so the pre-trigger window is
+  full. Pass ``wait_for=0`` to fire immediately without the warning.
+- ``buffer_record()`` raises ``ValueError`` when the configured ``moi_source``
+  is not ``"software"``, pointing at ``buffer_arm()`` and ``buffer_wait()``,
+  and it now stops acquisition on any exception, so Ctrl-C during a wait no
+  longer leaves the camera armed.
+- ``buffer_configure()`` rejects a negative ``pre_moi`` or one larger than the
+  frames per sequence.
+- New example ``examples/08_pretrigger_software_moi.py``: pre-trigger recording
+  with a software MOI, through the manual flow and through
+  ``buffer_record(wait_for=...)``.
+
+- New module ``pyTelops.header`` parses the 256-byte Telops header every frame
+  carries in its two metadata rows: ``FrameHeader``, ``parse_header()``,
+  ``parse_headers()`` and the ``BufferingFlag`` enum. The camera writes the
+  header at exposure time, so the timestamp in it has no host-side delay. The
+  buffering flag exists only from header version 12.9 on and reads as ``None``
+  below that.
+- ``header_timestamps()`` and ``header_frame_ids()`` read the same fields off a
+  raw frame stack with numpy views, for downloads too large to build one object
+  per frame.
+- ``buffer_download()`` takes ``return_headers=True`` and then returns
+  ``(data, headers)``, one header per frame of the array. The headers are parsed
+  before calibration and header stripping. A frame whose header does not parse
+  gives ``None``, and a single warning reports how many. The paths that return
+  no data return ``(None, [])``.
+- New ``buffer_moi_frame_id()`` and ``buffer_moi_index()`` report where the
+  moment of interest sits in a recorded sequence. ``buffer_moi_index()`` is the
+  index of the MOI frame in a full download, so it should equal the configured
+  ``pre_moi``.
+
 Version 0.2.3
 -------------
 

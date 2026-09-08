@@ -287,6 +287,67 @@ If a download finishes with missing frames, ``buffer_download()`` raises
 <https://pytelops.readthedocs.io/en/latest/streaming_and_buffer.html>`_ for
 tolerating drops and inspecting ``cam.last_download_stats``.
 
+Pre-trigger recording (pre-MOI)
+-------------------------------
+
+The armed camera fills the buffer as a ring. The MOI (moment of interest)
+marks the split: the ``pre_moi`` frames before it and the rest of the sequence
+after it are kept. Fire the MOI at the event, not right after arming, or the
+pre-trigger window holds whatever the ring happened to contain.
+
+``buffer_record()`` is a shortcut over ``buffer_arm()``, ``buffer_fire_moi()``
+and ``buffer_wait()``, and takes the waiting step as ``wait_for``: a delay in
+seconds, or a callable that returns at the event.
+
+.. code-block:: python
+
+   cam.buffer_configure(frames_per_seq=400, pre_moi=100)   # frames, not seconds
+
+   cam.buffer_record(wait_for=0.5)                # fire 0.5 s after arming
+   cam.buffer_record(wait_for=lambda: my_event.wait())
+
+   # or drive the same flow yourself
+   cam.buffer_arm()
+   wait_for_my_event()
+   cam.buffer_fire_moi()
+   cam.buffer_wait(timeout=30.0)
+   data = cam.buffer_download()
+
+With ``pre_moi > 0`` and no ``wait_for``, ``buffer_record()`` warns and waits
+until ``pre_moi / frame_rate`` seconds have passed since arming before firing,
+because the split point is then set by a timer and not by an event. See ``examples/08_pretrigger_software_moi.py``.
+
+Frame headers and timestamps
+----------------------------
+
+Every frame carries a Telops header written by the camera at exposure time, so
+its timestamp has no host-side delay. Call ``cam.sync_time()`` before recording
+to put the camera clock on host time, then ask the download for the headers:
+
+.. code-block:: python
+
+   cam.sync_time()
+   data, headers = cam.buffer_download(sequence=0, return_headers=True)
+
+   print(headers[0].datetime)        # exposure time of the first frame, UTC
+   moi = cam.buffer_moi_index(0)     # index of the moment of interest
+   if 0 <= moi < len(headers):
+       print(headers[moi].timestamp - headers[0].timestamp)
+
+Entry ``i`` belongs to frame ``i`` of the array. For very large downloads use
+``header_timestamps(raw)`` on a raw download (``strip_header=False,
+convert=False``) instead; it reads the same bytes without building an object
+per frame.
+
+``sync_time()`` writes whole seconds, so absolute timestamps are good to about
+1 s. Differences between frames are exact. Sub-second alignment to the host
+clock is not available from the driver yet: the camera sub-second register is
+read-only, and ``cam.posix_time = ...`` also writes whole seconds only.
+
+The camera reports the MOI as a frame id in its own id space. How that id maps
+onto the download index is not yet verified on hardware, so check the bounds
+before you index with ``buffer_moi_index()``.
+
 External trigger
 ----------------
 
@@ -310,6 +371,7 @@ For manual control with software MOI (instead of ``buffer_record()``):
 .. code-block:: python
 
    cam.buffer_arm()                      # arm the buffer
+   wait_for_my_event()                   # returns at the moment of interest
    cam.buffer_fire_moi()                 # software MOI trigger
    cam.buffer_wait(timeout=30.0)         # wait for recording to finish
    data = cam.buffer_download()
