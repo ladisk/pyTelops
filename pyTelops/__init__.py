@@ -18,7 +18,7 @@ Usage::
 
 from __future__ import annotations
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 from pyGigEVision import GVCPClient, GVCPError
 
 from .camera import Camera, discover
