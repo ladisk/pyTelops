@@ -300,8 +300,7 @@ class TestBuffer:
         cam.frame_rate = 2000.0
         cam.buffer_configure(n_sequences=3, frames_per_seq=50, moi_source="software")
 
-        cam.buffer_arm()
-        time.sleep(1.0)
+        cam.buffer_arm()  # blocks until the ring buffer is ready
 
         for i in range(3):
             cam.buffer_fire_moi()
@@ -370,8 +369,7 @@ class TestBuffer:
         cam.frame_rate = 100.0
         cam.buffer_configure(n_sequences=1, frames_per_seq=10000, moi_source="software")
 
-        cam.buffer_arm()
-        time.sleep(0.5)  # let camera enter RECORDING state
+        cam.buffer_arm()  # blocks until the camera is recording into the ring
         cam.buffer_fire_moi()
 
         with pytest.raises(TimeoutError):
@@ -381,6 +379,68 @@ class TestBuffer:
         with contextlib.suppress(GVCPError):
             cam._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         cam.buffer_clear()
+
+    def test_pretrigger_record_headers_and_moi_index(self, cam):
+        """Pre-trigger recording: frame count, camera timestamps, MOI position."""
+        cam.integration_time = 30.0
+        cam.frame_rate = 2000.0
+        cam.sync_time()
+        cam.buffer_configure(
+            n_sequences=1,
+            frames_per_seq=400,
+            pre_moi=100,
+            moi_source="software",
+        )
+
+        try:
+            # buffer_record() waits out the 2.05 s ring warm-up plus the
+            # 100-frame pre-trigger window on its own, so wait_for=0 fires the
+            # MOI at that floor and nothing else is needed.
+            recorded = cam.buffer_record(verbose=False, wait_for=0)
+            assert recorded == 400
+
+            data, headers = cam.buffer_download(sequence=0, verbose=False, return_headers=True)
+            assert data is not None
+            assert data.shape[0] == 400
+            assert len(headers) == data.shape[0]
+            assert all(h is not None for h in headers)
+            # The FAST-M3k reports device XML 12.7; any 12.x layout parses here.
+            assert headers[0].header_version[0] >= 12
+
+            t = np.array([h.timestamp for h in headers])
+            assert np.all(np.diff(t) > 0)
+            # Frame spacing is 1 / frame_rate; allow 20 % for clock jitter.
+            assert np.median(np.diff(t)) == pytest.approx(1 / 2000.0, rel=0.2)
+
+            # The download holds one contiguous run of frames.
+            ids = np.array([h.frame_id for h in headers])
+            assert np.all(np.diff(ids) == 1)
+
+            # The MOI id mapping, verified on the TS-IR: with the MOI fired
+            # after the ring warm-up, the camera's MOI frame id minus the
+            # slot's first frame id is the configured pre_moi.
+            assert abs(cam.buffer_moi_index(0) - 100) <= 1
+        finally:
+            # A failed assertion must not leave the buffer half-recorded for
+            # the tests that follow.
+            cam.buffer_clear()
+
+    def test_pretrigger_without_wait_for_warns(self, cam):
+        """pre_moi > 0 and no wait_for puts the split point on a timer."""
+        cam.integration_time = 30.0
+        cam.frame_rate = 2000.0
+        cam.buffer_configure(
+            n_sequences=1,
+            frames_per_seq=20,
+            pre_moi=10,
+            moi_source="software",
+        )
+
+        try:
+            with pytest.warns(UserWarning, match="wait_for"):
+                cam.buffer_record(verbose=False)
+        finally:
+            cam.buffer_clear()
 
     def test_buffer_status(self, cam):
         status = cam.buffer_status()

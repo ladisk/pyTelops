@@ -1,6 +1,87 @@
 Changelog
 =========
 
+Version 0.2.4
+-------------
+
+- **Pre-trigger recordings now keep the frames they were asked for.** The
+  camera's ring buffer keeps nothing for the first 2.02 s after acquisition
+  starts (measured on a TS-IR, the same at 250 and 1000 fps). A MOI fired
+  inside that window is latched, and the sequence then starts at the first
+  frame the ring could keep, so the pre-trigger part came out truncated or
+  empty. The driver now holds the MOI back until the ring can hold the
+  configured ``pre_moi`` frames: ``Camera.BUFFER_RING_WARMUP_S`` (2.05 s)
+  plus ``pre_moi / frame_rate`` after arming.
+- ``buffer_arm()`` blocks until the ring buffer is ready, so about 2 s plus
+  ``pre_moi / frame_rate``. Pass ``wait_ready=False`` for the old immediate
+  return.
+- ``buffer_record()`` and ``buffer_arm()`` now take about 1.5 s longer than in
+  0.2.3 even with ``pre_moi=0``, because the ring dead time applies to the
+  sequence start as well.
+- New ``buffer_ready_in()`` (seconds left of the ring warm-up, 0 when ready)
+  and ``buffer_wait_ready()`` (sleep that long), for callers that schedule the
+  event themselves.
+- ``buffer_fire_moi()`` warns when it is called before the ring is ready, and
+  says how many pre-trigger frames the camera will actually keep. It reads no
+  registers, so the event path is a single register write.
+- ``buffer_fire_moi()`` raises ``RuntimeError`` when ``buffer_arm()`` was not
+  called first. The camera rejects the write while it is not acquiring, so the
+  old silent write did nothing.
+- ``buffer_arm()`` and ``buffer_record()`` write ``ACQUISITION_STOP`` before
+  ``ACQUISITION_ARM``, and raise ``RuntimeError`` if the buffer still reads
+  RECORDING 5 s later. The stop write is unconditional, so an unreadable status
+  register no longer lets the guard pass. Arming during a recording aborts it:
+  the status drops to IDLE, the recorded count stays 0 and the sequence counter
+  sticks at 0 until ``buffer_clear()``.
+- ``buffer_configure()`` warns when ``moi_source="acquisition_started"`` is
+  combined with ``pre_moi > 0``. That MOI fires inside the ring dead time, so
+  the pre-trigger window is always empty.
+- Verified on hardware (TS-IR, header 12.7): with the MOI fired after the ring
+  warm-up, ``buffer_moi_index()`` equals the configured ``pre_moi``, for every
+  sequence of a three-sequence recording at 1000 and 2000 fps. Frame ids are
+  contiguous and ``buffering_flag`` is ``None``, as expected below header 12.9.
+  In the header timestamps the event sits about 7 to 8 ms after the host-side
+  ``buffer_fire_moi()`` call, which is the GVCP command latency, so the MOI
+  register is the authority for the split index.
+- ``buffer_record()`` takes a keyword-only ``wait_for``: a delay in seconds or
+  a zero-argument callable that returns at the moment of interest. It runs once
+  per sequence, after the ring buffer is ready and before the software MOI is
+  fired, so a ``pre_moi`` window can be placed around a real event instead of
+  around the arming call. Previously the MOI fired about 0.5 s after arming for
+  the first sequence and immediately for the following ones.
+- ``buffer_record()`` warns when ``pre_moi > 0`` and no ``wait_for`` is given,
+  since the split point is then set by a timer and not by an event. It fires
+  the MOI as soon as the ring is ready. Pass ``wait_for=0`` to fire there
+  without the warning.
+- ``buffer_record()`` raises ``ValueError`` when the configured ``moi_source``
+  is not ``"software"``, pointing at ``buffer_arm()`` and ``buffer_wait()``,
+  and it now stops acquisition on any exception, so Ctrl-C during a wait no
+  longer leaves the camera armed.
+- ``buffer_configure()`` rejects a negative ``pre_moi`` or one larger than the
+  frames per sequence.
+- New example ``examples/08_pretrigger_software_moi.py``: pre-trigger recording
+  with a software MOI, through the manual flow and through
+  ``buffer_record(wait_for=...)``.
+
+- New module ``pyTelops.header`` parses the 256-byte Telops header every frame
+  carries in its two metadata rows: ``FrameHeader``, ``parse_header()``,
+  ``parse_headers()`` and the ``BufferingFlag`` enum. The camera writes the
+  header at exposure time, so the timestamp in it has no host-side delay. The
+  buffering flag exists only from header version 12.9 on and reads as ``None``
+  below that.
+- ``header_timestamps()`` and ``header_frame_ids()`` read the same fields off a
+  raw frame stack with numpy views, for downloads too large to build one object
+  per frame.
+- ``buffer_download()`` takes ``return_headers=True`` and then returns
+  ``(data, headers)``, one header per frame of the array. The headers are parsed
+  before calibration and header stripping. A frame whose header does not parse
+  gives ``None``, and a single warning reports how many. The paths that return
+  no data return ``(None, [])``.
+- New ``buffer_moi_frame_id()`` and ``buffer_moi_index()`` report where the
+  moment of interest sits in a recorded sequence. ``buffer_moi_index()`` is the
+  index of the MOI frame in a full download and equals the configured
+  ``pre_moi``.
+
 Version 0.2.3
 -------------
 

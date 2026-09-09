@@ -15,3 +15,5 @@ Runnable scripts demonstrating pyTelops. Each needs a connected Telops camera.
   assigning a new IP by MAC (FORCEIP).
 * ``07_robust_download.py`` - tune the link, download from the buffer with
   integrity checking, and inspect ``cam.last_download_stats``.
+* ``08_pretrigger_software_moi.py`` - keep frames from before an event with a
+  software MOI, both manually and with ``buffer_record(wait_for=...)``.

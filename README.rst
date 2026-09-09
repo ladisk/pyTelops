@@ -272,7 +272,7 @@ slots before recording:
 
 ``buffer_record()`` prints progress::
 
-   Arming (seq 1/3)... Recording... Done (10000 frames)
+   Arming (seq 1/3)... Waiting for ring buffer (2.0 s)... Recording... Done (10000 frames)
    Firing (seq 2/3)... Recording... Done (10000 frames)
    Firing (seq 3/3)... Recording... Done (10000 frames)
 
@@ -286,6 +286,88 @@ If a download finishes with missing frames, ``buffer_download()`` raises
 ``FrameIntegrityError`` by default. See the `documentation
 <https://pytelops.readthedocs.io/en/latest/streaming_and_buffer.html>`_ for
 tolerating drops and inspecting ``cam.last_download_stats``.
+
+Pre-trigger recording (pre-MOI)
+-------------------------------
+
+The armed camera fills the buffer as a ring. The MOI (moment of interest)
+marks the split: the ``pre_moi`` frames before it and the rest of the sequence
+after it are kept. Fire the MOI at the event, not right after arming, or the
+pre-trigger window holds fewer frames than configured.
+
+The ring keeps nothing for the first 2.02 s after acquisition starts. A MOI
+fired inside that window is latched, but the sequence then starts at the first
+frame the ring could keep, so the pre-trigger part is truncated.
+``buffer_arm()`` therefore blocks until the ring holds the configured
+``pre_moi`` frames, about 2 s plus ``pre_moi / frame_rate``. Pass
+``wait_ready=False`` to return at once, and use ``buffer_ready_in()`` or
+``buffer_wait_ready()`` if you schedule the event yourself. This is measured
+with a software MOI; the same is expected for an external trigger, so send the
+trigger after ``buffer_arm()`` returns.
+
+``pre_moi`` can be as large as ``frames_per_seq``. The whole slot is then
+pre-trigger and the MOI lands on its last frame, at index
+``frames_per_seq - 1``.
+
+``buffer_record()`` is a shortcut over ``buffer_arm()``, ``buffer_fire_moi()``
+and ``buffer_wait()``, and takes the waiting step as ``wait_for``: a delay in
+seconds, or a callable that returns at the event. Every variant waits for the
+ring buffer first.
+
+.. code-block:: python
+
+   cam.buffer_configure(frames_per_seq=400, pre_moi=100)   # frames, not seconds
+
+   cam.buffer_record(wait_for=0.5)                # 0.5 s after the ring is ready
+   cam.buffer_record(wait_for=lambda: my_event.wait())
+
+   # or drive the same flow yourself
+   cam.buffer_arm()                               # blocks about 2.1 s at 2000 fps
+   wait_for_my_event()
+   cam.buffer_fire_moi()
+   cam.buffer_wait(timeout=30.0)
+   data = cam.buffer_download()
+
+With ``pre_moi > 0`` and no ``wait_for``, ``buffer_record()`` warns and fires
+the MOI as soon as the ring is ready, because the split point is then set by a
+timer and not by an event. Pass ``wait_for=0`` to silence the warning. See
+``examples/08_pretrigger_software_moi.py``.
+
+Frame headers and timestamps
+----------------------------
+
+Every frame carries a Telops header written by the camera at exposure time, so
+its timestamp has no host-side delay. Call ``cam.sync_time()`` before recording
+to put the camera clock on host time, then ask the download for the headers:
+
+.. code-block:: python
+
+   cam.sync_time()
+   data, headers = cam.buffer_download(sequence=0, return_headers=True)
+
+   print(headers[0].datetime)        # exposure time of the first frame, UTC
+   moi = cam.buffer_moi_index(0)     # index of the moment of interest
+   if 0 <= moi < len(headers):
+       print(headers[moi].timestamp - headers[0].timestamp)
+
+Entry ``i`` belongs to frame ``i`` of the array. For very large downloads use
+``header_timestamps(raw)`` on a raw download (``strip_header=False,
+convert=False``) instead; it reads the same bytes without building an object
+per frame.
+
+``sync_time()`` writes whole seconds, so absolute timestamps are good to about
+1 s. Differences between frames are exact. Sub-second alignment to the host
+clock is not available from the driver yet: the camera sub-second register is
+read-only, and ``cam.posix_time = ...`` also writes whole seconds only.
+
+``buffer_moi_index()`` is verified on the TS-IR: with the MOI fired after the
+ring warm-up it equals the configured ``pre_moi``. It is the authority for the
+split index. In the header timestamps the event sits about 7 to 8 ms later than
+the host-side ``buffer_fire_moi()`` call, which is the GVCP command latency, so
+do not derive the split from a host clock reading. The camera's MOI frame id
+maps directly onto ``FrameHeader.frame_id``: in every campaign recording,
+``REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID`` equalled ``headers[0].frame_id``, so
+``headers[buffer_moi_index()].frame_id`` equals ``buffer_moi_frame_id()``.
 
 External trigger
 ----------------
@@ -301,15 +383,22 @@ For triggered recording from an external BNC signal:
                             pre_moi=1000,
                             moi_source="external")
 
-       cam.buffer_arm()                  # arm and wait for trigger
+       cam.buffer_arm()                  # blocks until the ring is ready
        cam.buffer_wait(timeout=60.0)     # blocks until recording completes
        data = cam.buffer_download()
+
+Send the trigger after ``buffer_arm()`` returns. An edge that arrives during
+the ring warm-up is expected to behave like an early software MOI, that is
+latched with a truncated pre-trigger part, but only the software MOI has been
+measured. Check ``cam.buffer_moi_index(0)`` against the configured ``pre_moi``
+afterwards.
 
 For manual control with software MOI (instead of ``buffer_record()``):
 
 .. code-block:: python
 
-   cam.buffer_arm()                      # arm the buffer
+   cam.buffer_arm()                      # arm the buffer, wait for the ring
+   wait_for_my_event()                   # returns at the moment of interest
    cam.buffer_fire_moi()                 # software MOI trigger
    cam.buffer_wait(timeout=30.0)         # wait for recording to finish
    data = cam.buffer_download()

@@ -1,7 +1,7 @@
 Examples
 ========
 
-Seven runnable scripts ship in the ``examples/`` directory. Each needs a
+Eight runnable scripts ship in the ``examples/`` directory. Each needs a
 connected Telops camera.
 
 01_connect_and_grab.py
@@ -47,3 +47,12 @@ See :doc:`troubleshooting`.
 Record a sequence, tune the link with :func:`~pyTelops.tune_connection`, then
 download with integrity checking and inspect
 :attr:`~pyTelops.Camera.last_download_stats`. See :doc:`streaming_and_buffer`.
+
+08_pretrigger_software_moi.py
+-----------------------------
+
+Keep frames from before an event with a software MOI. Shows the manual flow
+(:meth:`~pyTelops.Camera.buffer_arm`, wait for the event,
+:meth:`~pyTelops.Camera.buffer_fire_moi`, :meth:`~pyTelops.Camera.buffer_wait`)
+and the same recording through ``buffer_record(wait_for=...)``. See
+:doc:`streaming_and_buffer`.

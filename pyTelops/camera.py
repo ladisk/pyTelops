@@ -63,7 +63,8 @@ import re
 import socket
 import struct
 import time
-from collections.abc import Iterator
+import warnings
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 
 import numpy as np
@@ -84,6 +85,13 @@ from pyGigEVision.standard import (  # noqa: E402
 
 from . import registers as reg  # noqa: E402
 from .errors import DownloadStats, FrameIntegrityError  # noqa: E402
+from .header import (  # noqa: E402
+    HDR_CAL_MODE,
+    HDR_DATA_EXP,
+    HDR_DATA_OFFSET,
+    FrameHeader,
+    parse_header,
+)
 
 # The TS-IR returns this exact value (the raw ADC floor converted to Celsius)
 # from REG_DEVICE_TEMPERATURE_READOUT for temperature locations the model does
@@ -391,6 +399,44 @@ def _resolve_packet_size(requested, probe_max):
     return 1500, warning
 
 
+def _parse_download_headers(raw: np.ndarray) -> list[FrameHeader | None]:
+    """Parse the Telops header of every frame of a raw download.
+
+    Parameters
+    ----------
+    raw : numpy.ndarray
+        3-D uint16 array of shape ``(N, H + 2, W)`` as it comes off the
+        wire, with the header rows still attached.
+
+    Returns
+    -------
+    list of FrameHeader or None
+        One entry per frame, in the same order as *raw*. A frame whose
+        header does not parse gives ``None``.
+
+    Warns
+    -----
+    UserWarning
+        Once, when at least one header could not be parsed, with the
+        number of affected frames.
+    """
+    headers: list[FrameHeader | None] = []
+    n_bad = 0
+    for i in range(raw.shape[0]):
+        try:
+            headers.append(parse_header(raw[i]))
+        except ValueError:
+            headers.append(None)
+            n_bad += 1
+    if n_bad:
+        warnings.warn(
+            f"{n_bad} of {raw.shape[0]} frame headers could not be parsed; those entries are None.",
+            UserWarning,
+            stacklevel=3,
+        )
+    return headers
+
+
 class Camera:
     """Telops FAST-series thermal camera over GigE Vision.
 
@@ -437,13 +483,37 @@ class Camera:
 
     >>> with Camera() as cam:
     ...     cam.buffer_configure(frames_per_seq=1000)
-    ...     cam.buffer_arm()
+    ...     cam.buffer_record()
+    ...     data = cam.buffer_download()
+
+    The same recording with 200 pre-trigger frames, fired at your own event:
+
+    >>> with Camera() as cam:
+    ...     cam.buffer_configure(frames_per_seq=1000, pre_moi=200)
+    ...     cam.buffer_arm()          # blocks until the ring buffer is ready
+    ...     wait_for_my_event()
     ...     cam.buffer_fire_moi()
+    ...     cam.buffer_wait()
     ...     data = cam.buffer_download()
     """
 
     # Number of metadata rows embedded in each frame by Telops cameras
     HEADER_ROWS = 2
+
+    # Seconds the memory-buffer ring needs after the ACQUISITION_START write
+    # before it keeps anything. Measured 2.022 s on a TS-IR, the same at 250
+    # and 1000 fps with less than 1 ms spread over seven runs, so it is a
+    # wall-clock dead time and not a frame count. A MOI fired inside it is
+    # latched, and the sequence then starts at the first frame the ring could
+    # keep, which truncates the pre-trigger part. The same 1.99 to 2.02 s was
+    # measured at 320x256, 320x64 and 64x64, so it does not depend on the
+    # resolution either. 2.05 s leaves about 30 ms of margin on the measured
+    # value.
+    BUFFER_RING_WARMUP_S = 2.05
+
+    # The measured dead time without that margin. Used only to estimate how
+    # many frames the ring already holds when a MOI is fired too early.
+    _BUFFER_RING_DEAD_TIME_S = 2.022
 
     # Resolution constraints - usable pixels (excludes 2 header rows)
     WIDTH_MIN = 64
@@ -495,6 +565,16 @@ class Camera:
         # camera wipes it (REG_MEMORY_BUFFER_CLEAR_ALL clears both data
         # AND the partition, so the next buffer_record() would fail).
         self._buffer_config_kwargs: dict | None = None
+        # time.monotonic() reading of the last ACQUISITION_START write that
+        # armed the memory buffer. Used to hold the MOI back until the ring
+        # buffer is past its warm-up dead time.
+        self._buffer_armed_at: float | None = None
+        # time.monotonic() reading at which the ring holds the configured
+        # pre-trigger window. Computed once at arming, so the MOI path needs
+        # no register reads.
+        self._buffer_ready_at: float | None = None
+        # Frame rate read at arming, kept for the too-early MOI warning.
+        self._buffer_armed_fps: float = 0.0
         self._calibration_info: dict = {}
         self._calibration_names: dict = {}
         self.last_download_stats = None
@@ -664,6 +744,7 @@ class Camera:
         # (e.g., crash without proper disconnect)
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        self._clear_buffer_arm_state()
 
         # Clear stream destination (stop any stale streaming)
         with suppress(GVCPError):
@@ -836,6 +917,7 @@ class Camera:
             self._gvcp = None
 
         self._connected = False
+        self._clear_buffer_arm_state()
 
         # Remove from active registry
         if self._camera_ip and Camera._active_cameras.get(self._camera_ip) is self:
@@ -1875,10 +1957,12 @@ class Camera:
     # Frame Acquisition
     # ==========================================================
 
-    # Header byte offsets for per-frame calibration data
-    _HDR_DATA_OFFSET = 12  # float32: additive offset (273.15 for RT Kelvin)
-    _HDR_DATA_EXP = 16  # int8: exponent (typically -8 for RT)
-    _HDR_CAL_MODE = 28  # uint8: calibration mode (2=RT, 1=NUC, etc.)
+    # Header byte offsets for per-frame calibration data. The offsets live in
+    # pyTelops.header, which parses the whole header; these aliases keep the
+    # calibration path readable.
+    _HDR_DATA_OFFSET = HDR_DATA_OFFSET  # float32: additive offset (273.15 for RT Kelvin)
+    _HDR_DATA_EXP = HDR_DATA_EXP  # int8: exponent (typically -8 for RT)
+    _HDR_CAL_MODE = HDR_CAL_MODE  # uint8: calibration mode (2=RT, 1=NUC, etc.)
 
     def _strip_headers(self, arr: np.ndarray) -> np.ndarray:
         """Strip Telops header rows from a frame or batch of frames."""
@@ -2008,6 +2092,7 @@ class Camera:
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
         except GVCPError as e:
             logger.warning("Failed to write REG_ACQUISITION_STOP: %s", e)
+        self._clear_buffer_arm_state()
         self._acquiring = False
 
     @contextmanager
@@ -2662,9 +2747,13 @@ class Camera:
         """Synchronise the camera clock to the host system time (UTC).
 
         Reads the current UTC time from the host and writes the integer
-        POSIX timestamp to ``REG_POSIX_TIME``.  Sub-second precision is
-        not written; use the :attr:`posix_time` setter with a
-        :class:`datetime.datetime` object for finer control.
+        POSIX timestamp to ``REG_POSIX_TIME``.  Whole seconds only, so the
+        camera clock lands within about 1 s of host time.  The
+        :attr:`posix_time` setter is no finer: it truncates to whole
+        seconds too, and ``REG_SUB_SECOND_TIME`` is read-only, so the
+        driver cannot align the camera sub-second counter to the host.
+        Differences between frame timestamps are unaffected by this and
+        stay exact.
 
         Raises
         ------
@@ -3466,9 +3555,15 @@ class Camera:
             Exact number of frames per sequence slot.  Mutually exclusive
             with *duration*.  Defaults to 100 when neither argument is given.
         pre_moi : int, optional
-            Number of frames to preserve before the MOI trigger event.
-            These frames are the "pre-trigger" portion of each slot.
-            Default 0 (all frames are post-MOI).
+            Number of frames to keep before the MOI trigger event, in
+            FRAMES (not seconds).  These frames are the "pre-trigger"
+            portion of each slot.  Convert a duration with
+            ``pre_moi=int(pre_seconds * cam.frame_rate)``.  Recording
+            continues for ``(frames_per_seq - pre_moi) / frame_rate``
+            seconds after the MOI.  Default 0 (all frames are post-MOI).
+            ``pre_moi == frames_per_seq`` is the other extreme: the whole
+            slot is pre-trigger and the MOI lands on the last frame of it,
+            at index ``frames_per_seq - 1``.
         moi_source : str or reg.MemoryBufferMOISource, optional
             Source of the MOI trigger.  Accepted strings (case-insensitive):
             ``"software"`` -- fire via :meth:`buffer_fire_moi` (default),
@@ -3483,8 +3578,17 @@ class Camera:
         RuntimeError
             If the camera is not connected.
         ValueError
-            If both *duration* and *frames_per_seq* are specified, or if
-            *duration* results in zero frames at the current frame rate.
+            If both *duration* and *frames_per_seq* are specified, if
+            *duration* results in zero frames at the current frame rate, or
+            if *pre_moi* is negative or larger than the frames per sequence.
+
+        Warns
+        -----
+        UserWarning
+            If ``moi_source="acquisition_started"`` is combined with
+            ``pre_moi > 0``.  That MOI fires with the acquisition start
+            write, inside the ring dead time, when the ring holds no frames
+            yet, so the pre-trigger window always comes out empty.
 
         Examples
         --------
@@ -3495,6 +3599,11 @@ class Camera:
         Record 0.5 s at current frame rate with 50 pre-trigger frames:
 
         >>> cam.buffer_configure(duration=0.5, pre_moi=50)
+
+        Keep 0.2 s of pre-trigger frames at the current frame rate:
+
+        >>> pre = int(0.2 * cam.frame_rate)
+        >>> cam.buffer_configure(frames_per_seq=2000, pre_moi=pre)
 
         Configure for external hardware trigger:
 
@@ -3517,6 +3626,28 @@ class Camera:
         elif frames_per_seq is None:
             frames_per_seq = 100
 
+        if pre_moi < 0:
+            raise ValueError(f"pre_moi must be >= 0, got {pre_moi}.")
+        if pre_moi > frames_per_seq:
+            raise ValueError(
+                f"pre_moi={pre_moi} exceeds frames_per_seq={frames_per_seq}. "
+                f"The pre-trigger frames are part of the sequence, so pre_moi "
+                f"cannot be larger than the sequence size."
+            )
+
+        if moi is reg.MemoryBufferMOISource.ACQUISITION_STARTED and pre_moi > 0:
+            warnings.warn(
+                f"moi_source='acquisition_started' fires the MOI with the "
+                f"acquisition start write, inside the "
+                f"{self.BUFFER_RING_WARMUP_S} s ring dead time, when the ring "
+                f"still holds nothing. The pre-trigger window will be empty, "
+                f"so pre_moi={pre_moi} has no effect. Use "
+                f"moi_source='software' or 'external' and fire the MOI at the "
+                f"event, or set pre_moi=0.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         # Track configured sequence count for buffer_record()
         self._buffer_n_sequences = n_sequences
 
@@ -3526,6 +3657,7 @@ class Camera:
         except GVCPError:
             with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+            self._clear_buffer_arm_state()
             time.sleep(0.3)
             with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_CLEAR_ALL, 1)
@@ -3549,8 +3681,23 @@ class Camera:
             moi_source=moi_source,
         )
 
-    def buffer_record(self, verbose: bool = True) -> int:
+    def buffer_record(
+        self,
+        verbose: bool = True,
+        *,
+        wait_for: float | Callable[[], None] | None = None,
+    ) -> int:
         """Record all configured sequences to the internal buffer.
+
+        This is a convenience wrapper over :meth:`buffer_arm`,
+        :meth:`buffer_fire_moi`, the per-sequence wait and stopping
+        acquisition.  It requires ``moi_source="software"``; when the MOI
+        comes from a hardware signal use the manual flow instead::
+
+            cam.buffer_configure(n_sequences=3, moi_source="external")
+            cam.buffer_arm()
+            # ... external trigger fires 3 times ...
+            cam.buffer_wait()       # waits for HOLDING/IDLE
 
         Arms the camera on the first sequence and fires a software MOI for
         each sequence in turn.  After firing the MOI, the method polls
@@ -3562,18 +3709,49 @@ class Camera:
         frame count and current frame rate (at least 30 s overhead, minimum
         45 s total).
 
-        For external-trigger workflows where the MOI comes from a hardware
-        signal, use the manual flow instead::
+        The ring buffer keeps nothing for
+        :attr:`BUFFER_RING_WARMUP_S` seconds after acquisition starts, so the
+        MOI of the first sequence is never fired before the ring can hold the
+        configured ``pre_moi`` frames.  That floor is ``BUFFER_RING_WARMUP_S +
+        pre_moi / frame_rate`` seconds after arming, which makes the first
+        sequence take about 2 s longer than the recording itself.  Later
+        sequences only wait ``pre_moi / frame_rate``, because the ring is
+        already running.  Measured on a TS-IR with three sequences at 1000
+        and 2000 fps: every sequence came back with ``buffer_moi_index()``
+        equal to the configured ``pre_moi``.
 
-            cam.buffer_configure(n_sequences=3, moi_source="external")
-            cam.buffer_arm()
-            # ... external trigger fires 3 times ...
-            cam.buffer_wait()       # waits for HOLDING/IDLE
+        With ``pre_moi > 0`` the MOI splits each slot into pre-trigger and
+        post-trigger frames, so the MOI has to be fired at the moment of
+        interest, not as soon as the camera is armed.  Pass ``wait_for`` to
+        say when that moment is, or drive the flow yourself with
+        :meth:`buffer_arm`, :meth:`buffer_fire_moi` and :meth:`buffer_wait`.
 
         Parameters
         ----------
         verbose : bool, optional
             Print per-sequence progress messages to stdout.  Default ``True``.
+        wait_for : float or callable or None, keyword-only, optional
+            How long, or until what, to wait before firing the software MOI.
+            Every variant waits for the ring buffer first:
+
+            ============  ==================================================
+            ``wait_for``  When the MOI is fired
+            ============  ==================================================
+            ``None``      As soon as the ring is ready.  Warns when
+                          ``pre_moi > 0``, because the split point is then
+                          set by a timer and not by an event.
+            ``0``         As soon as the ring is ready, without the warning.
+            number        The given number of seconds after the ring is
+                          ready.
+            callable      When the callable returns.  It is called once the
+                          ring is ready, so an event during the warm-up is
+                          not missed, but the MOI is then fired at the end of
+                          the warm-up rather than at the event.
+            ============  ==================================================
+
+            A callable takes no arguments and its return value is ignored
+            (for example ``input`` or ``lambda: my_event.wait()``).  It runs
+            once per sequence.
 
         Returns
         -------
@@ -3584,10 +3762,21 @@ class Camera:
         Raises
         ------
         RuntimeError
-            If the camera is not connected or not ready.
+            If the camera is not connected or not ready, or if the buffer is
+            still RECORDING 5 s after the recording was stopped.
+        TypeError
+            If *wait_for* is neither a number nor a callable.
+        ValueError
+            If *wait_for* is negative, or if the configured ``moi_source``
+            is not ``"software"``.
         TimeoutError
             If a sequence does not complete within the computed safety
             timeout.
+
+        Warns
+        -----
+        UserWarning
+            If ``pre_moi > 0`` and no *wait_for* is given.
 
         Examples
         --------
@@ -3602,58 +3791,114 @@ class Camera:
         >>> cam.buffer_configure(n_sequences=3, frames_per_seq=50)
         >>> n = cam.buffer_record()
         >>> print(n)  # 150
+
+        Keep 100 frames before the event, and fire the MOI when the user
+        presses Enter.  The prompt appears once the ring is ready:
+
+        >>> cam.buffer_configure(frames_per_seq=400, pre_moi=100)
+        >>> cam.buffer_record(wait_for=lambda: input("Press Enter at the event"))
+
+        Same, but 0.5 s after the ring is ready:
+
+        >>> cam.buffer_record(wait_for=0.5)
         """
         self._check_ready()
         n_seq = getattr(self, "_buffer_n_sequences", 1)
 
+        if wait_for is not None and not callable(wait_for):
+            if isinstance(wait_for, bool) or not isinstance(wait_for, (int, float)):
+                raise TypeError(
+                    f"wait_for must be a number of seconds or a zero-argument "
+                    f"callable, got {type(wait_for).__name__}."
+                )
+            if wait_for < 0:
+                raise ValueError(f"wait_for must be >= 0 seconds, got {wait_for}.")
+
+        self._check_moi_source_is_software()
+        pre_moi = self._configured_pre_moi()
+
         # Auto-calculate per-sequence timeout from frame count and frame rate
         fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
         seq_size = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_SIZE)
+        fill_time = 0.0
         if fps > 0:
             recording_time = seq_size / fps
             timeout = max(recording_time * 2 + 30, 45.0)
+            fill_time = pre_moi / fps
         else:
             timeout = 60.0
 
+        if wait_for is None and pre_moi > 0:
+            warnings.warn(
+                f"pre_moi={pre_moi} frames are kept before the MOI, but no "
+                f"wait_for was given, so the MOI is placed by a timer and not "
+                f"by an event. buffer_record() fires it as soon as the ring "
+                f"buffer can hold the pre-trigger window. Pass wait_for= (a "
+                f"delay in seconds or a callable that returns at the event), "
+                f"or use buffer_arm() / buffer_fire_moi() / buffer_wait() to "
+                f"drive the flow yourself. Pass wait_for=0 to silence this.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         total_recorded = 0
 
-        for seq_idx in range(n_seq):
-            if seq_idx == 0:
-                # First sequence: arm + start + settle + fire MOI
+        try:
+            for seq_idx in range(n_seq):
+                if seq_idx == 0:
+                    # First sequence: arm + start + ring warm-up + fire MOI
+                    if verbose:
+                        print(f"Arming (seq {seq_idx + 1}/{n_seq})...", end=" ", flush=True)
+
+                    self._stop_if_recording()
+                    self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
+                    self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+                    # The ring keeps nothing for BUFFER_RING_WARMUP_S after
+                    # this write, so the MOI floor is measured from here.
+                    self._buffer_armed_at = time.monotonic()
+                    self._buffer_armed_fps = fps
+                    self._buffer_ready_at = self._buffer_armed_at + self._buffer_ready_after(
+                        pre_moi, fps
+                    )
+                    floor_at = self._buffer_ready_at
+                    warming_up = True
+                else:
+                    # Subsequent sequences: camera stays armed, just fire MOI
+                    if verbose:
+                        print(f"Firing (seq {seq_idx + 1}/{n_seq})...", end=" ", flush=True)
+                    floor_at = time.monotonic() + fill_time
+                    warming_up = False
+
+                self._wait_before_moi(wait_for, floor_at, pre_moi, verbose, warming_up)
+
                 if verbose:
-                    print(f"Arming (seq {seq_idx + 1}/{n_seq})...", end=" ", flush=True)
+                    print("Recording...", end=" ", flush=True)
 
-                self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
-                self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
-                time.sleep(0.5)
-            else:
-                # Subsequent sequences: camera stays armed, just fire MOI
+                self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
+
+                # Wait for this sequence to complete
+                try:
+                    self._buffer_wait_sequence(seq_idx + 1, timeout=timeout)
+                except TimeoutError:
+                    # Acquisition is stopped by the handler below
+                    if verbose:
+                        print("TIMEOUT", flush=True)
+                    raise
+
                 if verbose:
-                    print(f"Firing (seq {seq_idx + 1}/{n_seq})...", end=" ", flush=True)
-
-            if verbose:
-                print("Recording...", end=" ", flush=True)
-
-            self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
-
-            # Wait for this sequence to complete
-            try:
-                self._buffer_wait_sequence(seq_idx + 1, timeout=timeout)
-            except TimeoutError:
-                # On timeout of the last sequence, stop acquisition
-                with suppress(GVCPError):
-                    self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
-                if verbose:
-                    print("TIMEOUT", flush=True)
-                raise
-
-            if verbose:
-                print(f"Done ({seq_size} frames)", flush=True)
-            total_recorded += seq_size
+                    print(f"Done ({seq_size} frames)", flush=True)
+                total_recorded += seq_size
+        except BaseException:
+            # Never leave the camera armed, not even on Ctrl-C inside wait_for
+            with suppress(GVCPError):
+                self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+            self._clear_buffer_arm_state()
+            raise
 
         # Stop acquisition after all sequences complete
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        self._clear_buffer_arm_state()
         time.sleep(0.3)
 
         # Now read actual per-sequence counts (registers unlocked after stop)
@@ -3663,43 +3908,363 @@ class Camera:
 
         return total_recorded
 
-    def buffer_arm(self) -> None:
+    def _configured_pre_moi(self) -> int:
+        """Return the configured pre-MOI frame count.
+
+        Uses the parameters remembered by :meth:`buffer_configure` and falls
+        back to reading ``REG_MEMORY_BUFFER_PRE_MOI_SIZE`` from the camera.
+        Returns 0 when neither is available.
+        """
+        pre_moi = (self._buffer_config_kwargs or {}).get("pre_moi")
+        if pre_moi is None:
+            pre_moi = 0
+            with suppress(GVCPError):
+                pre_moi = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE)
+        return int(pre_moi)
+
+    def _current_frame_rate(self) -> float:
+        """Return the current frame rate in Hz, or 0.0 if it cannot be read."""
+        fps = 0.0
+        with suppress(GVCPError, TypeError, ValueError):
+            fps = float(self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE))
+        return fps
+
+    def _buffer_ready_after(self, pre_moi: int, fps: float) -> float:
+        """Return how long the ring buffer needs after acquisition starts.
+
+        Parameters
+        ----------
+        pre_moi : int
+            Configured number of pre-trigger frames.
+        fps : float
+            Current frame rate in Hz.  A non-positive value gives the
+            warm-up alone.
+
+        Returns
+        -------
+        float
+            Seconds after the ``REG_ACQUISITION_START`` write before the ring
+            holds ``pre_moi`` frames: :attr:`BUFFER_RING_WARMUP_S` plus
+            ``pre_moi / fps``.
+        """
+        if fps > 0:
+            return self.BUFFER_RING_WARMUP_S + pre_moi / fps
+        return self.BUFFER_RING_WARMUP_S
+
+    def _clear_buffer_arm_state(self) -> None:
+        """Forget the ring-buffer deadline after acquisition is stopped.
+
+        Every ``REG_ACQUISITION_STOP`` write ends the ring, so the cached
+        arming time and ready time no longer describe the camera.
+        """
+        self._buffer_armed_at = None
+        self._buffer_ready_at = None
+
+    def _stop_if_recording(self, timeout: float = 5.0) -> None:
+        """Stop a running recording before ``REG_ACQUISITION_ARM`` is written.
+
+        Writing ARM while the memory buffer is RECORDING aborts the
+        recording: the status drops to IDLE, the recorded frame count stays 0
+        and ``REG_MEMORY_BUFFER_SEQ_COUNT`` sticks at 0 until the buffer is
+        cleared.  This writes ``REG_ACQUISITION_STOP`` first and then waits
+        for the buffer to leave RECORDING.
+
+        The stop write is unconditional.  It is harmless on an idle camera,
+        and it keeps the guard from failing open when the status register
+        cannot be read: an unreadable status counts as still RECORDING.
+
+        Parameters
+        ----------
+        timeout : float, optional
+            Seconds to wait for the buffer to leave RECORDING.  Default 5.0.
+
+        Raises
+        ------
+        RuntimeError
+            If the buffer still reads RECORDING, or cannot be read at all,
+            after *timeout* seconds.
+        """
+        with suppress(GVCPError):
+            self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        self._clear_buffer_arm_state()
+
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self._buffer_status_or_none()
+            if status is not None and status is not reg.MemoryBufferStatus.RECORDING:
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.2)
+
+        raise RuntimeError(
+            f"The memory buffer still reads RECORDING {timeout:.0f} s after "
+            f"acquisition was stopped. Arming now would abort the recording "
+            f"and stick the sequence counter at 0. Call buffer_clear() and "
+            f"try again."
+        )
+
+    def _buffer_status_or_none(self) -> reg.MemoryBufferStatus | None:
+        """Return the buffer status, or ``None`` if it cannot be read."""
+        status = None
+        with suppress(GVCPError, ValueError):
+            status = self.buffer_status()
+        return status
+
+    def _check_moi_source_is_software(self) -> None:
+        """Raise ValueError if the buffer MOI does not come from software.
+
+        Uses the parameters remembered by :meth:`buffer_configure` and falls
+        back to reading ``REG_MEMORY_BUFFER_MOI_SOURCE``.  Unreadable or
+        unknown values are accepted.
+        """
+        configured = (self._buffer_config_kwargs or {}).get("moi_source")
+        source = None
+        if configured is not None:
+            with suppress(ValueError, TypeError):
+                source = _resolve_enum(configured, reg.MemoryBufferMOISource)
+        else:
+            with suppress(GVCPError, ValueError):
+                source = reg.MemoryBufferMOISource(
+                    self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_MOI_SOURCE)
+                )
+        if source is not None and source is not reg.MemoryBufferMOISource.SOFTWARE:
+            raise ValueError(
+                f"buffer_record() fires a software MOI, but moi_source is "
+                f"{source.name}. Use buffer_arm() and buffer_wait() to record "
+                f"with an external or acquisition-start MOI, or configure the "
+                f"buffer with moi_source='software'."
+            )
+
+    def _wait_before_moi(
+        self,
+        wait_for: float | Callable[[], None] | None,
+        floor_at: float,
+        pre_moi: int,
+        verbose: bool,
+        warming_up: bool,
+    ) -> None:
+        """Wait for the moment of interest before the software MOI is fired.
+
+        Sleeps until *floor_at* first, so the MOI is never fired before the
+        ring buffer can hold the pre-trigger window, then applies *wait_for*.
+
+        Parameters
+        ----------
+        wait_for : float or callable or None
+            The ``wait_for`` argument of :meth:`buffer_record`.
+        floor_at : float
+            ``time.monotonic()`` reading before which the MOI must not fire.
+        pre_moi : int
+            Configured number of pre-trigger frames, for the progress message.
+        verbose : bool
+            Print what is being waited for.
+        warming_up : bool
+            ``True`` for the sequence that armed the camera, whose floor
+            includes the ring warm-up.
+        """
+        remaining = floor_at - time.monotonic()
+        if remaining > 0:
+            if verbose:
+                if warming_up:
+                    print(f"Waiting for ring buffer ({remaining:.1f} s)...", end=" ", flush=True)
+                else:
+                    print(
+                        f"Filling pre-MOI window ({pre_moi} frames, {remaining:.3f} s)...",
+                        end=" ",
+                        flush=True,
+                    )
+            time.sleep(remaining)
+
+        if callable(wait_for):
+            if verbose:
+                print("Waiting for wait_for()...", end=" ", flush=True)
+            wait_for()
+            return
+
+        if wait_for is not None and wait_for > 0:
+            if verbose:
+                print(f"Waiting {wait_for:.3f} s...", end=" ", flush=True)
+            time.sleep(wait_for)
+
+    def buffer_arm(self, wait_ready: bool = True) -> None:
         """Arm the camera and start acquisition for buffer recording.
 
         Writes ``REG_ACQUISITION_ARM`` then ``REG_ACQUISITION_START``.
-        Use this as the first step of the manual external-trigger workflow::
+        Once armed, the camera fills its ring buffer continuously; the MOI
+        fixes which part of the ring is kept.
+
+        The ring keeps nothing for the first
+        :attr:`BUFFER_RING_WARMUP_S` seconds after the start write.  A MOI
+        that arrives inside that window is latched, but the sequence then
+        starts at the first frame the ring could keep, so the pre-trigger
+        part comes out truncated or empty.  By default this call therefore
+        blocks until the ring holds the configured ``pre_moi`` frames, which
+        takes about 2 s plus ``pre_moi / frame_rate``.  After it returns, an
+        immediate :meth:`buffer_fire_moi` gives the full pre-trigger window::
+
+            cam.buffer_configure(frames_per_seq=400, pre_moi=100)
+            cam.buffer_arm()        # blocks about 2.1 s at 2000 fps
+            wait_for_my_event()     # the ring keeps filling while you wait
+            cam.buffer_fire_moi()
+            cam.buffer_wait()
+
+        The same first step is used for an external MOI::
 
             cam.buffer_configure(n_sequences=1, moi_source="external")
             cam.buffer_arm()
             # ... external MOI signal fires ...
             cam.buffer_wait()
 
-        To fire the MOI in software instead, call :meth:`buffer_fire_moi`
-        after arming.  For fully automated software-MOI recordings, prefer
-        :meth:`buffer_record`.
+        If the buffer is still RECORDING, acquisition is stopped first and
+        the call waits up to 5 s for it: writing ARM during a recording
+        aborts it and sticks the sequence counter at 0 until
+        :meth:`buffer_clear`.
+
+        :meth:`buffer_record` packs the whole flow into one call and takes
+        the waiting step as its ``wait_for`` argument.
+
+        Parameters
+        ----------
+        wait_ready : bool, optional
+            Block until the ring buffer holds the configured ``pre_moi``
+            frames.  Default ``True``.  Pass ``False`` to return right after
+            the start write, for callers that schedule the event themselves;
+            use :meth:`buffer_ready_in` or :meth:`buffer_wait_ready` to find
+            out when the ring is ready.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected, or if the buffer is still
+            RECORDING 5 s after acquisition was stopped.
+
+        See Also
+        --------
+        buffer_ready_in : seconds left of the ring warm-up.
+        buffer_wait_ready : sleep out the rest of the ring warm-up.
+        """
+        self._check_connected()
+        self._stop_if_recording()
+        pre_moi = self._configured_pre_moi()
+        fps = self._current_frame_rate()
+        self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
+        self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        # Both register reads happen above, so buffer_ready_in() and
+        # buffer_fire_moi() need no GVCP traffic on the event path.
+        self._buffer_armed_at = time.monotonic()
+        self._buffer_armed_fps = fps
+        self._buffer_ready_at = self._buffer_armed_at + self._buffer_ready_after(pre_moi, fps)
+        if wait_ready:
+            self.buffer_wait_ready()
+
+    def buffer_ready_in(self) -> float:
+        """Return the seconds left before the ring buffer is ready.
+
+        The ring keeps nothing for :attr:`BUFFER_RING_WARMUP_S` seconds after
+        :meth:`buffer_arm`, and needs a further ``pre_moi / frame_rate``
+        seconds to hold the whole pre-trigger window.  This is what is left
+        of that, measured from the last arming.  The deadline is computed
+        once by :meth:`buffer_arm`, so this call reads no registers.
+
+        Returns
+        -------
+        float
+            Seconds until a software MOI would give the full pre-trigger
+            window.  ``0.0`` when the ring is ready, and when the camera was
+            never armed in this session.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+
+        Examples
+        --------
+        >>> cam.buffer_arm(wait_ready=False)     # doctest: +SKIP
+        >>> cam.buffer_ready_in()                # doctest: +SKIP
+        2.098
+        """
+        self._check_connected()
+        if self._buffer_ready_at is None:
+            return 0.0
+        return max(0.0, self._buffer_ready_at - time.monotonic())
+
+    def buffer_wait_ready(self) -> None:
+        """Block until the ring buffer holds the configured pre-trigger window.
+
+        Sleeps for :meth:`buffer_ready_in` seconds.  Returns at once when the
+        ring is ready or the camera was never armed.
 
         Raises
         ------
         RuntimeError
             If the camera is not connected.
         """
-        self._check_connected()
-        self._gvcp.write_reg(reg.REG_ACQUISITION_ARM, 1)
-        self._gvcp.write_reg(reg.REG_ACQUISITION_START, 1)
+        remaining = self.buffer_ready_in()
+        if remaining > 0:
+            time.sleep(remaining)
 
     def buffer_fire_moi(self) -> None:
         """Fire a software MOI (Moment of Interest) trigger.
 
-        Writes ``1`` to ``REG_MEMORY_BUFFER_MOI_SOFTWARE``.  Only has effect
-        when :meth:`buffer_arm` has been called and
-        ``moi_source`` was set to ``"software"`` in :meth:`buffer_configure`.
+        Writes ``1`` to ``REG_MEMORY_BUFFER_MOI_SOFTWARE``.  Requires
+        :meth:`buffer_arm` first, and ``moi_source`` set to ``"software"`` in
+        :meth:`buffer_configure`.  The camera rejects the write while it is
+        not acquiring, so an unarmed call raises instead of writing.
+
+        The MOI marks the moment of interest inside each sequence slot: the
+        ``pre_moi`` frames before this call and the remaining frames after it
+        are kept.  Call it at the event, not right after arming, otherwise
+        the pre-trigger window holds fewer frames than configured::
+
+            cam.buffer_arm()
+            wait_for_my_event()
+            cam.buffer_fire_moi()
+            cam.buffer_wait()
+
+        The camera is not read here: the ring deadline and the frame rate are
+        cached by :meth:`buffer_arm`, so the call is a single register write.
 
         Raises
         ------
         RuntimeError
-            If the camera is not connected.
+            If the camera is not connected, or if :meth:`buffer_arm` was not
+            called first.  The camera rejects the write while it is not
+            acquiring, so firing without arming would do nothing.
+
+        Warns
+        -----
+        UserWarning
+            If the ring buffer is not ready yet, that is
+            :meth:`buffer_ready_in` is above 0.  The MOI is still fired, but
+            the camera latches it and starts the sequence at the first frame
+            the ring could keep, so the pre-trigger part is truncated.
         """
         self._check_connected()
+        if self._buffer_ready_at is None or self._buffer_armed_at is None:
+            raise RuntimeError(
+                "The camera is not armed for buffer recording. Call "
+                "buffer_arm() first: the camera rejects a software MOI while "
+                "it is not acquiring."
+            )
+        now = time.monotonic()
+        remaining = max(0.0, self._buffer_ready_at - now)
+        if remaining > 0:
+            elapsed = now - self._buffer_armed_at
+            fps = self._buffer_armed_fps
+            kept = max(0, round((elapsed - self._BUFFER_RING_DEAD_TIME_S) * fps)) if fps > 0 else 0
+            warnings.warn(
+                f"The MOI was fired {remaining:.3f} s before the ring buffer "
+                f"is ready. The camera keeps nothing for the first "
+                f"{self.BUFFER_RING_WARMUP_S} s after arming, so the "
+                f"pre-trigger part will be truncated to about {kept} frames "
+                f"instead of the configured pre_moi. Use buffer_arm() with "
+                f"its default wait_ready=True, or wait buffer_ready_in() "
+                f"seconds, before firing.",
+                UserWarning,
+                stacklevel=2,
+            )
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE, 1)
 
     def buffer_wait(
@@ -3888,6 +4453,103 @@ class Camera:
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
         return self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_RECORDED_SIZE)
 
+    def buffer_moi_frame_id(self, sequence: int = 0) -> int:
+        """Return the frame id the camera reports as the MOI of a sequence.
+
+        Writes the sequence selector register then reads
+        ``REG_MEMORY_BUFFER_SEQ_MOI_FRAME_ID``.
+
+        Parameters
+        ----------
+        sequence : int, optional
+            0-based sequence slot index.  Default 0.
+
+        Returns
+        -------
+        int
+            Raw register value: the buffer frame id of the frame that
+            carries the moment of interest.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        GVCPError
+            If the camera rejects the register access, for example while
+            the buffer is actively recording.
+
+        Notes
+        -----
+        This is the id in the camera's buffer id space, the same space as
+        the ``start_frame`` argument of :meth:`buffer_download`.  Use
+        :meth:`buffer_moi_index` to get a position inside a download.
+
+        See Also
+        --------
+        buffer_moi_index : the same value as an index into the download.
+        """
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
+        return self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_MOI_FRAME_ID)
+
+    def buffer_moi_index(self, sequence: int = 0) -> int:
+        """Return the position of the MOI frame inside a recorded sequence.
+
+        The MOI frame id minus the first frame id of the slot, both read
+        after selecting the sequence.  With a default download it is the
+        index of the moment of interest in the returned array, and it comes
+        out equal to the configured ``pre_moi`` as long as the MOI is fired
+        after the ring warm-up (see :meth:`buffer_arm`).
+
+        Parameters
+        ----------
+        sequence : int, optional
+            0-based sequence slot index.  Default 0.
+
+        Returns
+        -------
+        int
+            0-based index of the MOI frame in the sequence.
+
+        Raises
+        ------
+        RuntimeError
+            If the camera is not connected.
+        GVCPError
+            If the camera rejects the register access, for example while
+            the buffer is actively recording.
+
+        Notes
+        -----
+        The index is valid for a download of the whole slot.  A
+        :meth:`buffer_download` with a non-default ``start_frame`` shifts
+        the array, so subtract ``start_frame - first_frame_id`` yourself.
+
+        Verified on a TS-IR: with the MOI fired after the ring warm-up the
+        index equals the configured ``pre_moi``.  The mapping between the
+        register id space and :attr:`pyTelops.FrameHeader.frame_id` is also
+        verified: ``REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID`` equalled
+        ``headers[0].frame_id`` in every campaign recording, so
+        ``headers[buffer_moi_index()].frame_id`` equals
+        ``buffer_moi_frame_id()``.
+
+        This register is the authority for the split index.  In the header
+        timestamps the event sits about 7 to 8 ms later than the host-side
+        :meth:`buffer_fire_moi` call, which is the GVCP command latency, so
+        do not derive the split from a host clock reading.
+
+        Examples
+        --------
+        >>> data = cam.buffer_download(sequence=0)   # doctest: +SKIP
+        >>> moi = cam.buffer_moi_index(0)            # doctest: +SKIP
+        >>> data[moi]                                # the frame at the event
+        """
+        self._check_connected()
+        self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
+        moi_frame_id = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_MOI_FRAME_ID)
+        first_frame_id = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
+        return moi_frame_id - first_frame_id
+
     def _reset_auto_tune_cache(self) -> None:
         """Clear the per-connection auto-tune cache (jumbo + learned bitrate)."""
         self.recommended_download_kwargs = {}
@@ -3910,7 +4572,8 @@ class Camera:
         verify_order: bool = True,
         order_tolerance: float = 0.05,
         chunk_size: int = 1000,
-    ) -> np.ndarray | None:
+        return_headers: bool = False,
+    ) -> np.ndarray | None | tuple[np.ndarray | None, list[FrameHeader | None]]:
         """Download frames from the internal memory buffer over Ethernet.
 
         Sets the download mode to ``SEQUENCE``, configures frame range and
@@ -4013,6 +4676,18 @@ class Camera:
             thousand frames come back complete, so the range is downloaded in
             ``chunk_size`` pieces. Lower it if large downloads still show drops
             on a constrained host; there is rarely a reason to raise it.
+        return_headers : bool, optional
+            Also return the per-frame Telops headers.  Default ``False``.
+            The headers are parsed from the raw frames before calibration
+            and header stripping, so entry ``i`` belongs to frame ``i`` of
+            the returned array.  The timestamps in them come from the
+            camera clock, so call :meth:`sync_time` before recording to put
+            that clock on host time.  Parsing builds one Python object per
+            frame (a few microseconds per frame), which is noticeable on a
+            download of tens of thousands of frames; for those, download raw
+            (``strip_header=False, convert=False``) and use
+            :func:`pyTelops.header_timestamps`, which reads the same bytes
+            with numpy views.
 
         Returns
         -------
@@ -4023,6 +4698,17 @@ class Camera:
             is active; otherwise ``uint16``.  Returns ``None`` when no
             frames were recorded in the slot or no frames were received
             within the timeout.
+        list of FrameHeader or None
+            Returned as a second value only when *return_headers* is
+            ``True``: one :class:`~pyTelops.FrameHeader` per frame of the
+            array, or ``None`` for a frame whose header did not parse.  It
+            is an empty list on the paths that return ``None``.
+
+        Warns
+        -----
+        UserWarning
+            When *return_headers* is ``True`` and one or more headers could
+            not be parsed.  A single warning reports how many.
 
         Raises
         ------
@@ -4046,6 +4732,15 @@ class Camera:
         Throttle transfer rate to reduce network contention:
 
         >>> frames = cam.buffer_download(bitrate_mbps=300.0)
+
+        Get the camera timestamp of each frame:
+
+        >>> cam.sync_time()                                    # doctest: +SKIP
+        >>> frames, headers = cam.buffer_download(return_headers=True)
+        >>> headers[0].timestamp                               # doctest: +SKIP
+        1757318400.1234567
+        >>> headers[0].datetime                                # doctest: +SKIP
+        datetime.datetime(2026, 9, 8, 8, 0, 0, 123456, tzinfo=datetime.timezone.utc)
         """
         self._check_connected()
         self.last_download_stats = None
@@ -4064,7 +4759,7 @@ class Camera:
         if n_frames == 0:
             if verbose:
                 logger.warning("No frames recorded in buffer")
-            return None
+            return (None, []) if return_headers else None
 
         first_frame_id = self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID)
         if start_frame is None:
@@ -4219,7 +4914,7 @@ class Camera:
             )
 
         if n_complete == 0:
-            return None
+            return (None, []) if return_headers else None
 
         if stats.n_incomplete > max_dropped_frames:
             raise FrameIntegrityError(
@@ -4255,12 +4950,17 @@ class Camera:
         # Assemble in frame order. Under drops + recovery, arrival order is not
         # frame order, so order by position.
         result = np.stack([by_pos[k][0] for k in sorted(by_pos)])
+        # Parse before calibration and stripping: the headers live in the rows
+        # both of those remove. Index i stays frame i of the returned array.
+        headers = _parse_download_headers(result) if return_headers else None
         if convert:
             result = self._apply_calibration(result)
         elif strip_header:
             result = self._strip_headers(result)
         if verbose:
             self._download_diagnostics(result, n_frames, stats)
+        if headers is not None:
+            return result, headers
         return result
 
     def _download_range(self, frame_id, count, *, packet_size, bitrate_mbps, resend, timeout):
@@ -4291,6 +4991,7 @@ class Camera:
         # Ensure acquisition is stopped before configuring download.
         with suppress(GVCPError):
             self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+        self._clear_buffer_arm_state()
         time.sleep(0.2)
 
         # Mode MUST be set before the other registers (locked when mode == OFF).
@@ -4372,6 +5073,7 @@ class Camera:
         finally:
             with suppress(GVCPError):
                 self._gvcp.write_reg(reg.REG_ACQUISITION_STOP, 1)
+            self._clear_buffer_arm_state()
             time.sleep(0.2)
             if old_bitrate is not None:
                 with suppress(GVCPError):

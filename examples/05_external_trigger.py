@@ -1,5 +1,15 @@
 """Buffer recording started by an external BNC trigger.
 
+The camera fills its buffer as a ring from the moment it is armed. The BNC edge
+is the MOI, and ``pre_moi=1000`` keeps the 1000 frames recorded BEFORE that
+edge, plus the rest of the sequence after it.
+
+The ring keeps nothing for the first 2.02 s after acquisition starts, so
+``buffer_arm()`` blocks until it holds the 1000 pre-trigger frames. Send the
+trigger after the "Armed" line. An edge inside the warm-up is expected to
+behave like an early software MOI, that is latched with a truncated pre-trigger
+part, but only the software MOI has been measured.
+
 Run with::
 
     python examples/05_external_trigger.py

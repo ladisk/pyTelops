@@ -24,6 +24,14 @@ from pyGigEVision import GVCPClient, GVCPError
 from .camera import Camera, discover
 from .connection import ConnectionReport, tune_connection
 from .errors import DownloadStats, FrameIntegrityError
+from .header import (
+    BufferingFlag,
+    FrameHeader,
+    header_frame_ids,
+    header_timestamps,
+    parse_header,
+    parse_headers,
+)
 from .provisioning import force_ip
 from .registers import (
     CalibrationCollectionType,
@@ -67,6 +75,12 @@ __all__ = [
     "ConnectionReport",
     "DownloadStats",
     "FrameIntegrityError",
+    "FrameHeader",
+    "BufferingFlag",
+    "parse_header",
+    "parse_headers",
+    "header_timestamps",
+    "header_frame_ids",
     "tune_connection",
     "__version__",
 ]

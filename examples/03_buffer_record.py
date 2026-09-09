@@ -20,6 +20,8 @@ def main() -> None:
         cam.frame_rate = 2000.0
         cam.integration_time_auto = "continuous"
 
+        # pre_moi is 0 here, so recording starts at the MOI. To keep frames
+        # from before an event, see 08_pretrigger_software_moi.py.
         cam.buffer_configure(n_sequences=1, duration=5.0, moi_source="software")
         print(cam.buffer_info())
 
