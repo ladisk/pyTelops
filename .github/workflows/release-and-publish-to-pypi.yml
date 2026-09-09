@@ -67,10 +67,10 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@v1.13.0
-        with:
-          user: __token__
-          password: ${{ secrets.PYPI_API_TOKEN }}
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: python -m twine upload --non-interactive dist/*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
