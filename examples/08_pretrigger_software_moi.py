@@ -5,17 +5,22 @@ interest) marks where the recording is split: ``pre_moi`` frames before it and
 the rest after it are kept. So the MOI has to be fired at the event, not right
 after arming.
 
-Two ways to do that, both shown below:
+The ring keeps nothing for the first 2.02 s after acquisition starts, so
+``buffer_arm()`` blocks until it holds the configured ``pre_moi`` frames, about
+2 s plus ``pre_moi / frame_rate``. ``buffer_record()`` waits the same before it
+fires. No manual sleep is needed.
+
+Two ways to record, both shown below:
 
 1. the manual flow, ``buffer_arm()`` -> wait for the event ->
    ``buffer_fire_moi()`` -> ``buffer_wait()``,
 2. ``buffer_record(wait_for=...)``, which does the same in one call.
 
 Both download with ``return_headers=True``, so they can print the camera
-timestamps of the recording and where the camera says the MOI sits. The camera
-reports the MOI as a frame id in its own id space; how that id maps onto the
-download index is not yet verified on hardware, so the index is checked against
-the download before it is used.
+timestamps of the recording and where the camera says the MOI sits.
+``buffer_moi_index()`` is verified on the TS-IR: it equals the configured
+``pre_moi``, and the event lands within two frames of it in the header
+timestamps. The bounds are still checked before the index is used.
 
 Run with::
 
@@ -63,7 +68,7 @@ def manual_flow(cam: Camera) -> tuple[np.ndarray, list[FrameHeader | None]]:
         moi_source="software",
     )
 
-    cam.buffer_arm()  # the ring starts filling now
+    cam.buffer_arm()  # blocks until the ring holds PRE_MOI frames
     input("Armed. Press Enter at the moment of interest...")
     cam.buffer_fire_moi()
     cam.buffer_wait(timeout=30.0)
@@ -76,8 +81,10 @@ def wait_for_flow(cam: Camera) -> tuple[np.ndarray, list[FrameHeader | None]]:
     """Same recording through buffer_record(wait_for=...).
 
     ``wait_for`` takes a delay in seconds or a callable that returns at the
-    event. The callable runs once per sequence, after arming and before the
-    MOI is fired.
+    event. The callable runs once per sequence, after the ring buffer is ready
+    and before the MOI is fired, so an event during the warm-up is not missed,
+    but the MOI is then fired at the end of the warm-up rather than at the
+    event.
     """
     cam.buffer_configure(
         n_sequences=1,

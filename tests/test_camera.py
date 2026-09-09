@@ -978,12 +978,128 @@ def _written(cam):
     return [call.args[0] for call in cam._gvcp.write_reg.call_args_list]
 
 
+def _write_log(cam, clk):
+    """Record (address, clock) for every register write of the fake camera."""
+    log = []
+    cam._gvcp.write_reg.side_effect = lambda addr, value: log.append((addr, clk.t))
+    return log
+
+
+def _patch_status(cam, statuses):
+    """Make buffer_status() return the given statuses in turn, last repeating."""
+    pending = [int(s) for s in statuses]
+    base = cam._gvcp.read_reg.side_effect
+
+    def read(addr):
+        if addr == reg.REG_MEMORY_BUFFER_STATUS:
+            return pending.pop(0) if len(pending) > 1 else pending[0]
+        return base(addr)
+
+    cam._gvcp.read_reg.side_effect = read
+
+
+def _break_status(cam, times=None):
+    """Make buffer_status() reads fail, the way a dropped GVCP reply does.
+
+    ``times`` limits the failures to the first N reads; ``None`` fails all of
+    them.  The camera map answers the reads that follow.
+    """
+    base = cam._gvcp.read_reg.side_effect
+    left = [times]
+
+    def read(addr):
+        if addr == reg.REG_MEMORY_BUFFER_STATUS and left[0] != 0:
+            if left[0] is not None:
+                left[0] -= 1
+            raise GVCPError("no reply")
+        return base(addr)
+
+    cam._gvcp.read_reg.side_effect = read
+
+
+def _moi_times(log):
+    """Clock readings of the software-MOI writes in a write log."""
+    return [t for addr, t in log if addr == reg.REG_MEMORY_BUFFER_MOI_SOFTWARE]
+
+
 class TestBufferRecordWaitFor:
     """buffer_record(wait_for=...) places the software MOI at the event.
 
-    Without it the MOI fires right after arming, so a pre_moi window holds
-    only whatever the ring happened to contain.
+    The ring buffer keeps nothing for BUFFER_RING_WARMUP_S after acquisition
+    starts, so every variant waits for the ring first: the floor for the first
+    sequence is ``2.05 + pre_moi / fps`` seconds after arming.
     """
+
+    def test_first_moi_waits_out_the_ring_warmup(self):
+        # 2.05 s warm-up + 100 frames at 2000 fps = 2.10 s floor.
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        log = _write_log(cam, clk)
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.warns(UserWarning, match="wait_for"),
+        ):
+            cam.buffer_record(verbose=False)
+        assert [c.args[0] for c in slp.call_args_list] == pytest.approx([2.1, 0.3])
+        assert _moi_times(log) == [pytest.approx(2.1)]
+
+    def test_zero_fires_at_the_floor_without_a_warning(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        log = _write_log(cam, clk)
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False, wait_for=0)
+        assert _moi_times(log) == [pytest.approx(2.1)]
+
+    def test_number_is_an_extra_delay_on_top_of_the_floor(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        log = _write_log(cam, clk)
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            cam.buffer_record(verbose=False, wait_for=0.5)
+        assert [c.args[0] for c in slp.call_args_list] == pytest.approx([2.1, 0.5, 0.3])
+        assert _moi_times(log) == [pytest.approx(2.6)]
+
+    def test_number_sleeps_once_per_sequence(self):
+        cam = _make_buffer_camera(pre_moi=0, n_sequences=3)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            cam.buffer_record(verbose=False, wait_for=2.0)
+        assert [c.args[0] for c in slp.call_args_list].count(2.0) == 3
+
+    def test_callable_runs_once_the_ring_is_ready(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0, n_sequences=2)
+        clk = _FakeClock()
+        log = _write_log(cam, clk)
+        called_at = []
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False, wait_for=lambda: called_at.append(clk.t))
+        # First call after the 2.10 s floor, second after the 0.05 s refill.
+        assert called_at == [pytest.approx(2.1), pytest.approx(2.15)]
+        # The MOI fires straight after the callable returns, with no top-up.
+        assert _moi_times(log) == [pytest.approx(2.1), pytest.approx(2.15)]
 
     def test_callable_runs_once_per_sequence_before_the_moi(self):
         cam = _make_buffer_camera(n_sequences=2)
@@ -998,122 +1114,6 @@ class TestBufferRecordWaitFor:
         assert order.index(reg.REG_ACQUISITION_ARM) < calls[0] <= moi_writes[0]
         assert moi_writes[0] < calls[1] <= moi_writes[1]
 
-    def test_number_sleeps_once_per_sequence(self):
-        cam = _make_buffer_camera(pre_moi=0, n_sequences=3)
-        with (
-            patch("pyTelops.camera.time.sleep") as slp,
-            patch.object(Camera, "_buffer_wait_sequence"),
-        ):
-            cam.buffer_record(verbose=False, wait_for=2.0)
-        assert [c.args[0] for c in slp.call_args_list].count(2.0) == 3
-
-    def test_pre_moi_without_wait_for_warns_and_fills_the_window(self):
-        # 2000 frames at 2000 fps need 1.0 s; the 0.5 s settle covers half.
-        cam = _make_buffer_camera(pre_moi=2000, fps=2000.0)
-        clk = _FakeClock()
-        with (
-            patch("pyTelops.camera.time.monotonic", clk.monotonic),
-            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
-            patch.object(Camera, "_buffer_wait_sequence"),
-            pytest.warns(UserWarning, match="wait_for"),
-        ):
-            cam.buffer_record(verbose=False)
-        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.5, 0.3]
-
-    def test_settle_counts_towards_the_pre_moi_window(self):
-        # 100 frames at 2000 fps need 0.05 s, which the settle already covered.
-        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
-        clk = _FakeClock()
-        with (
-            patch("pyTelops.camera.time.monotonic", clk.monotonic),
-            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
-            patch.object(Camera, "_buffer_wait_sequence"),
-            pytest.warns(UserWarning, match="wait_for"),
-        ):
-            cam.buffer_record(verbose=False)
-        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]  # settle, post-stop
-
-    def test_later_sequences_get_no_settle_head_start(self):
-        # Sequence 0 is covered by the settle; sequence 1 has to wait in full.
-        cam = _make_buffer_camera(pre_moi=100, fps=2000.0, n_sequences=2)
-        clk = _FakeClock()
-        with (
-            patch("pyTelops.camera.time.monotonic", clk.monotonic),
-            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
-            patch.object(Camera, "_buffer_wait_sequence"),
-            pytest.warns(UserWarning, match="wait_for"),
-        ):
-            cam.buffer_record(verbose=False)
-        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.05, 0.3]
-
-    def test_no_pre_moi_behaves_as_before(self):
-        cam = _make_buffer_camera(pre_moi=0)
-        with (
-            warnings.catch_warnings(),
-            patch("pyTelops.camera.time.sleep") as slp,
-            patch.object(Camera, "_buffer_wait_sequence"),
-        ):
-            warnings.simplefilter("error")
-            cam.buffer_record(verbose=False)
-        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]  # settle, post-stop
-
-    def test_zero_is_a_silent_escape_hatch(self):
-        cam = _make_buffer_camera(pre_moi=100)
-        with (
-            warnings.catch_warnings(),
-            patch("pyTelops.camera.time.sleep") as slp,
-            patch.object(Camera, "_buffer_wait_sequence"),
-        ):
-            warnings.simplefilter("error")
-            cam.buffer_record(verbose=False, wait_for=0)
-        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]
-
-    def test_too_short_wait_warns(self):
-        cam = _make_buffer_camera(pre_moi=4000, fps=2000.0)  # needs 2.0 s
-        with (
-            patch("pyTelops.camera.time.sleep"),
-            patch.object(Camera, "_buffer_wait_sequence"),
-            pytest.warns(UserWarning, match="will not be full"),
-        ):
-            cam.buffer_record(verbose=False, wait_for=0.1)
-
-    def test_short_wait_covered_by_the_settle_does_not_warn(self):
-        # 1000 frames at 2000 fps need 0.5 s; wait_for 0.1 s plus the 0.5 s
-        # settle fills the window on the only sequence, so there is nothing
-        # to warn about.
-        cam = _make_buffer_camera(pre_moi=1000, fps=2000.0)
-        with (
-            warnings.catch_warnings(),
-            patch("pyTelops.camera.time.sleep"),
-            patch.object(Camera, "_buffer_wait_sequence"),
-        ):
-            warnings.simplefilter("error")
-            cam.buffer_record(verbose=False, wait_for=0.1)
-
-    def test_short_wait_warns_when_more_sequences_follow(self):
-        # Sequences after the first get no settle, so 0.1 s is short for all.
-        cam = _make_buffer_camera(pre_moi=1000, fps=2000.0, n_sequences=2)
-        with (
-            patch("pyTelops.camera.time.sleep"),
-            patch.object(Camera, "_buffer_wait_sequence"),
-            pytest.warns(UserWarning, match="will not be full"),
-        ):
-            cam.buffer_record(verbose=False, wait_for=0.1)
-
-    def test_quick_callable_still_fills_the_window(self):
-        # 2000 frames at 2000 fps need 1.0 s; the settle spent 0.5 s of it.
-        cam = _make_buffer_camera(pre_moi=2000, fps=2000.0)
-        clk = _FakeClock()
-        with (
-            warnings.catch_warnings(),
-            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
-            patch("pyTelops.camera.time.monotonic", clk.monotonic),
-            patch.object(Camera, "_buffer_wait_sequence"),
-        ):
-            warnings.simplefilter("error")
-            cam.buffer_record(verbose=False, wait_for=lambda: None)
-        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.5, 0.3]
-
     def test_slow_callable_gets_no_top_up(self):
         cam = _make_buffer_camera(pre_moi=2000, fps=2000.0)
         clk = _FakeClock()
@@ -1124,9 +1124,117 @@ class TestBufferRecordWaitFor:
             patch.object(Camera, "_buffer_wait_sequence"),
         ):
             warnings.simplefilter("error")
-            # The callable advances the clock itself, past the 1.0 s fill time.
+            # 2.05 s warm-up + 1.0 s of pre-MOI frames, then the callable
+            # spends 3 s of its own.
             cam.buffer_record(verbose=False, wait_for=lambda: clk.sleep(3.0))
-        assert [c.args[0] for c in slp.call_args_list] == [0.5, 0.3]  # settle, post-stop
+        # The floor, then the post-stop settle: the callable's own 3 s is not
+        # topped up.
+        assert [c.args[0] for c in slp.call_args_list] == pytest.approx([3.05, 0.3])
+        assert clk.t == pytest.approx(6.35)
+
+    def test_later_sequences_only_refill_the_pre_moi_window(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0, n_sequences=2)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.warns(UserWarning, match="wait_for"),
+        ):
+            cam.buffer_record(verbose=False)
+        assert [c.args[0] for c in slp.call_args_list] == pytest.approx([2.1, 0.05, 0.3])
+
+    def test_no_pre_moi_still_waits_for_the_ring(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        clk = _FakeClock()
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False)
+        assert [c.args[0] for c in slp.call_args_list] == pytest.approx([2.05, 0.3])
+
+    def test_stops_a_running_recording_before_arming(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        statuses = [
+            reg.MemoryBufferStatus.RECORDING,
+            reg.MemoryBufferStatus.RECORDING,
+            reg.MemoryBufferStatus.IDLE,
+        ]
+        _patch_status(cam, statuses)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            cam.buffer_record(verbose=False)
+        order = _written(cam)
+        stop = order.index(reg.REG_ACQUISITION_STOP)
+        assert stop < order.index(reg.REG_ACQUISITION_ARM)
+
+    def test_stops_before_arming_when_the_status_read_fails(self):
+        # An unreadable status must not let the guard fail open: STOP is
+        # written first either way.
+        cam = _make_buffer_camera(pre_moi=0)
+        _break_status(cam, times=1)
+        clk = _FakeClock()
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False)
+        order = _written(cam)
+        assert order.index(reg.REG_ACQUISITION_STOP) < order.index(reg.REG_ACQUISITION_ARM)
+
+    def test_stops_before_arming_on_an_idle_camera(self):
+        # STOP is unconditional. It is harmless when nothing is recording.
+        cam = _make_buffer_camera(pre_moi=0)
+        _patch_status(cam, [reg.MemoryBufferStatus.IDLE])
+        clk = _FakeClock()
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False)
+        order = _written(cam)
+        assert order.index(reg.REG_ACQUISITION_STOP) < order.index(reg.REG_ACQUISITION_ARM)
+
+    def test_raises_when_the_status_stays_unreadable(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        _break_status(cam)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.raises(RuntimeError, match="buffer_clear"),
+        ):
+            cam.buffer_record(verbose=False)
+        assert reg.REG_ACQUISITION_ARM not in _written(cam)
+
+    def test_raises_when_the_recording_will_not_stop(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        _patch_status(cam, [reg.MemoryBufferStatus.RECORDING])
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+            pytest.raises(RuntimeError, match="buffer_clear"),
+        ):
+            cam.buffer_record(verbose=False)
+        assert reg.REG_ACQUISITION_ARM not in _written(cam)
+        assert clk.t == pytest.approx(5.0, abs=0.3)
 
     def test_rejects_bad_wait_for(self):
         cam = _make_buffer_camera()
@@ -1168,6 +1276,163 @@ class TestBufferRecordWaitFor:
         assert reg.REG_MEMORY_BUFFER_MOI_SOFTWARE not in _written(cam)
 
 
+class TestBufferRingWarmup:
+    """The ring buffer keeps nothing for the first BUFFER_RING_WARMUP_S."""
+
+    def test_ready_after_adds_the_pre_moi_window(self):
+        cam = _make_buffer_camera()
+        assert cam._buffer_ready_after(100, 2000.0) == pytest.approx(2.1)
+        assert cam._buffer_ready_after(0, 2000.0) == pytest.approx(2.05)
+        # An unreadable frame rate leaves the warm-up alone.
+        assert cam._buffer_ready_after(100, 0.0) == pytest.approx(2.05)
+
+    def test_ready_in_is_zero_before_arming(self):
+        cam = _make_buffer_camera()
+        assert cam.buffer_ready_in() == 0.0
+
+    def test_ready_in_counts_down_from_arming(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with patch("pyTelops.camera.time.monotonic", clk.monotonic):
+            cam._buffer_armed_at = 0.0
+            cam._buffer_ready_at = 2.1
+            assert cam.buffer_ready_in() == pytest.approx(2.1)
+            clk.t = 2.0
+            assert cam.buffer_ready_in() == pytest.approx(0.1)
+            clk.t = 2.1
+            assert cam.buffer_ready_in() == 0.0
+            clk.t = 10.0
+            assert cam.buffer_ready_in() == 0.0
+
+    def test_arm_blocks_until_the_ring_is_ready(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+        ):
+            cam.buffer_arm()
+        assert [c.args[0] for c in slp.call_args_list] == pytest.approx([2.1])
+        assert clk.t == pytest.approx(2.1)
+        assert cam.buffer_ready_in() == 0.0
+
+    def test_arm_without_wait_ready_returns_at_once(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+        ):
+            cam.buffer_arm(wait_ready=False)
+            assert slp.call_args_list == []
+            assert cam.buffer_ready_in() == pytest.approx(2.1)
+
+    def test_arm_stops_a_running_recording_first(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        _patch_status(cam, [reg.MemoryBufferStatus.RECORDING, reg.MemoryBufferStatus.IDLE])
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+        ):
+            cam.buffer_arm()
+        order = _written(cam)
+        assert order.index(reg.REG_ACQUISITION_STOP) < order.index(reg.REG_ACQUISITION_ARM)
+
+    def test_arm_raises_when_the_recording_will_not_stop(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        _patch_status(cam, [reg.MemoryBufferStatus.RECORDING])
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            pytest.raises(RuntimeError, match="buffer_clear"),
+        ):
+            cam.buffer_arm()
+        assert reg.REG_ACQUISITION_ARM not in _written(cam)
+
+    def test_wait_ready_sleeps_the_remaining_time(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep) as slp,
+        ):
+            cam._buffer_armed_at = 0.0
+            cam._buffer_ready_at = 2.1
+            clk.t = 1.0
+            cam.buffer_wait_ready()
+            assert [c.args[0] for c in slp.call_args_list] == pytest.approx([1.1])
+            cam.buffer_wait_ready()  # already ready, no second sleep
+            assert len(slp.call_args_list) == 1
+
+    def test_fire_moi_warns_inside_the_warmup(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+        ):
+            cam.buffer_arm(wait_ready=False)
+            with pytest.warns(UserWarning, match="about 0 frames"):
+                cam.buffer_fire_moi()
+            # 2.075 s in: 0.053 s of frames past the 2.022 s measured dead
+            # time, so about 106 frames at 2000 fps.
+            clk.t = 2.075
+            with pytest.warns(UserWarning, match="about 106 frames"):
+                cam.buffer_fire_moi()
+        assert _written(cam).count(reg.REG_MEMORY_BUFFER_MOI_SOFTWARE) == 2
+
+    def test_fire_moi_without_arming_raises(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        with pytest.raises(RuntimeError, match="buffer_arm"):
+            cam.buffer_fire_moi()
+        assert reg.REG_MEMORY_BUFFER_MOI_SOFTWARE not in _written(cam)
+
+    def test_record_clears_the_arming_state(self):
+        cam = _make_buffer_camera(pre_moi=0)
+        clk = _FakeClock()
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+            patch.object(Camera, "_buffer_wait_sequence"),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_record(verbose=False)
+            assert cam.buffer_ready_in() == 0.0
+            with pytest.raises(RuntimeError, match="buffer_arm"):
+                cam.buffer_fire_moi()
+
+    def test_fire_moi_and_ready_in_read_no_registers(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+        ):
+            cam.buffer_arm()
+            cam._gvcp.read_reg.reset_mock()
+            cam._gvcp.read_float.reset_mock()
+            cam.buffer_ready_in()
+            cam.buffer_fire_moi()
+        assert cam._gvcp.read_reg.call_args_list == []
+        assert cam._gvcp.read_float.call_args_list == []
+
+    def test_fire_moi_is_silent_once_the_ring_is_ready(self):
+        cam = _make_buffer_camera(pre_moi=100, fps=2000.0)
+        clk = _FakeClock()
+        with (
+            warnings.catch_warnings(),
+            patch("pyTelops.camera.time.monotonic", clk.monotonic),
+            patch("pyTelops.camera.time.sleep", side_effect=clk.sleep),
+        ):
+            warnings.simplefilter("error")
+            cam.buffer_arm()
+            cam.buffer_fire_moi()
+        assert reg.REG_MEMORY_BUFFER_MOI_SOFTWARE in _written(cam)
+
+
 class TestBufferConfigurePreMOI:
     """pre_moi is a frame count inside the sequence slot."""
 
@@ -1185,6 +1450,18 @@ class TestBufferConfigurePreMOI:
         cam = _make_fake_connected_camera()
         cam.buffer_configure(frames_per_seq=100, pre_moi=100)
         cam._gvcp.write_reg.assert_any_call(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, 100)
+
+    def test_acquisition_started_moi_warns_about_the_empty_pre_trigger(self):
+        cam = _make_fake_connected_camera()
+        with pytest.warns(UserWarning, match="pre-trigger window will be empty"):
+            cam.buffer_configure(frames_per_seq=400, pre_moi=100, moi_source="acquisition_started")
+        cam._gvcp.write_reg.assert_any_call(reg.REG_MEMORY_BUFFER_PRE_MOI_SIZE, 100)
+
+    def test_acquisition_started_moi_is_silent_without_pre_moi(self):
+        cam = _make_fake_connected_camera()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cam.buffer_configure(frames_per_seq=400, moi_source="acquisition_started")
 
 
 class TestBufferMOIPosition:

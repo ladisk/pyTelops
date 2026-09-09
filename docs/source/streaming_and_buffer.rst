@@ -88,7 +88,7 @@ configure the buffer, record, then download.
 
 :meth:`pyTelops.Camera.buffer_record` prints per-sequence progress::
 
-    Arming (seq 1/3)... Recording... Done (10000 frames)
+    Arming (seq 1/3)... Waiting for ring buffer (2.0 s)... Recording... Done (10000 frames)
     Firing (seq 2/3)... Recording... Done (10000 frames)
     Firing (seq 3/3)... Recording... Done (10000 frames)
 
@@ -192,14 +192,54 @@ MOI is fired at the event and not earlier.
 
 The MOI source is set in :meth:`pyTelops.Camera.buffer_configure`: a BNC edge
 (``"external"``), acquisition start (``"acquisition_started"``) or software
-(``"software"``).  All of them honour ``pre_moi``.
+(``"software"``).  ``"external"`` and ``"software"`` honour ``pre_moi``.
+``"acquisition_started"`` does not: that MOI fires with the acquisition start
+write, inside the ring dead time below, when the ring still holds nothing, so
+the pre-trigger window always comes out empty.  ``buffer_configure()`` warns
+when the two are combined.
+
+``pre_moi`` can be as large as ``frames_per_seq``.  The whole slot is then
+pre-trigger and the MOI lands on its last frame, at index
+``frames_per_seq - 1``.
+
+The ring buffer warm-up
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The ring keeps nothing for the first 2.02 s after acquisition starts.  This is
+a wall-clock dead time of the camera, the same at 250 and 1000 fps.  A MOI that
+arrives inside it is latched, not lost, but the sequence then starts at the
+first frame the ring could keep, so the pre-trigger part comes out truncated:
+
+.. code-block:: text
+
+    moi_index = min(pre_moi, round((t_fire - t_start - 2.02) * frame_rate))
+
+The timeline of a correct recording at 2000 fps with ``pre_moi=100``:
+
+.. code-block:: text
+
+    t = 0.00 s   buffer_arm(): ARM + ACQUISITION_START
+    t = 2.05 s   the ring starts keeping frames (2.02 s dead time + margin)
+    t = 2.10 s   the ring holds 100 frames; buffer_arm() returns
+    t = event    buffer_fire_moi() -> moi_index == 100
+    t = ...      the rest of the sequence is recorded, then buffer_wait()
+
+:meth:`pyTelops.Camera.buffer_arm` handles this: it blocks until the ring holds
+the configured ``pre_moi`` frames, so about 2 s plus ``pre_moi / frame_rate``.
+Pass ``wait_ready=False`` to return at once, and use
+:meth:`pyTelops.Camera.buffer_ready_in` (seconds left) or
+:meth:`pyTelops.Camera.buffer_wait_ready` if you schedule the event yourself.
+:meth:`pyTelops.Camera.buffer_fire_moi` warns when it is called too early.
+
+Firing the MOI
+~~~~~~~~~~~~~~
 
 With a software MOI there are two ways to fire it.  The manual flow keeps
 arming and firing as separate steps:
 
 .. code-block:: python
 
-    cam.buffer_arm()            # the ring starts filling here
+    cam.buffer_arm()            # blocks about 2.1 s, then the ring is ready
     wait_for_my_event()         # your own code: a DAQ callback, input(), ...
     cam.buffer_fire_moi()
     cam.buffer_wait(timeout=30.0)
@@ -211,19 +251,33 @@ a delay in seconds or a callable that returns at the event:
 
 .. code-block:: python
 
-    cam.buffer_record(wait_for=0.5)                   # fire 0.5 s after arming
+    cam.buffer_record(wait_for=0.5)                   # 0.5 s after the ring is ready
     cam.buffer_record(wait_for=lambda: my_event.wait())
     cam.buffer_record(wait_for=input)                 # fire on Enter
 
-The callable runs once per sequence, with no arguments, after arming and
-before the MOI is fired.  Its return value is ignored.
+Every variant waits for the ring buffer first, so the MOI is never fired
+inside the dead time:
 
-Without ``wait_for``, ``buffer_record()`` fires the MOI as soon as the camera
-is ready, which is what you want when ``pre_moi`` is 0.  With ``pre_moi > 0``
-it warns, because the split point is then placed by a timer and not by an
-event, and it first waits until ``pre_moi / frame_rate`` seconds have passed
-since arming, so the pre-trigger window is at least full.  Pass ``wait_for=0``
-to fire immediately without the warning.
+============================  =============================================
+``wait_for``                  When the MOI is fired
+============================  =============================================
+``None``                      As soon as the ring is ready.  Warns when
+                              ``pre_moi > 0``, because the split point is
+                              then set by a timer and not by an event.
+``0``                         As soon as the ring is ready, no warning.
+number                        That many seconds after the ring is ready.
+callable                      When the callable returns.  It is called once
+                              the ring is ready, so an event during the
+                              warm-up is not missed, but the MOI is then
+                              fired at the end of the warm-up rather than at
+                              the event.
+============================  =============================================
+
+The callable runs once per sequence, with no arguments, and its return value
+is ignored.  Sequences after the first only wait ``pre_moi / frame_rate``,
+because the ring is already running.  Measured on a TS-IR with three
+sequences at 1000 and 2000 fps, with ``pre_moi`` 100 and 300: every sequence
+came back with ``buffer_moi_index()`` equal to the configured ``pre_moi``.
 
 Use ``buffer_record()`` when the recording is self-timed, and the manual flow
 when the event and the camera are driven by separate parts of your program.
@@ -287,10 +341,16 @@ To find the moment of interest in a recording, ask the camera:
     if 0 <= moi < len(headers):
         event_time = headers[moi].timestamp
 
+``buffer_moi_index()`` is verified on the TS-IR: with the MOI fired after the
+ring warm-up it equals the configured ``pre_moi``.  It is the authority for the
+split index.  In the header timestamps the event sits about 7 to 8 ms later
+than the host-side :meth:`pyTelops.Camera.buffer_fire_moi` call, which is the
+GVCP command latency, so do not derive the split from a host clock reading.
+
 The camera reports the MOI as a frame id in its own register id space.  How
-that id maps onto the download index is not yet verified on hardware, so treat
-``buffer_moi_index()`` as an estimate and check the bounds before you use it.
-A non-default ``start_frame`` shifts the index as well.
+that id maps onto :attr:`pyTelops.FrameHeader.frame_id` is not verified, so
+check the bounds before you index with it.  A non-default ``start_frame``
+shifts the index as well.
 
 From header version 12.9 on, each header also flags its own position with
 :class:`pyTelops.BufferingFlag` (``PRE_MOI``, ``MOI``, ``POST_MOI``):
@@ -318,9 +378,17 @@ For triggered recording from an external BNC signal:
                              pre_moi=1000,
                              moi_source="external")
 
-        cam.buffer_arm()               # arm and wait for trigger
+        cam.buffer_arm()               # blocks until the ring is ready
         cam.buffer_wait(timeout=60.0)  # blocks until recording completes
         data = cam.buffer_download()
+
+The ring warm-up applies to an external trigger too.  ``buffer_arm()`` returns
+only once the ring holds the configured ``pre_moi`` frames, so wire the trigger
+up, or tell the operator to press the button, after it returns.  A trigger edge
+that arrives during the warm-up is expected to behave like an early software
+MOI: latched, with the sequence recorded but its pre-trigger part truncated.
+Only the software MOI has been measured, so check
+``cam.buffer_moi_index(0)`` against the configured ``pre_moi`` afterwards.
 
 For manual control with a software MOI instead of
 :meth:`pyTelops.Camera.buffer_record`, fire the MOI at the event so the
@@ -328,7 +396,7 @@ For manual control with a software MOI instead of
 
 .. code-block:: python
 
-    cam.buffer_arm()
+    cam.buffer_arm()             # blocks about 2 s plus pre_moi / frame_rate
     wait_for_my_event()          # your own code returns at the event
     cam.buffer_fire_moi()
     cam.buffer_wait(timeout=30.0)
