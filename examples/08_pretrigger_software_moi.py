@@ -19,8 +19,10 @@ Two ways to record, both shown below:
 Both download with ``return_headers=True``, so they can print the camera
 timestamps of the recording and where the camera says the MOI sits.
 ``buffer_moi_index()`` is verified on the TS-IR: it equals the configured
-``pre_moi``, and the event lands within two frames of it in the header
-timestamps. The bounds are still checked before the index is used.
+``pre_moi``. The event position estimated from the host-side fire time sits
+about 7 to 8 ms from it, which is command latency, so use the register, not
+the host clock, for the split. The bounds are still checked before the index
+is used.
 
 Run with::
 

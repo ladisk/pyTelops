@@ -347,10 +347,12 @@ split index.  In the header timestamps the event sits about 7 to 8 ms later
 than the host-side :meth:`pyTelops.Camera.buffer_fire_moi` call, which is the
 GVCP command latency, so do not derive the split from a host clock reading.
 
-The camera reports the MOI as a frame id in its own register id space.  How
-that id maps onto :attr:`pyTelops.FrameHeader.frame_id` is not verified, so
-check the bounds before you index with it.  A non-default ``start_frame``
-shifts the index as well.
+The camera reports the MOI as a frame id in its own register id space.  This
+maps directly onto :attr:`pyTelops.FrameHeader.frame_id`: in every campaign
+recording, ``REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID`` equalled
+``headers[0].frame_id``, so ``headers[buffer_moi_index()].frame_id`` equals
+``buffer_moi_frame_id()``.  A non-default ``start_frame`` shifts the index as
+well.
 
 From header version 12.9 on, each header also flags its own position with
 :class:`pyTelops.BufferingFlag` (``PRE_MOI``, ``MOI``, ``POST_MOI``):

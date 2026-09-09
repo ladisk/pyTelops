@@ -505,8 +505,10 @@ class Camera:
     # and 1000 fps with less than 1 ms spread over seven runs, so it is a
     # wall-clock dead time and not a frame count. A MOI fired inside it is
     # latched, and the sequence then starts at the first frame the ring could
-    # keep, which truncates the pre-trigger part. 2.05 s leaves about 30 ms of
-    # margin on the measured value.
+    # keep, which truncates the pre-trigger part. The same 1.99 to 2.02 s was
+    # measured at 320x256, 320x64 and 64x64, so it does not depend on the
+    # resolution either. 2.05 s leaves about 30 ms of margin on the measured
+    # value.
     BUFFER_RING_WARMUP_S = 2.05
 
     # The measured dead time without that margin. Used only to estimate how
@@ -4525,8 +4527,11 @@ class Camera:
 
         Verified on a TS-IR: with the MOI fired after the ring warm-up the
         index equals the configured ``pre_moi``.  The mapping between the
-        register id space and :attr:`pyTelops.FrameHeader.frame_id` is not
-        verified.
+        register id space and :attr:`pyTelops.FrameHeader.frame_id` is also
+        verified: ``REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID`` equalled
+        ``headers[0].frame_id`` in every campaign recording, so
+        ``headers[buffer_moi_index()].frame_id`` equals
+        ``buffer_moi_frame_id()``.
 
         This register is the authority for the split index.  In the header
         timestamps the event sits about 7 to 8 ms later than the host-side

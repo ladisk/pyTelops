@@ -364,9 +364,10 @@ read-only, and ``cam.posix_time = ...`` also writes whole seconds only.
 ring warm-up it equals the configured ``pre_moi``. It is the authority for the
 split index. In the header timestamps the event sits about 7 to 8 ms later than
 the host-side ``buffer_fire_moi()`` call, which is the GVCP command latency, so
-do not derive the split from a host clock reading. How the camera's MOI frame id
-maps onto ``FrameHeader.frame_id`` is not verified, so check the bounds before
-you index with it.
+do not derive the split from a host clock reading. The camera's MOI frame id
+maps directly onto ``FrameHeader.frame_id``: in every campaign recording,
+``REG_MEMORY_BUFFER_SEQ_FIRST_FRAME_ID`` equalled ``headers[0].frame_id``, so
+``headers[buffer_moi_index()].frame_id`` equals ``buffer_moi_frame_id()``.
 
 External trigger
 ----------------
