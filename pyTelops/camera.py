@@ -2241,10 +2241,11 @@ class Camera:
         repeated access in a loop, prefer :meth:`acquisition` +
         :meth:`read_frame` -- this method carries per-call setup overhead.
 
-        Before waiting for a frame, any residual frame already sitting in
-        the receiver's queue is discarded, so a frame captured before this
-        call (for example under a calibration mode or other setting that
-        has since changed) is never returned. See the Notes section.
+        Before waiting for a frame, any frame already sitting in the
+        receiver's queue is discarded, so a leftover frame from before a
+        setting change (for example :attr:`calibration_mode`) is not
+        returned. Inside an :meth:`acquisition` block, frames still in
+        transit can arrive after the drain. See the Notes section.
 
         Parameters
         ----------
