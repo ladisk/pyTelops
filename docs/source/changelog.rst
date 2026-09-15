@@ -11,6 +11,15 @@ Version 0.2.5
   discard queued and buffered residue before waiting for a frame: a full
   receiver flush when the stream was not already running, or a non-blocking
   drain of the output queue when it was.
+- **Fixed:** ``Camera.temperature`` and ``info["temperature_c"]`` always read
+  0.0 (issue #20). They read address 0xE970, which the camera's GenICam XML
+  defines as the external fan speed mode, not a temperature. Both now return
+  the detector temperature, the same as ``sensor_temperature("sensor")``. The
+  wrong ``registers.REG_DEVICE_TEMPERATURE`` constant is removed; use
+  ``REG_DEVICE_TEMPERATURE_SELECTOR`` and ``REG_DEVICE_TEMPERATURE_READOUT``.
+- **Fixed:** ``diagnostics()`` reported the mainboard temperature as 0.0 on the
+  TS-IR, which has no mainboard sensor. A readout of exactly 0.0 now maps to
+  ``None``, like other unsupported locations.
 
 Version 0.2.4
 -------------
