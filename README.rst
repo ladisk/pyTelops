@@ -22,6 +22,11 @@ Pure-Python driver for `Telops <https://www.telops.com/>`_ thermal cameras
 over GigE Vision. No vendor SDK required; communicates directly via GVCP/GVSP
 protocols over UDP.
 
+.. image:: hero.gif
+   :alt: pyTelops demo: discover and connect to the camera, open a live thermal
+         view with cam.live_view(), then record to the camera buffer and
+         download the frames
+
 pyTelops is built on `pyGigEVision <https://github.com/ladisk/pyGigEVision>`_,
 which provides the GigE Vision protocol layer (GVCP control and GVSP
 streaming). pyTelops adds the Telops-specific calibration, register map, and
