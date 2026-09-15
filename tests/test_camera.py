@@ -296,6 +296,39 @@ class TestAcquisitionAPI:
             assert cam.is_acquiring is True
         assert cam.is_acquiring is False
 
+    def test_grab_flushes_receiver_when_not_streaming(self):
+        """When the stream is not already running, grab() must fully flush
+        the receiver before starting a new session (issue #21)."""
+        cam = _make_fake_connected_camera()
+        cam._gvsp.get_frame.return_value = None
+        with patch.object(cam, "start_stream"), patch.object(cam, "stop_stream"):
+            cam.grab(timeout=0.0)
+        cam._gvsp.flush.assert_called_once()
+
+    def test_grab_drains_stale_frame_before_returning_fresh_one(self):
+        """If the stream is already running, grab() must discard any frame
+        already queued from before this call and return the next fresh one.
+
+        Regression test for issue #21: right after a calibration_mode
+        change, grab() returned a frame left over in the receiver queue
+        from before the change instead of a frame reflecting the new mode.
+        """
+        cam = _make_fake_connected_camera()
+        cam._streaming = True  # receiver thread already running
+        stale = np.full((6, 8), 111, dtype=np.uint16)
+        fresh = np.full((6, 8), 222, dtype=np.uint16)
+        # Non-blocking drain loop pops "stale" then finds the queue empty;
+        # the subsequent blocking call returns the fresh frame.
+        cam._gvsp.get_frame.side_effect = [stale, None, fresh]
+
+        result = cam.grab(timeout=0.0, convert=False, strip_header=False)
+
+        assert (result == 222).all()
+        assert cam._gvsp.get_frame.call_count == 3
+        # The receiver thread is alive here, so the raw socket must not be
+        # touched -- only flush() (which drains the socket) is unsafe then.
+        cam._gvsp.flush.assert_not_called()
+
     def test_acquire_uses_acquisition_lifecycle(self):
         cam = _make_fake_connected_camera()
         cam._gvsp.get_frame.return_value = None

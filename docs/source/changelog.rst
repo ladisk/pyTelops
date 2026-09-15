@@ -1,6 +1,17 @@
 Changelog
 =========
 
+Version 0.2.5
+-------------
+
+- **Fixed:** ``grab()`` and ``acquire()`` could return a frame left over from a
+  previous session, still sitting in the GVSP receiver's queue. Right after a
+  setting change, such as switching ``calibration_mode``, the first grab or two
+  came back captured under the old setting (issue #21). Both methods now
+  discard queued and buffered residue before waiting for a frame: a full
+  receiver flush when the stream was not already running, or a non-blocking
+  drain of the output queue when it was.
+
 Version 0.2.4
 -------------
 

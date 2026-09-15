@@ -2241,6 +2241,12 @@ class Camera:
         repeated access in a loop, prefer :meth:`acquisition` +
         :meth:`read_frame` -- this method carries per-call setup overhead.
 
+        Before waiting for a frame, any frame already sitting in the
+        receiver's queue is discarded, so a leftover frame from before a
+        setting change (for example :attr:`calibration_mode`) is not
+        returned. Inside an :meth:`acquisition` block, frames still in
+        transit can arrive after the drain. See the Notes section.
+
         Parameters
         ----------
         timeout : float, optional
@@ -2266,6 +2272,33 @@ class Camera:
         RuntimeError
             If the camera is not connected or not ready.
 
+        Notes
+        -----
+        ``stop_stream`` (called after every self-contained ``grab()``) joins
+        the receiver thread but does not clear its output queue, so an
+        assembled-but-unconsumed frame can survive across sessions. Without
+        draining it, the next ``grab()`` -- possibly issued after a setting
+        change such as :attr:`calibration_mode` -- would return that stale
+        frame instead of a fresh one (issue #21).
+
+        ``grab()`` drains that queue itself before capturing a new frame:
+
+        - If the stream is not currently running, the receiver thread is
+          guaranteed stopped, so a full :meth:`~pyGigEVision.GVSPReceiver.flush`
+          is used: it drops queued frames, in-progress frame buffers, and any
+          stray datagrams left in the OS socket buffer.
+        - If the stream is already running (the receiver thread is active,
+          e.g. inside an :meth:`acquisition` block), only the thread-safe
+          output queue is drained by popping it non-blocking until empty.
+          The raw socket is left alone in this case, because
+          :meth:`~pyGigEVision.GVSPReceiver.flush` requires the receiver
+          thread to be stopped to drain it safely.
+
+        Settings setters (e.g. the :attr:`calibration_mode` setter) do not
+        drain the queue themselves: they may run while the receiver thread
+        is active and have no safe, cheap way to do a full flush, and
+        ``grab()`` already handles the draining on the read side.
+
         Examples
         --------
         >>> with Camera() as cam:
@@ -2277,6 +2310,17 @@ class Camera:
         was_acquiring = self._acquiring
 
         try:
+            if not self._streaming:
+                # Receiver thread is not running yet -- safe to fully flush
+                # any residual frames (and stray socket data) from a
+                # previous session before starting a clean one.
+                self._gvsp.flush()
+            else:
+                # Receiver thread is already running: only pop frames
+                # already sitting on the thread-safe output queue. Do not
+                # touch the raw socket while the thread reads from it.
+                while self._gvsp.get_frame(timeout=0.0) is not None:
+                    pass
             if not self._acquiring:
                 self.acquisition_start()
             frame = self._gvsp.get_frame(timeout=timeout)
@@ -2330,6 +2374,13 @@ class Camera:
         ------
         RuntimeError
             If the camera is not connected or not ready.
+
+        Notes
+        -----
+        Like :meth:`grab`, this drains any residual frame left over from a
+        previous session before collecting *n_frames*, so the first frame
+        of the batch is not a stale one from before this call. See the
+        Notes section of :meth:`grab` for the full rationale (issue #21).
         """
         self._check_ready()
         was_streaming = self._streaming
@@ -2337,6 +2388,11 @@ class Camera:
 
         frames = []
         try:
+            if not self._streaming:
+                self._gvsp.flush()
+            else:
+                while self._gvsp.get_frame(timeout=0.0) is not None:
+                    pass
             if not self._acquiring:
                 self.acquisition_start()
             deadline = time.monotonic() + timeout
