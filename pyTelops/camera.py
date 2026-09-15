@@ -1367,8 +1367,8 @@ class Camera:
     def temperature(self) -> float:
         """Main camera sensor temperature in degrees Celsius (read-only).
 
-        Reports the value from ``REG_DEVICE_TEMPERATURE``. For other
-        internal temperature sensors (compressor, FPGAs, etc.) use
+        Same as ``sensor_temperature("sensor")``. For other internal
+        temperature sensors (compressor, FPGAs, etc.) use
         :meth:`sensor_temperature`.
 
         Returns
@@ -1381,8 +1381,7 @@ class Camera:
         RuntimeError
             If the camera is not connected.
         """
-        self._check_connected()
-        return self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE)
+        return self.sensor_temperature("sensor")
 
     @property
     def info(self) -> dict:
@@ -1429,7 +1428,7 @@ class Camera:
             "power_state": reg.DevicePowerState(
                 self._gvcp.read_reg(reg.REG_DEVICE_POWER_STATE)
             ).name,
-            "temperature_c": self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE),
+            "temperature_c": self.sensor_temperature("sensor"),
             "buffer_mode": reg.MemoryBufferMode(
                 self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_MODE)
             ).name,
@@ -2646,7 +2645,9 @@ class Camera:
                 value = self._gvcp.read_float(reg.REG_DEVICE_TEMPERATURE_READOUT)
                 # An unsupported location is reported as the ADC-floor sentinel
                 # rather than a GVCPError; map it to the documented None (#16).
-                if abs(value - _TEMPERATURE_UNSUPPORTED_SENTINEL) < 1e-4:
+                # Mainboard, marked not implemented in the TS-IR GenICam XML,
+                # reads exactly 0.0 instead (#20).
+                if value == 0.0 or abs(value - _TEMPERATURE_UNSUPPORTED_SENTINEL) < 1e-4:
                     value = None
                 temps[loc.name.lower()] = value
             except GVCPError:

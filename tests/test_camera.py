@@ -958,11 +958,39 @@ class TestDiagnosticsSentinel:
         assert d["temperatures"]
         assert all(v is None for v in d["temperatures"].values())
 
+    def test_zero_temperature_maps_to_none(self):
+        # Unimplemented Mainboard location reads exactly 0.0 on the TS-IR (#20)
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_float.return_value = 0.0
+        d = cam.diagnostics()
+        assert all(v is None for v in d["temperatures"].values())
+
     def test_real_temperature_preserved(self):
         cam = _make_fake_connected_camera()
         cam._gvcp.read_float.return_value = -196.3
         d = cam.diagnostics()
         assert all(v == -196.3 for v in d["temperatures"].values())
+
+
+class TestTemperature:
+    """``temperature`` must read the selector-based DeviceTemperature register.
+    0xE970, the address it used before, is the external fan speed mode (issue #20)."""
+
+    def test_temperature_reads_sensor_location(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_float.return_value = -196.3
+        assert cam.temperature == -196.3
+        cam._gvcp.write_reg.assert_called_with(
+            reg.REG_DEVICE_TEMPERATURE_SELECTOR, int(reg.TemperatureLocation.SENSOR)
+        )
+        cam._gvcp.read_float.assert_called_with(reg.REG_DEVICE_TEMPERATURE_READOUT)
+
+    def test_info_temperature_matches_property(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_float.side_effect = lambda a: (
+            -196.3 if a == reg.REG_DEVICE_TEMPERATURE_READOUT else 1.0
+        )
+        assert cam.info["temperature_c"] == -196.3
 
 
 def _make_buffer_camera(

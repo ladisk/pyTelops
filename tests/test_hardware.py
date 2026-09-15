@@ -120,6 +120,8 @@ class TestProperties:
     def test_temperature(self, cam):
         temp = cam.temperature
         assert isinstance(temp, float)
+        assert temp == pytest.approx(cam.sensor_temperature("sensor"), abs=1.0)
+        assert temp != 0.0  # 0.0 was the fan-mode register (issue #20)
 
     def test_calibration_mode_string(self, cam):
         """String enum works for calibration mode."""

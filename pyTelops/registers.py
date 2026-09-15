@@ -100,7 +100,6 @@ REG_DEVICE_POWER_STATE = 0xE94C
 REG_DEVICE_LED = 0xE950
 REG_DEVICE_NOT_READY = 0xEA84
 REG_TDC_STATUS = 0xEAAC  # Int, bitmask (RO, NoCache)
-REG_DEVICE_TEMPERATURE = 0xE970  # Float, Celsius
 
 # TDC Status bit flags
 TDC_WAITING_FOR_COOLER = 0x0001
@@ -451,7 +450,6 @@ REGISTER_INFO = {
     REG_DEVICE_POWER_STATE: ("DevicePowerState", "enum", "RO"),
     REG_DEVICE_NOT_READY: ("DeviceNotReady", "bool", "RO"),
     REG_TDC_STATUS: ("TDCStatus", "int", "RO"),
-    REG_DEVICE_TEMPERATURE: ("DeviceTemperature", "float", "RO"),
     REG_DEVICE_RESET: ("DeviceReset", "cmd", "WO"),
     # Image Processing
     REG_IMAGE_CORRECTION: ("ImageCorrection", "cmd", "WO"),
