@@ -6,6 +6,11 @@ over GigE Vision. No vendor SDK required: pyTelops speaks the GVCP and GVSP
 protocols directly over UDP, on top of `pyGigEVision
 <https://github.com/ladisk/pyGigEVision>`_.
 
+.. image:: ../../hero.gif
+   :alt: pyTelops demo: discover and connect to the camera, open a live thermal
+         view with cam.live_view(), then record to the camera buffer and
+         download the frames
+
 Quickstart
 ----------
 
