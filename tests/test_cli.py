@@ -82,7 +82,9 @@ class TestMcpCommand:
     def test_missing_extra_gives_install_hint(self, capsys, monkeypatch):
         import sys
 
-        for name in [m for m in sys.modules if m == "mcp" or m.startswith(("mcp.", "pyTelops.mcp"))]:
+        for name in [
+            m for m in sys.modules if m == "mcp" or m.startswith(("mcp.", "pyTelops.mcp"))
+        ]:
             monkeypatch.delitem(sys.modules, name)
         monkeypatch.setitem(sys.modules, "mcp", None)  # makes "import mcp" raise ImportError
         assert main(["mcp"]) == 1
