@@ -32,7 +32,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.20",
     "tqdm",
-    "pyGigEVision>=0.2.2",
+    "pyGigEVision>=0.3.0",
 ]
 
 [project.optional-dependencies]
