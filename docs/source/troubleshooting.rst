@@ -72,6 +72,53 @@ After ``force_ip`` returns, allow about a second for the camera to apply
 the new address before calling ``discover()`` again. Choose an address on
 one of your host NIC subnets so the re-discovered result is reachable.
 
+Linux USB Ethernet adapters
+---------------------------
+
+Some USB Ethernet adapters cause discovery or stream problems on Linux.
+
+**ASIX AX88179 (0b95:1790).** After a replug, the adapter often comes up on
+the generic ``cdc_ncm`` driver. Use the vendor driver ``ax88179_178a``. To
+switch by hand, select USB configuration 1:
+
+.. code-block:: bash
+
+   echo 1 | sudo tee /sys/bus/usb/devices/<port>/bConfigurationValue
+
+Find ``<port>`` with ``lsusb -t`` or in ``/sys/bus/usb/devices``.
+
+With the vendor driver, ARP to the camera only resolved in promiscuous mode.
+Enable it:
+
+.. code-block:: bash
+
+   sudo ip link set <iface> promisc on
+
+To do both steps at each plug-in, install this udev rule:
+
+.. code-block:: bash
+
+   sudo tee /etc/udev/rules.d/90-pytelops-usb-ethernet.rules >/dev/null <<'RULES'
+   # ASIX AX88179: vendor driver (configuration 1), not cdc_ncm
+   ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0b95", ATTR{idProduct}=="1790", ATTR{bConfigurationValue}!="1", ATTR{bConfigurationValue}="1"
+   # ASIX AX88179: promiscuous mode, needed for ARP to the camera
+   ACTION=="add", SUBSYSTEM=="net", DRIVERS=="ax88179_178a", RUN+="/usr/bin/ip link set dev $name promisc on"
+   RULES
+   sudo udevadm control --reload
+
+Then replug the adapter. Check with ``lsusb -t`` (``Driver=ax88179_178a``)
+and ``ip link show <iface>`` (``PROMISC``).
+
+**TP-Link USB 3.0 adapter (2357:0601, RTL8153, driver r8152).** This adapter
+dropped most stream packets and reset in a loop. The resets stopped when USB
+link power management (LPM) was off. Add this kernel parameter:
+
+.. code-block:: text
+
+   usbcore.quirks=0bda:0411:k,2357:0601:k
+
+Do not use this adapter for streaming.
+
 ``ACCESS_DENIED`` on reconnect
 ------------------------------
 
