@@ -10,7 +10,7 @@ from unittest.mock import ANY, MagicMock, patch
 import numpy as np
 import pytest
 from pyGigEVision import GVCPError
-from pyGigEVision.standard import REG_SC_PACKET_DELAY
+from pyGigEVision.standard import REG_SC_PACKET_DELAY, REG_SC_PACKET_SIZE
 
 from pyTelops import registers as reg
 from pyTelops.camera import Camera, _parse_download_headers, discover
@@ -1738,3 +1738,160 @@ class TestParseDownloadHeaders:
 # ============================================================
 
 # Legacy hardware tests removed — all covered by test_hardware.py
+
+
+class TestPacketSizeGuard:
+    """write_register refuses a packet-size write during acquisition (issue #28)."""
+
+    def test_refused_while_acquiring_flag_set(self):
+        cam = _make_fake_connected_camera()
+        cam._acquiring = True
+        with pytest.raises(RuntimeError, match="Stop acquisition"):
+            cam.write_register(REG_SC_PACKET_SIZE, 1500)
+        cam._gvcp.write_reg.assert_not_called()
+
+    def test_refused_when_tdc_reports_acquiring(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.return_value = reg.TDC_ACQUISITION_STARTED
+        with pytest.raises(RuntimeError, match="Stop acquisition"):
+            cam.write_register(REG_SC_PACKET_SIZE, 1500)
+        cam._gvcp.write_reg.assert_not_called()
+
+    def test_allowed_when_idle(self):
+        cam = _make_fake_connected_camera()
+        cam.write_register(REG_SC_PACKET_SIZE, 1500)
+        cam._gvcp.write_reg.assert_called_once_with(REG_SC_PACKET_SIZE, 1500)
+
+    def test_tdc_read_failure_falls_back_to_flag(self):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_reg.side_effect = GVCPError("boom", 2)
+        cam.write_register(REG_SC_PACKET_SIZE, 1500)
+        cam._gvcp.write_reg.assert_called_once()
+        cam._acquiring = True
+        with pytest.raises(RuntimeError):
+            cam.write_register(REG_SC_PACKET_SIZE, 1500)
+
+    def test_other_registers_not_guarded(self):
+        cam = _make_fake_connected_camera()
+        cam._acquiring = True
+        cam.write_register(reg.REG_EXPOSURE_TIME, 5)
+        cam._gvcp.write_reg.assert_called_once()
+
+
+class TestStartStreamPacketSizeError:
+    """start_stream turns a rejected packet-size write into a clear error."""
+
+    def _cam(self, tdc):
+        cam = _make_fake_connected_camera()
+
+        def rd(addr):
+            if addr == reg.REG_TDC_STATUS:
+                if isinstance(tdc, Exception):
+                    raise tdc
+                return tdc
+            return 576  # packet size differs from 1500
+
+        cam._gvcp.read_reg.side_effect = rd
+        cam._gvcp.write_reg.side_effect = GVCPError("rejected", 2)
+        return cam
+
+    def test_still_acquiring(self):
+        cam = self._cam(reg.TDC_ACQUISITION_STARTED)
+        with pytest.raises(GVCPError, match="still acquiring") as ei:
+            cam.start_stream()
+        assert isinstance(ei.value.__cause__, GVCPError)
+
+    def test_not_acquiring_says_power_cycle(self):
+        cam = self._cam(0)
+        with pytest.raises(GVCPError, match="rejected the stream packet size") as ei:
+            cam.start_stream()
+        assert isinstance(ei.value.__cause__, GVCPError)
+
+    def test_tdc_read_failure_still_raises_power_cycle(self):
+        cam = self._cam(GVCPError("tdc", 2))
+        with pytest.raises(GVCPError, match="Power-cycle"):
+            cam.start_stream()
+
+    def test_timeout_passes_through_unchanged(self):
+        cam = self._cam(0)
+        timeout = GVCPError("Timeout waiting for ACK")
+        cam._gvcp.write_reg.side_effect = timeout
+        with pytest.raises(GVCPError) as ei:
+            cam.start_stream()
+        assert ei.value is timeout
+
+
+class TestAtexitDisconnect:
+    def test_disconnects_all_and_survives_errors(self):
+        from pyTelops import camera as camera_mod
+
+        bad, good = MagicMock(), MagicMock()
+        bad.disconnect.side_effect = RuntimeError("x")
+        with patch.dict(Camera._active_cameras, {"a": bad, "b": good}, clear=True):
+            camera_mod._disconnect_all_cameras()
+        bad.disconnect.assert_called_once()
+        good.disconnect.assert_called_once()
+
+
+class TestStreamStallWarning:
+    """_warn_if_stream_stalled fires only for a genuine stall (issue #28)."""
+
+    def _cam(self, fps=30.0, trigger=0, membuf=0, tdc=reg.TDC_ACQUISITION_STARTED):
+        cam = _make_fake_connected_camera()
+        cam._gvcp.read_float.return_value = fps
+        values = {
+            reg.REG_TRIGGER_MODE: trigger,
+            reg.REG_MEMORY_BUFFER_MODE: membuf,
+            reg.REG_TDC_STATUS: tdc,
+        }
+        cam._gvcp.read_reg.side_effect = lambda a: values.get(a, 0)
+        return cam
+
+    def test_fires_when_all_conditions_hold(self):
+        cam = self._cam()
+        with pytest.warns(RuntimeWarning, match="power-cycle"):
+            cam._warn_if_stream_stalled(5.0)
+
+    def test_grab_warns_on_timeout(self):
+        cam = self._cam()
+        cam._acquiring = True
+        cam._streaming = True
+        with pytest.warns(RuntimeWarning, match="no complete frame"):
+            assert cam.grab(timeout=5.0) is None
+
+    def test_acquire_warns_when_no_frames(self):
+        cam = self._cam()
+        cam._acquiring = True
+        cam._streaming = True
+        with pytest.warns(RuntimeWarning, match="no complete frame"):
+            assert cam.acquire(3, timeout=5.0) is None
+
+    @pytest.mark.parametrize(
+        "kwargs, waited",
+        [
+            ({"trigger": 1}, 5.0),
+            ({"membuf": 1}, 5.0),
+            ({"tdc": 0}, 5.0),
+            ({}, 1.0),
+            ({"fps": 0.5}, 5.0),  # needs 3 / 0.5 = 6 s
+        ],
+    )
+    def test_silent(self, kwargs, waited):
+        cam = self._cam(**kwargs)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cam._warn_if_stream_stalled(waited)
+
+    def test_silent_when_buffer_armed(self):
+        cam = self._cam()
+        cam._buffer_armed_at = 1.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cam._warn_if_stream_stalled(5.0)
+
+    def test_silent_when_read_fails(self):
+        cam = self._cam()
+        cam._gvcp.read_reg.side_effect = GVCPError("boom", 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            cam._warn_if_stream_stalled(5.0)
