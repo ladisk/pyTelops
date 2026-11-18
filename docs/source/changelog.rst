@@ -8,6 +8,14 @@ Version 0.2.6
   command and prints a fix for each problem. It is read-only by default.
   ``--stream`` tests frame delivery, ``--json`` prints one JSON object, and the
   exit code is 0 (ok), 1 (warning), or 2 (failure).
+- **Added:** ``pytelops mcp`` starts a Model Context Protocol server, so an AI
+  assistant such as Claude Code can connect to the camera, change settings,
+  grab frames, and record and download buffer sequences. Install it with
+  ``pip install "pyTelops[mcp]"``. ``--simulate`` runs it without a camera.
+  See :doc:`mcp`.
+- **Added:** ``Camera.connect(force_control=False)`` raises ``GVCPError`` at
+  once on ``ACCESS_DENIED``. The default ``True`` still waits up to 15 s for a
+  stale control lock to expire.
 - **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
   the offset write, for example ``cam.roi_offset = (0, 0)`` after
   connect to a camera already at full frame (issue #29). The cause is not

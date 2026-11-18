@@ -35,6 +35,7 @@ Contents
    camera
    calibration
    streaming_and_buffer
+   mcp
    examples
    troubleshooting
    changelog

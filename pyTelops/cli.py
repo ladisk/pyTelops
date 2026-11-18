@@ -12,6 +12,7 @@ Usage::
     pytelops live         Open live viewer (requires gui extra)
     pytelops setup        Configure OS (firewall rules, MTU)
     pytelops doctor       Check host, network and camera state
+    pytelops mcp          Run the MCP server on stdio (requires mcp extra)
 """
 
 from __future__ import annotations
@@ -165,6 +166,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return doctor.exit_code(checks)
 
 
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Run the MCP server on stdio. Nothing but protocol messages may reach stdout."""
+    try:
+        from .mcp import server
+    except ImportError as exc:
+        if (exc.name or "").split(".")[0] != "mcp":
+            raise
+        print('The MCP server needs the mcp extra: pip install "pyTelops[mcp]"', file=sys.stderr)
+        return 1
+
+    server.serve(data_dir=args.data_dir, simulate=args.simulate)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch to the appropriate sub-command handler."""
     parser = argparse.ArgumentParser(
@@ -209,6 +224,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_doc.add_argument("--frames", type=int, default=20, help="Frames for --stream (default 20)")
 
+    # mcp
+    p_mcp = sub.add_parser("mcp", help="Run the MCP server on stdio (requires the mcp extra)")
+    p_mcp.add_argument(
+        "--data-dir", default="./pytelops-data", help="Where grabs and downloads are saved"
+    )
+    p_mcp.add_argument(
+        "--simulate", action="store_true", help="Use a simulated camera (no hardware needed)"
+    )
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -222,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         "live": cmd_live,
         "setup": cmd_setup,
         "doctor": cmd_doctor,
+        "mcp": cmd_mcp,
     }
 
     return commands[args.command](args)

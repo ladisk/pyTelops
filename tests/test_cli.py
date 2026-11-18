@@ -68,3 +68,24 @@ class TestDoctorCLI:
         with patch("pyTelops.doctor.run_doctor", return_value=(checks, {})):
             assert main(["doctor"]) == 1
         assert "[WARN] rmem_max: low -> fix: sudo sysctl" in capsys.readouterr().out
+
+
+class TestMcpCommand:
+    def test_parser_accepts_options(self):
+        from pyTelops import cli
+
+        with patch.object(cli, "cmd_mcp", return_value=0) as cmd:
+            assert main(["mcp", "--data-dir", "/tmp/x", "--simulate"]) == 0
+        args = cmd.call_args[0][0]
+        assert args.data_dir == "/tmp/x" and args.simulate is True
+
+    def test_missing_extra_gives_install_hint(self, capsys, monkeypatch):
+        import sys
+
+        for name in [m for m in sys.modules if m == "mcp" or m.startswith(("mcp.", "pyTelops.mcp"))]:
+            monkeypatch.delitem(sys.modules, name)
+        monkeypatch.setitem(sys.modules, "mcp", None)  # makes "import mcp" raise ImportError
+        assert main(["mcp"]) == 1
+        captured = capsys.readouterr()
+        assert "pip install" in captured.err and "pyTelops[mcp]" in captured.err
+        assert captured.out == ""

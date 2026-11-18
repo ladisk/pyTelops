@@ -37,6 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["Pillow", "matplotlib"]
+mcp = ["mcp>=2.3,<3"]
 dev = [
     "sphinx",
     "sphinx-book-theme",

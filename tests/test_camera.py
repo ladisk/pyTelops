@@ -1738,3 +1738,31 @@ class TestParseDownloadHeaders:
 # ============================================================
 
 # Legacy hardware tests removed — all covered by test_hardware.py
+
+
+class TestConnectForceControl:
+    """connect(force_control=False) makes GVCPClient.connect fail fast on ACCESS_DENIED."""
+
+    def _connect(self, **kwargs):
+        from pyTelops import Camera
+
+        cam = Camera(ip="192.0.2.77", local_ip="127.0.0.1")
+        with (
+            patch("pyTelops.camera.GVCPClient") as gvcp_cls,
+            patch("pyTelops.camera.GVSPReceiver"),
+        ):
+            gvcp = gvcp_cls.return_value
+            gvcp.read_reg.return_value = 0
+            try:
+                cam.connect(**kwargs)
+            finally:
+                Camera._active_cameras.pop("192.0.2.77", None)
+        return gvcp
+
+    def test_default_keeps_the_wait(self):
+        gvcp = self._connect()
+        gvcp.connect.assert_called_once_with()
+
+    def test_force_control_false_fails_fast(self):
+        gvcp = self._connect(force_control=False)
+        gvcp.connect.assert_called_once_with(force=False)
