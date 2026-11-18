@@ -1,9 +1,9 @@
 """Tests for ``pytelops doctor`` (no camera: fake sysfs/proc trees and mocks)."""
 
 import json
-from pathlib import Path
-import struct
 import socket
+import struct
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -176,7 +176,6 @@ def ip_int(ip):
 def fake_client(values, timeout_on=None):
     """Mock GVCPClient whose read_reg answers from *values*."""
     client = MagicMock()
-    client._sock = MagicMock()
 
     def read(addr):
         if timeout_on == "all":
@@ -202,10 +201,11 @@ class TestProbe:
             res = doctor.check_probe(ctx, stream)
         return res, ctx, client, cls
 
-    def test_idle_ok_never_connects_or_writes(self):
+    def test_idle_ok_read_only_never_writes(self):
         res, ctx, client, _ = self.probe(IDLE)
         assert res["status"] == "ok"
-        client.connect.assert_not_called()
+        client.connect.assert_called_once_with(control=False)
+        client.disconnect.assert_called_once()
         client.write_reg.assert_not_called()
         assert ctx["ready"] is True and ctx["acquiring"] is False
 
@@ -283,7 +283,9 @@ class FakeCam:
 
 
 def frames(ids, complete=True):
-    return [{"block_id": i, "complete": complete, "missing_packets": 0 if complete else 3} for i in ids]
+    return [
+        {"block_id": i, "complete": complete, "missing_packets": 0 if complete else 3} for i in ids
+    ]
 
 
 def stream(cam, regs=None, n=5):

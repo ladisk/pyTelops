@@ -144,9 +144,8 @@ def check_adapters(sysfs_root="/sys", host_ipv4=_host_ipv4):
                     f"echo 1 | sudo tee /sys/bus/usb/devices/{port}/bConfigurationValue, "
                     "or install the udev rule (troubleshooting: Linux USB Ethernet adapters)"
                 )
-        detail = (
-            f"{label}on {driver}, carrier {'up' if carrier else 'down'}, mtu {mtu}"
-            + (", link-local" if link_local else "")
+        detail = f"{label}on {driver}, carrier {'up' if carrier else 'down'}, mtu {mtu}" + (
+            ", link-local" if link_local else ""
         )
         results.append(_chk(f"adapter {name}", status, detail, fix))
     if not results:
@@ -269,22 +268,13 @@ def check_discovery(ctx, ip=None):
 
 
 def _open_probe(cam_ip, local_ip):
-    """Return a GVCPClient with an open socket and no control privilege.
+    """Return a read-only GVCPClient (no CCP write, no heartbeat).
 
-    ``GVCPClient.connect()`` always writes the CCP register. Reads need no
-    privilege, so the socket is opened here and ``read_reg`` is used directly.
+    ``connect(control=False)`` only opens the socket. Reads need no
+    privilege, so ``read_reg`` is used directly.
     """
-    client = GVCPClient(cam_ip, local_ip or None, 1.0)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        if local_ip:
-            sock.bind((local_ip, 0))
-    except OSError:
-        sock.close()
-        raise
-    client._sock = sock
-    client._n_retries = 2
-    client._cmd_timeout = 0.4
+    client = GVCPClient(cam_ip, local_ip or None, 1.0, n_retries=2, cmd_timeout=0.4)
+    client.connect(control=False)
     return client
 
 
@@ -329,8 +319,7 @@ def check_probe(ctx, stream_requested=False):
                 regs[key] = None
     finally:
         with contextlib.suppress(Exception):
-            if client._sock is not None:
-                client._sock.close()
+            client.disconnect()
     ctx["regs"] = regs
 
     flags = decode_tdc(regs["tdc"])
