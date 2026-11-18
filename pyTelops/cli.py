@@ -11,6 +11,7 @@ Usage::
     pytelops grab         Grab a single frame and save to file
     pytelops live         Open live viewer (requires gui extra)
     pytelops setup        Configure OS (firewall rules, MTU)
+    pytelops doctor       Check host, network and camera state
 """
 
 from __future__ import annotations
@@ -149,6 +150,21 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Run host and camera diagnostics; exit 0 (ok), 1 (warn) or 2 (fail)."""
+    import json
+
+    from . import doctor
+
+    checks, camera = doctor.run_doctor(ip=args.ip, stream=args.stream, frames=args.frames)
+    if args.json:
+        print(json.dumps(doctor.report_dict(checks, camera), separators=(",", ":")))
+    else:
+        for c in checks:
+            print(doctor.format_line(c))
+    return doctor.exit_code(checks)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse arguments and dispatch to the appropriate sub-command handler."""
     parser = argparse.ArgumentParser(
@@ -184,6 +200,15 @@ def main(argv: list[str] | None = None) -> int:
     # setup
     sub.add_parser("setup", help="Configure OS for GigE Vision")
 
+    # doctor
+    p_doc = sub.add_parser("doctor", help="Check host, network and camera state")
+    p_doc.add_argument("--ip", default=None, help="Camera IP (default: first discovered)")
+    p_doc.add_argument("--json", action="store_true", help="Print one JSON object")
+    p_doc.add_argument(
+        "--stream", action="store_true", help="Connect and test frame delivery (changes state)"
+    )
+    p_doc.add_argument("--frames", type=int, default=20, help="Frames for --stream (default 20)")
+
     args = parser.parse_args(argv)
 
     if args.command is None:
@@ -196,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         "grab": cmd_grab,
         "live": cmd_live,
         "setup": cmd_setup,
+        "doctor": cmd_doctor,
     }
 
     return commands[args.command](args)
