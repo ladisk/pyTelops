@@ -1655,12 +1655,16 @@ class Camera:
             ``(x, y)`` offset in pixels. Both values must be non-negative.
             ``x`` must be a multiple of 64; ``y`` must be a multiple of 4.
             The subwindow ``(x + width, y + height)`` must fit within the
-            320 x 256 sensor.
+            320 x 256 sensor. Offsets that already have the requested value
+            are not written.
 
         Raises
         ------
         RuntimeError
             If the camera is not connected.
+        GVCPError
+            If the camera rejects the write. The message says so when the
+            offsets are locked because CenterImage is on.
         ValueError
             If the offset is out of range, not properly aligned, or the
             subwindow exceeds the sensor dimensions.
@@ -1700,8 +1704,29 @@ class Camera:
                 f"offset."
             )
 
-        self._gvcp.write_reg(reg.REG_OFFSET_X, x)
-        self._gvcp.write_reg(reg.REG_OFFSET_Y, y)
+        # Write only the offsets that change: the camera may reject a
+        # write of the current value (issue #29).
+        current = {
+            reg.REG_OFFSET_X: self._gvcp.read_reg(reg.REG_OFFSET_X),
+            reg.REG_OFFSET_Y: self._gvcp.read_reg(reg.REG_OFFSET_Y),
+        }
+        for addr, value in ((reg.REG_OFFSET_X, x), (reg.REG_OFFSET_Y, y)):
+            if current[addr] == value:
+                continue
+            try:
+                self._gvcp.write_reg(addr, value)
+            except GVCPError as e:
+                centered = False
+                with suppress(Exception):
+                    centered = bool(self._gvcp.read_reg(reg.REG_CENTER_IMAGE))
+                if centered:
+                    raise GVCPError(
+                        "roi_offset cannot be changed while CenterImage is "
+                        "on: the camera locks the offsets. Turn it off with "
+                        "cam.write_register(registers.REG_CENTER_IMAGE, 0)",
+                        e.status,
+                    ) from e
+                raise
 
     @property
     def frame_rate_mode(self) -> reg.FrameRateMode:

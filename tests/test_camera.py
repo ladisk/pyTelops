@@ -450,6 +450,50 @@ class TestAcquisitionAPI:
             cam._gvcp.write_reg.assert_any_call(reg.REG_OFFSET_X, 64)
             cam._gvcp.write_reg.assert_any_call(reg.REG_OFFSET_Y, 96)
 
+    @staticmethod
+    def _offset_cam(x, y, center=0):
+        cam = _make_fake_connected_camera()
+        values = {reg.REG_OFFSET_X: x, reg.REG_OFFSET_Y: y, reg.REG_CENTER_IMAGE: center}
+        cam._gvcp.read_reg.side_effect = lambda addr: values[addr]
+        return cam
+
+    def test_roi_offset_unchanged_does_not_write(self):
+        cam = self._offset_cam(0, 0)
+        with patch.object(type(cam), "resolution", new=property(lambda self: (320, 256))):
+            cam.roi_offset = (0, 0)
+        cam._gvcp.write_reg.assert_not_called()
+
+    def test_roi_offset_only_x_changed_writes_only_x(self):
+        cam = self._offset_cam(0, 0)
+        with patch.object(type(cam), "resolution", new=property(lambda self: (128, 64))):
+            cam.roi_offset = (64, 0)
+        cam._gvcp.write_reg.assert_called_once_with(reg.REG_OFFSET_X, 64)
+
+    def test_roi_offset_both_changed_writes_both(self):
+        cam = self._offset_cam(0, 0)
+        with patch.object(type(cam), "resolution", new=property(lambda self: (128, 64))):
+            cam.roi_offset = (64, 96)
+        assert cam._gvcp.write_reg.call_count == 2
+
+    def test_roi_offset_write_fails_center_image_on(self):
+        cam = self._offset_cam(0, 0, center=1)
+        cam._gvcp.write_reg.side_effect = GVCPError("locked")
+        with (
+            patch.object(type(cam), "resolution", new=property(lambda self: (128, 64))),
+            pytest.raises(GVCPError, match="CenterImage") as exc,
+        ):
+            cam.roi_offset = (64, 0)
+        assert isinstance(exc.value.__cause__, GVCPError)
+
+    def test_roi_offset_write_fails_center_image_off(self):
+        cam = self._offset_cam(0, 0, center=0)
+        cam._gvcp.write_reg.side_effect = GVCPError("boom")
+        with (
+            patch.object(type(cam), "resolution", new=property(lambda self: (128, 64))),
+            pytest.raises(GVCPError, match="boom"),
+        ):
+            cam.roi_offset = (64, 0)
+
     def test_packet_delay_default_is_zero_override_none(self):
         cam = _make_fake_connected_camera()
         # Override flag starts None = "use default 0 in start_stream"

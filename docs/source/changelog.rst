@@ -1,6 +1,17 @@
 Changelog
 =========
 
+Version 0.2.6
+-------------
+
+- **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
+  the offset write, for example ``cam.roi_offset = (0, 0)`` after
+  connect to a camera already at full frame (issue #29). The cause is not
+  confirmed: either the camera rejected a write of an unchanged value, or the
+  offsets were locked. The setter now writes only the offsets that change. If
+  a write still fails while ``CenterImage`` is on, the ``GVCPError`` message
+  says the offsets are locked.
+
 Version 0.2.5
 -------------
 
