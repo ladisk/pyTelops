@@ -4,12 +4,13 @@ Unit tests use mocking. Hardware tests require --hardware flag.
 """
 
 import struct
+import time
 import warnings
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
 import numpy as np
 import pytest
-from pyGigEVision import GVCPError
+from pyGigEVision import GVCPError, StreamStats
 from pyGigEVision.standard import REG_SC_PACKET_DELAY, REG_SC_PACKET_SIZE
 
 from pyTelops import registers as reg
@@ -1887,6 +1888,38 @@ class TestStreamStallWarning:
         cam._buffer_armed_at = 1.0
         with warnings.catch_warnings():
             warnings.simplefilter("error")
+            cam._warn_if_stream_stalled(5.0)
+
+    def test_no_packets_message(self):
+        cam = self._cam()
+        cam._gvsp.stats = StreamStats(last_packet_time=None)
+        with pytest.warns(RuntimeWarning, match="no stream packet arrived"):
+            cam._warn_if_stream_stalled(5.0)
+
+    def test_old_packet_means_no_data(self):
+        cam = self._cam()
+        cam._gvsp.stats = StreamStats(last_packet_time=time.monotonic() - 60.0)
+        with pytest.warns(RuntimeWarning, match="no stream packet arrived"):
+            cam._warn_if_stream_stalled(5.0)
+
+    def test_recent_packet_means_packet_loss(self):
+        cam = self._cam()
+        cam._gvsp.stats = StreamStats(
+            frames_incomplete=4,
+            frames_timed_out=2,
+            resend_failed=37,
+            last_packet_time=time.monotonic(),
+        )
+        with pytest.warns(RuntimeWarning, match="packet loss") as rec:
+            cam._warn_if_stream_stalled(5.0)
+        text = str(rec[0].message)
+        assert "4 incomplete" in text and "2 timed-out" in text and "37 lost" in text
+        assert "packet_delay" in text
+
+    def test_stats_failure_falls_back_to_no_data(self):
+        cam = self._cam()
+        type(cam._gvsp).stats = PropertyMock(side_effect=OSError("x"))
+        with pytest.warns(RuntimeWarning, match="no stream packet arrived"):
             cam._warn_if_stream_stalled(5.0)
 
     def test_silent_when_read_fails(self):

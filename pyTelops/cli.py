@@ -80,9 +80,9 @@ def cmd_grab(args: argparse.Namespace) -> int:
 
 def cmd_live(args: argparse.Namespace) -> int:
     """Open the live thermal viewer window (requires the gui extra)."""
-    from .camera import Camera
-
     import signal
+
+    from .camera import Camera
 
     def _exit_on_signal(signum: int, frame: object) -> None:
         raise SystemExit(128 + signum)

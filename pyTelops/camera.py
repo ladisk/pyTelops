@@ -2285,6 +2285,10 @@ class Camera:
         status says acquisition has started. If any register read fails,
         the check is skipped silently.
 
+        The stream statistics of the receiver select the message. If a
+        stream packet arrived during the wait, the cause is packet loss.
+        If no packet arrived, the camera sends no data.
+
         Parameters
         ----------
         waited_s : float
@@ -2304,11 +2308,28 @@ class Camera:
                 return
         except Exception:
             return
-        msg = (
-            f"The camera reports acquiring but no complete frame arrived in "
-            f"{waited_s:.1f} s. Check the Ethernet adapter and driver (see the "
-            f"troubleshooting docs), then power-cycle the camera."
-        )
+        try:
+            stats = self._gvsp.stats
+            last = stats.last_packet_time
+        except Exception:
+            stats, last = None, None
+        if isinstance(last, float) and time.monotonic() - last < waited_s:
+            msg = (
+                f"The camera reports acquiring and stream packets arrive, but no "
+                f"complete frame arrived in {waited_s:.1f} s. Since the stream "
+                f"started: {stats.frames_incomplete} incomplete frames, "
+                f"{stats.frames_timed_out} timed-out frames, {stats.resend_failed} "
+                f"lost packets. This is packet loss. Set cam.packet_delay (for "
+                f"example 1000), check net.core.rmem_max and the Ethernet adapter "
+                f"(see the troubleshooting docs)."
+            )
+        else:
+            msg = (
+                f"The camera reports acquiring but no complete frame arrived in "
+                f"{waited_s:.1f} s, and no stream packet arrived. Check the Ethernet "
+                f"adapter and driver (see the troubleshooting docs), then "
+                f"power-cycle the camera."
+            )
         logger.warning(msg)
         warnings.warn(msg, RuntimeWarning, stacklevel=3)
 

@@ -1,5 +1,6 @@
 """Tests for CLI commands (no camera needed for most)."""
 
+import contextlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -82,10 +83,8 @@ class TestLiveSignals:
         with patch("pyTelops.camera.Camera") as cls:
             cls.return_value.__enter__ = MagicMock(return_value=mock_cam)
             cls.return_value.__exit__ = MagicMock(return_value=False)
-            try:
+            with contextlib.suppress(KeyboardInterrupt):
                 main(["live"])
-            except KeyboardInterrupt:
-                pass
         return seen
 
     def test_handlers_installed_then_restored(self):
