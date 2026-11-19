@@ -547,6 +547,40 @@ async def test_record_refuses_when_the_camera_holds_recordings(tmp_path):
         assert (await job_wait(c, r.structured_content["job_id"]))["state"] == "done"
 
 
+async def test_download_retries_a_slice_once_after_a_strided_pass(tmp_path):
+    from pyTelops.errors import DownloadStats, FrameIntegrityError
+
+    rig = Rig(tmp_path)
+    async with Client(rig.server) as c:
+        await connect(c)
+        r = await call(c, "buffer_record", frames_per_seq=20)
+        assert (await job_wait(c, r.structured_content["job_id"]))["state"] == "done"
+        cam = rig.cams[0]
+        real = cam.buffer_download
+        failures = {"left": 1}
+
+        def flaky(*a, **kw):
+            if failures["left"]:
+                failures["left"] -= 1
+                raise FrameIntegrityError(
+                    "Frame ordering corruption: strided",
+                    DownloadStats(n_frames=20, n_stride_gaps=3),
+                )
+            return real(*a, **kw)
+
+        cam.buffer_download = flaky
+        r = await call(c, "buffer_download", sequence=0)
+        done = await job_wait(c, r.structured_content["job_id"])
+        assert done["state"] == "done", done
+        assert done["result"]["integrity_ok"] is True
+        assert len(done["result"]["retried_slices"]) == 1
+        # a second failure in a row is reported, not retried again
+        failures["left"] = 2
+        r = await call(c, "buffer_download", sequence=0)
+        done = await job_wait(c, r.structured_content["job_id"])
+        assert done["state"] == "failed" and "ordering" in done["error"]
+
+
 async def test_record_fails_when_the_frame_count_is_wrong(tmp_path):
     rig = Rig(tmp_path)
     async with Client(rig.server) as c:

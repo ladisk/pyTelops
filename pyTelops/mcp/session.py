@@ -643,6 +643,7 @@ class Session:
                 "bitrate_used": None,
             }
             warn: list[str] = []
+            retried: list[str] = []  # slices that succeeded on the second attempt
             n_id_mismatch = 0
             mm = None
             written = 0
@@ -653,15 +654,26 @@ class Session:
                     job.check_cancel()
                     n = min(SLICE_FRAMES, total - lo)
                     # start_frame is a buffer frame ID, not an index; n_frames must not be 0.
-                    arr = cam.buffer_download(
-                        sequence=sequence,
-                        start_frame=first_id + lo,
-                        n_frames=n,
-                        strip_header=False,
-                        convert=False,
-                        verbose=False,
-                        max_dropped_frames=0,
-                    )
+                    # The first download after a recording can return a strided sequence
+                    # (seen at 320x128, 2026-11-19); the same request then succeeds. The
+                    # frames stay in the camera, so retry the slice once.
+                    for attempt in (1, 2):
+                        try:
+                            arr = cam.buffer_download(
+                                sequence=sequence,
+                                start_frame=first_id + lo,
+                                n_frames=n,
+                                strip_header=False,
+                                convert=False,
+                                verbose=False,
+                                max_dropped_frames=0,
+                            )
+                            break
+                        except FrameIntegrityError as exc:
+                            if attempt == 2:
+                                raise
+                            retried.append(f"slice at {lo}: {str(exc)[:120]}")
+                            job.check_cancel()
                     if arr is None or arr.shape[0] != n:
                         got = 0 if arr is None else arr.shape[0]
                         raise RuntimeError(f"Slice at frame {lo} returned {got} of {n} frames.")
@@ -729,6 +741,7 @@ class Session:
                     download_stats=agg,
                     n_frame_id_mismatch=n_id_mismatch,
                     warnings=warn,
+                    retried_slices=retried,
                     integrity_ok=(
                         state == "done"
                         and not warn
@@ -747,6 +760,7 @@ class Session:
                 "frames": written,
                 "integrity_ok": meta["integrity_ok"],
                 "warnings": warn,
+                "retried_slices": retried,
             }
 
         return run
