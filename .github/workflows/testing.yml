@@ -27,3 +27,7 @@ jobs:
         run: ruff format --check pyTelops tests
       - name: Run tests
         run: pytest -v
+      - name: Install the mcp extra
+        run: pip install -e ".[dev,mcp]"
+      - name: Run tests with the mcp extra
+        run: pytest -v tests/test_mcp_server.py tests/test_cli.py

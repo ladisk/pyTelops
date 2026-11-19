@@ -171,7 +171,8 @@ def cmd_mcp(args: argparse.Namespace) -> int:
     try:
         from .mcp import server
     except ImportError as exc:
-        if (exc.name or "").split(".")[0] != "mcp":
+        # The mcp extra brings mcp, anyio and pydantic; any of them can be missing.
+        if (exc.name or "").split(".")[0] not in {"mcp", "anyio", "pydantic", "pydantic_core"}:
             raise
         print('The MCP server needs the mcp extra: pip install "pyTelops[mcp]"', file=sys.stderr)
         return 1

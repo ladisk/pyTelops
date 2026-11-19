@@ -91,3 +91,13 @@ class TestMcpCommand:
         captured = capsys.readouterr()
         assert "pip install" in captured.err and "pyTelops[mcp]" in captured.err
         assert captured.out == ""
+
+    @pytest.mark.parametrize("missing", ["anyio", "pydantic"])
+    def test_missing_dependency_of_extra_gives_install_hint(self, capsys, monkeypatch, missing):
+        import sys
+
+        for name in [m for m in sys.modules if m.startswith("pyTelops.mcp")]:
+            monkeypatch.delitem(sys.modules, name)
+        monkeypatch.setitem(sys.modules, missing, None)
+        assert main(["mcp"]) == 1
+        assert "pyTelops[mcp]" in capsys.readouterr().err
