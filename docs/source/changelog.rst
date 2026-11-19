@@ -1,7 +1,7 @@
 Changelog
 =========
 
-Version 0.2.6
+Version 0.3.0
 -------------
 
 - **Added:** ``pytelops doctor`` checks the host, network, and camera in one
@@ -16,26 +16,24 @@ Version 0.2.6
 - **Added:** ``Camera.connect(force_control=False)`` raises ``GVCPError`` at
   once on ``ACCESS_DENIED``. The default ``True`` still waits up to 15 s for a
   stale control lock to expire.
-- **Fixed:** ``pytelops doctor --stream`` reported 0 frames on a working
-  camera. The camera sends the first frame about 2.03 s after acquisition
-  starts, and the check stopped waiting after 2 s.
+- **Added:** ``grab()``, ``acquire()`` and the live viewer now warn when the
+  camera reports acquiring but sends no frames. The warning uses the stream
+  statistics of pyGigEVision 0.3 to tell a camera that sends no data from
+  packet loss, and points to the troubleshooting page. These changes help
+  diagnose issue #28. They do not fix its root cause.
 - **Changed:** pyTelops now needs pyGigEVision 0.3.0 or later and uses only its
   public API.
-- **Fixed:** the ``roi_offset`` error now says when the camera locks
-  CenterImage on (``LockedCenterImage``, new register constant
-  ``REG_LOCKED_CENTER_IMAGE``). The LADISK FAST M3k has this lock: the window
-  is always centered and the offsets cannot be set. The earlier hint to turn
-  CenterImage off does not work on such a camera.
-- **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
-  the offset write, for example ``cam.roi_offset = (0, 0)`` after
-  connect to a camera already at full frame (issue #29). The cause is not
-  confirmed: either the camera rejected a write of an unchanged value, or the
-  offsets were locked. The setter now writes only the offsets that change. If
-  a write still fails while ``CenterImage`` is on, the ``GVCPError`` message
-  says the offsets are locked.
 - **Changed:** ``Camera.write_register()`` now refuses to write the stream
   packet size register while acquisition is running. Such a write can leave
   the stream channel unusable until a power cycle (issue #28).
+- **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
+  the offset write, for example ``cam.roi_offset = (0, 0)`` after
+  connect to a camera already at full frame (issue #29). The setter now writes
+  only the offsets that change. If a write still fails because CenterImage is
+  on, the error says so. If the camera also locks CenterImage on
+  (``LockedCenterImage``, new constant ``REG_LOCKED_CENTER_IMAGE``), the error
+  says that the window is always centered and the offsets cannot be set. The
+  LADISK FAST M3k has this lock.
 - **Fixed:** ``start_stream()`` now raises a ``GVCPError`` with a clear
   message when the camera rejects the packet size. The message says whether
   the camera is still acquiring from an earlier session or needs a power
@@ -43,12 +41,6 @@ Version 0.2.6
 - **Fixed:** a script that ends without ``disconnect()`` now releases the
   camera at exit. ``pytelops live`` also handles SIGTERM and SIGHUP, so a
   killed viewer stops acquisition before it exits.
-- **Added:** ``grab()``, ``acquire()`` and the live viewer now warn when the
-  camera reports acquiring but sends no frames. The warning uses the stream
-  statistics of pyGigEVision 0.3 to tell a camera that sends no data from
-  packet loss, and points to the troubleshooting page. These changes help
-  diagnose issue #28. They do not
-  fix its root cause.
 
 Version 0.2.5
 -------------
