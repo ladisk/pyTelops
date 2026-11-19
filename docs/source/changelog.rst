@@ -13,6 +13,11 @@ Version 0.2.6
   starts, and the check stopped waiting after 2 s.
 - **Changed:** pyTelops now needs pyGigEVision 0.3.0 or later and uses only its
   public API.
+- **Fixed:** the ``roi_offset`` error now says when the camera locks
+  CenterImage on (``LockedCenterImage``, new register constant
+  ``REG_LOCKED_CENTER_IMAGE``). The LADISK FAST M3k has this lock: the window
+  is always centered and the offsets cannot be set. The earlier hint to turn
+  CenterImage off does not work on such a camera.
 - **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
   the offset write, for example ``cam.roi_offset = (0, 0)`` after
   connect to a camera already at full frame (issue #29). The cause is not

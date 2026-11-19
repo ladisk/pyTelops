@@ -453,9 +453,14 @@ class TestAcquisitionAPI:
             cam._gvcp.write_reg.assert_any_call(reg.REG_OFFSET_Y, 96)
 
     @staticmethod
-    def _offset_cam(x, y, center=0):
+    def _offset_cam(x, y, center=0, locked=0):
         cam = _make_fake_connected_camera()
-        values = {reg.REG_OFFSET_X: x, reg.REG_OFFSET_Y: y, reg.REG_CENTER_IMAGE: center}
+        values = {
+            reg.REG_OFFSET_X: x,
+            reg.REG_OFFSET_Y: y,
+            reg.REG_CENTER_IMAGE: center,
+            reg.REG_LOCKED_CENTER_IMAGE: locked,
+        }
         cam._gvcp.read_reg.side_effect = lambda addr: values[addr]
         return cam
 
@@ -486,6 +491,16 @@ class TestAcquisitionAPI:
         ):
             cam.roi_offset = (64, 0)
         assert isinstance(exc.value.__cause__, GVCPError)
+
+    def test_roi_offset_write_fails_center_image_locked(self):
+        cam = self._offset_cam(0, 0, center=1, locked=1)
+        cam._gvcp.write_reg.side_effect = GVCPError("locked")
+        with (
+            patch.object(type(cam), "resolution", new=property(lambda self: (128, 64))),
+            pytest.raises(GVCPError, match="always centers") as exc,
+        ):
+            cam.roi_offset = (64, 0)
+        assert "write_register" not in str(exc.value)
 
     def test_roi_offset_write_fails_center_image_off(self):
         cam = self._offset_cam(0, 0, center=0)
