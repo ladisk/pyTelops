@@ -614,7 +614,12 @@ class Camera:
     # Connection
     # ==========================================================
 
-    def connect(self, timeout: float = 10.0, cooling_timeout: float = 600.0) -> None:
+    def connect(
+        self,
+        timeout: float = 10.0,
+        cooling_timeout: float = 600.0,
+        force_control: bool = True,
+    ) -> None:
         """Discover the camera (if needed) and establish GVCP control.
 
         If no IP was supplied at construction time, a GVCP broadcast is
@@ -643,6 +648,11 @@ class Camera:
             Default ``600.0``, so connecting to a freshly powered, still-cooling
             camera waits it out instead of timing out. Forwarded to
             :meth:`wait_until_ready`.
+        force_control : bool, optional
+            Default ``True``: when the camera answers ``ACCESS_DENIED``, wait up
+            to 15 s for a stale control lock to expire. Pass ``False`` to raise
+            :class:`~pyGigEVision.GVCPError` at once, for callers that prefer
+            a fast failure over the wait.
 
         Raises
         ------
@@ -735,7 +745,10 @@ class Camera:
 
         # GVCP connection
         self._gvcp = GVCPClient(self._camera_ip, self._local_ip, self._timeout)
-        self._gvcp.connect()
+        if force_control:
+            self._gvcp.connect()
+        else:
+            self._gvcp.connect(force=False)
 
         # Reset heartbeat timeout
         with suppress(GVCPError):

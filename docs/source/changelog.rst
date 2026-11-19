@@ -8,6 +8,14 @@ Version 0.2.6
   command and prints a fix for each problem. It is read-only by default.
   ``--stream`` tests frame delivery, ``--json`` prints one JSON object, and the
   exit code is 0 (ok), 1 (warning), or 2 (failure).
+- **Added:** ``pytelops mcp`` starts a Model Context Protocol server, so an AI
+  assistant such as Claude Code can connect to the camera, change settings,
+  grab frames, and record and download buffer sequences. Install it with
+  ``pip install "pyTelops[mcp]"``. ``--simulate`` runs it without a camera.
+  See :doc:`mcp`.
+- **Added:** ``Camera.connect(force_control=False)`` raises ``GVCPError`` at
+  once on ``ACCESS_DENIED``. The default ``True`` still waits up to 15 s for a
+  stale control lock to expire.
 - **Fixed:** ``pytelops doctor --stream`` reported 0 frames on a working
   camera. The camera sends the first frame about 2.03 s after acquisition
   starts, and the check stopped waiting after 2 s.
