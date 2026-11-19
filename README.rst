@@ -46,7 +46,7 @@ Features
 - **Live streaming**: real-time frame acquisition
 - **Subwindow**: configurable resolution for higher frame rates
 - **Diagnostics**: 13 temperature sensors, NUC trigger, timestamps, voltage/current
-- **GUI viewer & CLI**: live thermal display, ``pytelops discover / grab / live``
+- **GUI viewer & CLI**: live thermal display, ``pytelops discover / grab / live / doctor``
 
 Installation
 ------------
@@ -473,6 +473,7 @@ CLI
    pytelops discover     # find cameras on the network
    pytelops info         # show camera configuration
    pytelops grab -o frame.npy   # grab a single frame
+   pytelops doctor       # check host, network and camera state
    pytelops live         # open live viewer
    pytelops setup        # configure OS (firewall, MTU)
 

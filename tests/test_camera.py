@@ -6,6 +6,7 @@ Unit tests use mocking. Hardware tests require --hardware flag.
 import struct
 import time
 import warnings
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, PropertyMock, patch
 
 import numpy as np
@@ -42,11 +43,11 @@ def _make_fake_connected_camera():
     cam._local_ip = "169.254.1.1"
     cam._gvcp = MagicMock()
     cam._gvcp.read_reg.return_value = 0
-    cam._gvcp._control_lost = False
+    cam._gvcp.control_lost = False
     cam._gvsp = MagicMock()
     cam._gvsp.get_frame.return_value = None
     cam._gvsp.port = 3957
-    cam._gvsp._sock.getsockname.return_value = ("169.254.1.1", 3957)
+    cam._gvsp.local_ip = "169.254.1.1"
     return cam
 
 
@@ -1624,7 +1625,7 @@ def _cam_for_header_download(n_frames, bad_positions=(), drop_positions=()):
     which is what a tolerated dropped frame looks like to buffer_download.
     """
     cam = _make_fake_connected_camera()
-    cam._gvsp._resend_stats = {"requested": 0, "recovered": 0, "failed": 0}
+    cam._gvsp.stats = SimpleNamespace(resend_requested=0, resend_recovered=0, resend_failed=0)
 
     def fake_range(frame_id, count, **kwargs):
         out = {}
@@ -1700,7 +1701,7 @@ class TestBufferDownloadHeaders:
 
     def test_nothing_received_returns_none_and_empty_list(self):
         cam = _make_fake_connected_camera()
-        cam._gvsp._resend_stats = {"requested": 0, "recovered": 0, "failed": 0}
+        cam._gvsp.stats = SimpleNamespace(resend_requested=0, resend_recovered=0, resend_failed=0)
         cam._download_range = MagicMock(return_value={})
         out = cam.buffer_download(
             n_frames=2, retries=0, max_dropped_frames=2, verbose=False, return_headers=True

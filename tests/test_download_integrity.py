@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -117,11 +118,11 @@ def _fake_cam_for_download():
     cam._gvcp = MagicMock()
     cam._gvcp.read_reg.return_value = 0
     cam._gvcp.read_float.return_value = 1000.0
-    cam._gvcp._control_lost = False
+    cam._gvcp.control_lost = False
     cam._gvsp = MagicMock()
-    cam._gvsp._resend_stats = {"requested": 0, "recovered": 0, "failed": 0}
+    cam._gvsp.stats = SimpleNamespace(resend_requested=0, resend_recovered=0, resend_failed=0)
     cam._gvsp.port = 3957
-    cam._gvsp._sock.getsockname.return_value = ("169.254.1.1", 3957)
+    cam._gvsp.local_ip = "169.254.1.1"
     cam.start_stream = MagicMock()
     cam.stop_stream = MagicMock()
     return cam

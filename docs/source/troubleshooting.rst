@@ -4,6 +4,45 @@ Troubleshooting
 Symptoms, causes, and fixes for the most common issues you may
 encounter while using pyTelops.
 
+Run ``pytelops doctor`` first
+-----------------------------
+
+Run this command first in every camera session. It prints one line per
+check and tells you the fix for each problem.
+
+.. code-block:: bash
+
+   pytelops doctor
+   pytelops doctor --json
+   pytelops doctor --ip 169.254.1.10 --stream --frames 50
+
+The command is read-only by default. It does not take control of the camera.
+It checks:
+
+- USB and Ethernet adapters: driver, USB ID, carrier, MTU, known bad adapters.
+- ``net.core.rmem_max`` (Linux).
+- Camera discovery, and whether the OS routes the camera IP through the
+  adapter that found it.
+- Camera state, read without control: TDC status, readiness, stream
+  channel, and whether another application holds control.
+- The ARP entry for the camera (Linux).
+
+Add ``--stream`` to connect and receive ``--frames`` frames (default 20). This
+changes camera state. The command connects, applies the pyTelops defaults,
+runs free-run acquisition, restores the packet size and delay registers, and
+disconnects. It counts incomplete frames and gaps in the block IDs. It is
+skipped when trigger mode is on or the memory buffer is in use.
+
+Add ``--json`` for scripts and agents. The command prints one JSON object
+with ``summary`` (counts per status), ``problems`` (every warning and
+failure), and ``camera`` (IP, MAC, model, serial, firmware, TDC flags).
+
+Exit codes:
+
+- ``0``: all checks are ``ok`` or ``skip``.
+- ``1``: at least one warning.
+- ``2``: at least one failure.
+
 Camera not found on ``discover()`` / ``connect()``
 --------------------------------------------------
 

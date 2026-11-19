@@ -4,6 +4,12 @@ Changelog
 Version 0.2.6
 -------------
 
+- **Added:** ``pytelops doctor`` checks the host, network, and camera in one
+  command and prints a fix for each problem. It is read-only by default.
+  ``--stream`` tests frame delivery, ``--json`` prints one JSON object, and the
+  exit code is 0 (ok), 1 (warning), or 2 (failure).
+- **Changed:** pyTelops now needs pyGigEVision 0.3.0 or later and uses only its
+  public API.
 - **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
   the offset write, for example ``cam.roi_offset = (0, 0)`` after
   connect to a camera already at full frame (issue #29). The cause is not
@@ -24,8 +30,7 @@ Version 0.2.6
 - **Added:** ``grab()``, ``acquire()`` and the live viewer now warn when the
   camera reports acquiring but sends no frames. The warning uses the stream
   statistics of pyGigEVision 0.3 to tell a camera that sends no data from
-  packet loss, and points to the troubleshooting page. pyTelops now needs
-  pyGigEVision 0.3.0 or later. These changes help diagnose issue #28. They do not
+  packet loss, and points to the troubleshooting page. These changes help diagnose issue #28. They do not
   fix its root cause.
 
 Version 0.2.5

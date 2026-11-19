@@ -115,3 +115,11 @@ class TestLiveSignals:
         with patch("platform.system", return_value="Linux"):
             assert main(["setup"]) == 0
         assert "USB Ethernet" in capsys.readouterr().out
+
+
+class TestDoctorCLI:
+    def test_doctor_exit_code_and_line(self, capsys):
+        checks = [{"name": "rmem_max", "status": "warn", "detail": "low", "fix": "sudo sysctl"}]
+        with patch("pyTelops.doctor.run_doctor", return_value=(checks, {})):
+            assert main(["doctor"]) == 1
+        assert "[WARN] rmem_max: low -> fix: sudo sysctl" in capsys.readouterr().out
