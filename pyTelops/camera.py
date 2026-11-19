@@ -1665,7 +1665,9 @@ class Camera:
             If the camera is not connected.
         GVCPError
             If the camera rejects the write. The message says so when the
-            offsets are locked because CenterImage is on.
+            offsets are locked because CenterImage is on. Some cameras lock
+            CenterImage on (``LockedCenterImage``): the window is then always
+            centered and the offsets cannot be set.
         ValueError
             If the offset is out of range, not properly aligned, or the
             subwindow exceeds the sensor dimensions.
@@ -1717,9 +1719,17 @@ class Camera:
             try:
                 self._gvcp.write_reg(addr, value)
             except GVCPError as e:
-                centered = False
+                centered = locked = False
                 with suppress(Exception):
                     centered = bool(self._gvcp.read_reg(reg.REG_CENTER_IMAGE))
+                    locked = bool(self._gvcp.read_reg(reg.REG_LOCKED_CENTER_IMAGE))
+                if centered and locked:
+                    raise GVCPError(
+                        "roi_offset cannot be changed: CenterImage is on and the "
+                        "camera locks it (LockedCenterImage = 1). The camera always "
+                        "centers the window. Change the window size with resolution.",
+                        e.status,
+                    ) from e
                 if centered:
                     raise GVCPError(
                         "roi_offset cannot be changed while CenterImage is "
