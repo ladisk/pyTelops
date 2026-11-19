@@ -30,7 +30,8 @@ Version 0.2.6
 - **Added:** ``grab()``, ``acquire()`` and the live viewer now warn when the
   camera reports acquiring but sends no frames. The warning uses the stream
   statistics of pyGigEVision 0.3 to tell a camera that sends no data from
-  packet loss, and points to the troubleshooting page. These changes help diagnose issue #28. They do not
+  packet loss, and points to the troubleshooting page. These changes help
+  diagnose issue #28. They do not
   fix its root cause.
 
 Version 0.2.5
