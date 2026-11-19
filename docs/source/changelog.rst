@@ -8,6 +8,8 @@ Version 0.2.6
   command and prints a fix for each problem. It is read-only by default.
   ``--stream`` tests frame delivery, ``--json`` prints one JSON object, and the
   exit code is 0 (ok), 1 (warning), or 2 (failure).
+- **Changed:** pyTelops now needs pyGigEVision 0.3.0 or later and uses only its
+  public API.
 - **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
   the offset write, for example ``cam.roi_offset = (0, 0)`` after
   connect to a camera already at full frame (issue #29). The cause is not
