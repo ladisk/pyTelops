@@ -8,6 +8,9 @@ Version 0.2.6
   command and prints a fix for each problem. It is read-only by default.
   ``--stream`` tests frame delivery, ``--json`` prints one JSON object, and the
   exit code is 0 (ok), 1 (warning), or 2 (failure).
+- **Fixed:** ``pytelops doctor --stream`` reported 0 frames on a working
+  camera. The camera sends the first frame about 2.03 s after acquisition
+  starts, and the check stopped waiting after 2 s.
 - **Changed:** pyTelops now needs pyGigEVision 0.3.0 or later and uses only its
   public API.
 - **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on

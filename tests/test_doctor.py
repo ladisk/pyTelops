@@ -321,6 +321,21 @@ class TestStream:
         assert "bad-pixel replacement" in res["detail"]
         assert ctx["temperature_c"] == 80.5
 
+    def test_first_frame_waits_for_start_delay(self):
+        cam = FakeCam(frames([1, 2, 3]))
+        seen = []
+        orig = cam._gvsp.get_frame_with_info.side_effect
+
+        def rec(timeout):
+            seen.append(timeout)
+            return orig(timeout)
+
+        cam._gvsp.get_frame_with_info.side_effect = rec
+        stream(cam, n=3)
+        # 100 fps -> per-frame timeout 2.0 s; the first frame also waits 2.1 s.
+        assert seen[0] == pytest.approx(4.1)
+        assert seen[1:] == [pytest.approx(2.0)] * 2
+
     def test_zero_frames_fails_and_restores(self):
         cam = FakeCam([])
         res, _ = stream(cam, {"trigger": 0, "buffer": 0})
