@@ -159,6 +159,8 @@ class LiveView:
         self.fps_time = time.monotonic()
         self.fps = 0.0
         self.running = True
+        self._last_frame_t = time.monotonic()
+        self._stall_warned = False
 
         self.root.after(1, self.update)
 
@@ -201,6 +203,15 @@ class LiveView:
         # Pull raw frame with headers - the viewer reads cal_mode and
         # calibration parameters out of the header bytes itself.
         frame = self.cam.read_frame(timeout=0.05, convert=False, strip_header=False)
+
+        if frame is None:
+            stalled_s = time.monotonic() - self._last_frame_t
+            if stalled_s >= 3.0 and not self._stall_warned:
+                self._stall_warned = True
+                self.cam._warn_if_stream_stalled(stalled_s)
+        else:
+            self._last_frame_t = time.monotonic()
+            self._stall_warned = False
 
         if frame is not None:
             # Read calibration mode from header

@@ -55,6 +55,7 @@ pyGigEVision : underlying GigE Vision protocol layer
 
 from __future__ import annotations
 
+import atexit
 import datetime
 import ipaddress
 import logging
@@ -1924,7 +1925,28 @@ class Camera:
         if current_size != target_pkt_size:
             # Preserve upper flags and lower flag bits (DoNotFragment etc.)
             non_size_bits = pkt_reg & ~SC_PACKET_SIZE_MASK
-            self._gvcp.write_reg(REG_SC_PACKET_SIZE, non_size_bits | target_pkt_size)
+            try:
+                self._gvcp.write_reg(REG_SC_PACKET_SIZE, non_size_bits | target_pkt_size)
+            except GVCPError as e:
+                if not e.status:
+                    raise  # timeout or local error, not a rejection
+                tdc = None
+                with suppress(Exception):
+                    tdc = self._gvcp.read_reg(reg.REG_TDC_STATUS)
+                if tdc is not None and tdc & reg.TDC_ACQUISITION_STARTED:
+                    raise GVCPError(
+                        "The camera rejected the stream packet size because it is "
+                        "still acquiring, possibly left over from a session that ended "
+                        "abruptly. Call acquisition_stop() or reconnect. If that fails, "
+                        "power-cycle the camera",
+                        e.status,
+                    ) from e
+                raise GVCPError(
+                    "The camera rejected the stream packet size. The stream channel "
+                    "can be unusable after an abrupt session end (issue #28). "
+                    "Power-cycle the camera",
+                    e.status,
+                ) from e
 
         self._gvsp.packet_size = target_pkt_size
 
@@ -2254,6 +2276,63 @@ class Camera:
     # Single-shot / Batch Acquisition
     # ==========================================================
 
+    def _warn_if_stream_stalled(self, waited_s: float) -> None:
+        """Warn when the camera reports acquiring but no frame arrived.
+
+        Emits a :class:`RuntimeWarning` and a log warning only if all of
+        these hold: *waited_s* is at least ``max(2.0, 3 / frame_rate)``, no
+        buffer recording is armed, the trigger mode is off, and the TDC
+        status says acquisition has started. If any register read fails,
+        the check is skipped silently.
+
+        The stream statistics of the receiver select the message. If a
+        stream packet arrived during the wait, the cause is packet loss.
+        If no packet arrived, the camera sends no data.
+
+        Parameters
+        ----------
+        waited_s : float
+            Seconds spent waiting without a complete frame.
+        """
+        try:
+            fps = self._gvcp.read_float(reg.REG_ACQUISITION_FRAME_RATE)
+            if waited_s < max(2.0, 3.0 / fps if fps > 0 else 0.0):
+                return
+            if self._buffer_armed_at is not None:
+                return
+            if self._gvcp.read_reg(reg.REG_MEMORY_BUFFER_MODE) != reg.MemoryBufferMode.OFF:
+                return
+            if self._gvcp.read_reg(reg.REG_TRIGGER_MODE) != reg.TriggerMode.OFF:
+                return
+            if not self._gvcp.read_reg(reg.REG_TDC_STATUS) & reg.TDC_ACQUISITION_STARTED:
+                return
+        except Exception:
+            return
+        try:
+            stats = self._gvsp.stats
+            last = stats.last_packet_time
+        except Exception:
+            stats, last = None, None
+        if isinstance(last, float) and time.monotonic() - last < waited_s:
+            msg = (
+                f"The camera reports acquiring and stream packets arrive, but no "
+                f"complete frame arrived in {waited_s:.1f} s. Since the stream "
+                f"started: {stats.frames_incomplete} incomplete frames, "
+                f"{stats.frames_timed_out} timed-out frames, {stats.resend_failed} "
+                f"lost packets. This is packet loss. Set cam.packet_delay (for "
+                f"example 1000), check net.core.rmem_max and the Ethernet adapter "
+                f"(see the troubleshooting docs)."
+            )
+        else:
+            msg = (
+                f"The camera reports acquiring but no complete frame arrived in "
+                f"{waited_s:.1f} s, and no stream packet arrived. Check the Ethernet "
+                f"adapter and driver (see the troubleshooting docs), then "
+                f"power-cycle the camera."
+            )
+        logger.warning(msg)
+        warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
     def grab(
         self, timeout: float = 5.0, strip_header: bool = True, convert: bool = True
     ) -> np.ndarray | None:
@@ -2348,6 +2427,8 @@ class Camera:
             if not self._acquiring:
                 self.acquisition_start()
             frame = self._gvsp.get_frame(timeout=timeout)
+            if frame is None:
+                self._warn_if_stream_stalled(timeout)
         finally:
             if not was_acquiring:
                 self.acquisition_stop()
@@ -2427,6 +2508,8 @@ class Camera:
                 result = self._gvsp.get_frame(timeout=remaining)
                 if result is not None:
                     frames.append(result)
+            if not frames:
+                self._warn_if_stream_stalled(timeout)
         finally:
             if not was_acquiring:
                 self.acquisition_stop()
@@ -5361,11 +5444,31 @@ class Camera:
         Raises
         ------
         RuntimeError
-            If the camera is not connected.
+            If the camera is not connected, or if *addr* is the stream
+            packet size register while acquisition is running.
         GVCPError
             If the camera returns an error response for the address.
+
+        Notes
+        -----
+        A packet-size write during acquisition can leave the stream channel
+        unusable until the camera is power-cycled (issue #28), so it is
+        refused. Stop acquisition first.
         """
         self._check_connected()
+        if addr == REG_SC_PACKET_SIZE:
+            acquiring = self._acquiring
+            if not acquiring:
+                with suppress(Exception):
+                    acquiring = bool(
+                        self._gvcp.read_reg(reg.REG_TDC_STATUS) & reg.TDC_ACQUISITION_STARTED
+                    )
+            if acquiring:
+                raise RuntimeError(
+                    "Stop acquisition first. A packet-size write during acquisition "
+                    "can leave the stream channel unusable until a power cycle "
+                    "(issue #28)."
+                )
         self._gvcp.write_reg(addr, value)
 
     def read_float_register(self, addr: int) -> float:
@@ -5421,3 +5524,17 @@ class Camera:
         """
         self._check_connected()
         self._gvcp.write_float(addr, value)
+
+
+def _disconnect_all_cameras() -> None:
+    """Disconnect every active camera at interpreter exit.
+
+    Releases the control channel and stops acquisition if a script ends
+    without calling :meth:`Camera.disconnect`.
+    """
+    for cam in list(Camera._active_cameras.values()):
+        with suppress(Exception):
+            cam.disconnect()
+
+
+atexit.register(_disconnect_all_cameras)

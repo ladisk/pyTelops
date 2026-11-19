@@ -81,10 +81,23 @@ def cmd_grab(args: argparse.Namespace) -> int:
 
 def cmd_live(args: argparse.Namespace) -> int:
     """Open the live thermal viewer window (requires the gui extra)."""
+    import signal
+
     from .camera import Camera
 
-    with Camera(ip=args.ip) as cam:
-        cam.live_view(colormap=args.colormap, scale=args.scale)
+    def _exit_on_signal(signum: int, frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    signums = [signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        signums.append(signal.SIGHUP)
+    previous = {n: signal.signal(n, _exit_on_signal) for n in signums}
+    try:
+        with Camera(ip=args.ip) as cam:
+            cam.live_view(colormap=args.colormap, scale=args.scale)
+    finally:
+        for n, handler in previous.items():
+            signal.signal(n, handler)
     return 0
 
 
@@ -142,6 +155,11 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print("3. Firewall (if active):")
         print("   sudo ufw allow in proto udp to any port 3956")
         print("   sudo ufw allow in proto udp from 169.254.0.0/16")
+        print()
+
+        print("4. USB Ethernet adapters:")
+        print("   Some adapters drop stream packets or use the wrong driver.")
+        print("   See 'Linux USB Ethernet adapters' in the troubleshooting docs.")
         print()
     else:
         print(f"No setup instructions for {system}")

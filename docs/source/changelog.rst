@@ -20,6 +20,22 @@ Version 0.2.6
   offsets were locked. The setter now writes only the offsets that change. If
   a write still fails while ``CenterImage`` is on, the ``GVCPError`` message
   says the offsets are locked.
+- **Changed:** ``Camera.write_register()`` now refuses to write the stream
+  packet size register while acquisition is running. Such a write can leave
+  the stream channel unusable until a power cycle (issue #28).
+- **Fixed:** ``start_stream()`` now raises a ``GVCPError`` with a clear
+  message when the camera rejects the packet size. The message says whether
+  the camera is still acquiring from an earlier session or needs a power
+  cycle (issue #28).
+- **Fixed:** a script that ends without ``disconnect()`` now releases the
+  camera at exit. ``pytelops live`` also handles SIGTERM and SIGHUP, so a
+  killed viewer stops acquisition before it exits.
+- **Added:** ``grab()``, ``acquire()`` and the live viewer now warn when the
+  camera reports acquiring but sends no frames. The warning uses the stream
+  statistics of pyGigEVision 0.3 to tell a camera that sends no data from
+  packet loss, and points to the troubleshooting page. These changes help
+  diagnose issue #28. They do not
+  fix its root cause.
 
 Version 0.2.5
 -------------
