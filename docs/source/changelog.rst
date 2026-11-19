@@ -4,6 +4,10 @@ Changelog
 Version 0.2.6
 -------------
 
+- **Added:** ``pytelops doctor`` checks the host, network, and camera in one
+  command and prints a fix for each problem. It is read-only by default.
+  ``--stream`` tests frame delivery, ``--json`` prints one JSON object, and the
+  exit code is 0 (ok), 1 (warning), or 2 (failure).
 - **Changed:** pyTelops now needs pyGigEVision 0.3.0 or later and uses only its
   public API.
 - **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on

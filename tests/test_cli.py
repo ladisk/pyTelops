@@ -60,3 +60,11 @@ class TestCLIParser:
             mock_cam_cls.return_value.__exit__ = MagicMock(return_value=False)
             result = main(["grab"])
             assert result == 1  # failed to grab
+
+
+class TestDoctorCLI:
+    def test_doctor_exit_code_and_line(self, capsys):
+        checks = [{"name": "rmem_max", "status": "warn", "detail": "low", "fix": "sudo sysctl"}]
+        with patch("pyTelops.doctor.run_doctor", return_value=(checks, {})):
+            assert main(["doctor"]) == 1
+        assert "[WARN] rmem_max: low -> fix: sudo sysctl" in capsys.readouterr().out
