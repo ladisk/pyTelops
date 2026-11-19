@@ -17,6 +17,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, ImageContent, TextContent, ToolAnnotations
 from pydantic import BaseModel, Field
 
+from .. import registers as reg
 from ..camera import Camera
 from . import artifacts
 from .session import Session, explain
@@ -246,10 +247,19 @@ def build_server(
             session.ensure_live_mode(cam)
             done: list[str] = []
             caught: list[str] = []
+            centered = False
+            with contextlib.suppress(Exception):
+                centered = bool(cam.read_register(reg.REG_CENTER_IMAGE))
             try:
                 with warnings.catch_warnings(record=True) as wl:
                     warnings.simplefilter("always")
-                    if width is not None or height is not None:
+                    if centered and (width is not None or height is not None):
+                        # CenterImage on: the camera centers the window itself and refuses
+                        # offset writes (on the LADISK camera it is locked on).
+                        cw, ch = cam.resolution
+                        cam.resolution = (width or cw, height or ch)
+                        done.append("resolution")
+                    elif width is not None or height is not None:
                         cw, ch = cam.resolution
                         nw, nh = width or cw, height or ch
                         cx, cy = cam.roi_offset
@@ -285,7 +295,7 @@ def build_server(
                         if (fx, fy) != (px, py):
                             cam.roi_offset = (fx, fy)
                             done.append("offset")
-                    elif offset_x is not None or offset_y is not None:
+                    elif (offset_x is not None or offset_y is not None) and not centered:
                         cx, cy = cam.roi_offset
                         cam.roi_offset = (
                             cx if offset_x is None else offset_x,
@@ -307,6 +317,15 @@ def build_server(
                 raise ToolError(explain(exc) + applied) from exc
             w_, h_ = cam.resolution
             ox, oy = cam.roi_offset
+            if centered and (
+                (offset_x is not None and offset_x != ox)
+                or (offset_y is not None and offset_y != oy)
+            ):
+                applied = f" Already applied: {', '.join(done)}." if done else ""
+                raise ToolError(
+                    f"The camera centers the window (CenterImage is on), so the offset is "
+                    f"({ox}, {oy}) and cannot be set. Give width and height only.{applied}"
+                )
             actual = {
                 "width": w_,
                 "height": h_,
@@ -316,6 +335,7 @@ def build_server(
                 "frame_rate": float(cam.frame_rate),
                 "frame_rate_max": float(cam.frame_rate_max),
                 "calibration_mode": cam.calibration_mode.name,
+                "center_image": centered,
             }
             clamped = []
             for k, v in asked.items():
@@ -434,6 +454,11 @@ def build_server(
         """
         if duration_s is not None and frames_per_seq is not None:
             raise ToolError("Give duration_s or frames_per_seq, not both.")
+        # Refuse at once, not later as a failed job. The job checks again before it
+        # configures the buffer.
+        held = await session.call(session.held_sequences)
+        if held:
+            raise ToolError(session.held_message(held))
         job = await session.start_job(
             "record", session.record_job(n_sequences, duration_s, frames_per_seq, pre_moi)
         )

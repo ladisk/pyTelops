@@ -399,6 +399,22 @@ class Session:
                 if got_lock:
                     self.lock.release()
 
+    # ----- recordings held in the camera memory ---------------------------------------
+    @staticmethod
+    def held_sequences(cam) -> int:
+        """Number of recorded sequences in the camera memory (0 if the read fails)."""
+        with contextlib.suppress(GVCPError):
+            return int(cam.read_register(reg.REG_MEMORY_BUFFER_SEQ_COUNT))
+        return 0
+
+    @staticmethod
+    def held_message(held: int) -> str:
+        return (
+            f"The camera memory already holds {held} recorded sequence(s). Recording "
+            "now could destroy them. Download them with buffer_download, then call "
+            "buffer_clear with confirm=true, then record again."
+        )
+
     # ----- helpers for tools that need the live (non-buffer) mode ---------------------
     def ensure_live_mode(self, cam) -> None:
         """Turn the memory buffer mode off before grab or configure, if it is on.
@@ -498,15 +514,9 @@ class Session:
             cam = self.require_camera()
             # buffer_configure may wipe recordings, and it is not proven that it keeps them.
             # Refuse before touching anything while the camera still holds data.
-            held = 0
-            with contextlib.suppress(GVCPError):
-                held = int(cam.read_register(reg.REG_MEMORY_BUFFER_SEQ_COUNT))
+            held = self.held_sequences(cam)
             if held:
-                raise ToolError(
-                    f"The camera memory already holds {held} recorded sequence(s). Recording "
-                    "now could destroy them. Download them with buffer_download, then call "
-                    "buffer_clear with confirm=true, then record again."
-                )
+                raise ToolError(self.held_message(held))
             job.update(0.0, "Configuring buffer")
             cam.buffer_configure(
                 n_sequences=n_sequences,

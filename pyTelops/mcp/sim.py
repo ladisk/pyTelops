@@ -33,6 +33,7 @@ class SimWorld:
         self.ready_at: float | None = None
         self.width, self.height = 320, 256
         self.offset = (0, 0)
+        self.center_image = False  # REG_CENTER_IMAGE; on, the camera centers the window
         self.integration_us = 500.0
         self.frame_rate = 100.0
         self.cal = reg.CalibrationMode.RT
@@ -142,6 +143,8 @@ class SimCamera:
         w, h = wh
         if not (64 <= w <= 320 and w % 64 == 0 and 4 <= h <= 256 and h % 4 == 0):
             raise ValueError(f"Invalid resolution {w}x{h}")
+        if self.world.center_image:
+            self.world.offset = ((320 - w) // 2, (256 - h) // 2 // 4 * 4)
         ox, oy = self.world.offset
         if ox + w > 320 or oy + h > 256:
             # The camera refuses a window that leaves the sensor (assumed, like the
@@ -168,6 +171,8 @@ class SimCamera:
         w, h = self.world.width, self.world.height
         if x + w > 320 or y + h > 256:
             raise ValueError(f"roi_offset ({x}, {y}) + size {w}x{h} exceeds the sensor")
+        if self.world.center_image and (x, y) != self.world.offset:
+            raise GVCPError("roi_offset cannot be changed while CenterImage is on", 0x8FFF)
         self.world.offset = (x, y)
         self.calls["set_roi_offset"] += 1
         self.world.log.append("set_roi_offset")
@@ -398,6 +403,8 @@ class SimCamera:
             return int(self.world.buffer_mode)
         if addr == reg.REG_MEMORY_BUFFER_SEQ_COUNT:
             return self._seq_done() if self._armed_at is not None else len(self.world.seq_frames)
+        if addr == reg.REG_CENTER_IMAGE:
+            return int(self.world.center_image)
         if addr == reg.REG_MEMORY_BUFFER_SEQ_SIZE:
             return int(self._cfg.get("frames", 0))
         raise GVCPError(f"register {addr:#x} not simulated", 0x8003)

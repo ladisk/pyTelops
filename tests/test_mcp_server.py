@@ -539,8 +539,7 @@ async def test_record_refuses_when_the_camera_holds_recordings(tmp_path):
         assert (await job_wait(c, r.structured_content["job_id"]))["state"] == "done"
         configured = rig.calls["buffer_configure"]
         r = await call(c, "buffer_record", frames_per_seq=20)
-        done = await job_wait(c, r.structured_content["job_id"])
-        assert done["state"] == "failed" and "buffer_clear" in done["error"]
+        assert r.is_error and "buffer_clear" in text(r)  # refused at once, no job
         assert rig.calls["buffer_configure"] == configured  # nothing was touched
         assert rig.world.seq_frames == {0: 20}
         await call(c, "buffer_clear", confirm=True)
@@ -718,6 +717,35 @@ async def test_configure_moves_the_offset_around_a_resize(tmp_path):
         assert not r.is_error, text(r)
         assert rig.world.log == ["set_resolution", "set_roi_offset"]
         assert r.structured_content["applied"]["offset_x"] == 192
+
+
+async def test_configure_with_center_image_resizes_without_offset_writes(tmp_path):
+    rig = Rig(tmp_path)
+    rig.world.center_image = True
+    async with Client(rig.server) as c:
+        await connect(c)
+        r = await call(c, "camera_configure", width=192, height=128)
+        assert not r.is_error, text(r)
+        applied = r.structured_content["applied"]
+        assert applied["center_image"] is True
+        assert (applied["offset_x"], applied["offset_y"]) == (64, 64)
+        r = await call(c, "camera_configure", height=256)  # larger, the camera recenters
+        assert not r.is_error, text(r)
+        assert r.structured_content["applied"]["offset_y"] == 0
+        assert "set_roi_offset" not in rig.world.log
+
+
+async def test_configure_with_center_image_refuses_offsets(tmp_path):
+    rig = Rig(tmp_path)
+    rig.world.center_image = True
+    async with Client(rig.server) as c:
+        await connect(c)
+        r = await call(c, "camera_configure", width=192, height=128, offset_x=0, offset_y=0)
+        assert r.is_error and "centers the window" in text(r) and "resolution" in text(r)
+        # an offset equal to the centered one is accepted
+        r = await call(c, "camera_configure", width=192, height=128, offset_x=64, offset_y=64)
+        assert not r.is_error, text(r)
+        assert "set_roi_offset" not in rig.world.log
 
 
 def test_sim_setters_validate_like_the_driver():
