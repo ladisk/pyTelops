@@ -135,6 +135,7 @@ REG_TEST_IMAGE_SELECTOR = 0xEACC  # Enum: TestImageSelector
 REG_OFFSET_X = 0xEB44  # Int (RW)
 REG_OFFSET_Y = 0xEB48  # Int (RW)
 REG_CENTER_IMAGE = 0xE8E8  # Bool (RW)
+REG_LOCKED_CENTER_IMAGE = 0xE8EC  # Bool (RO): 1 = CenterImage cannot be changed
 
 # ============================================================
 # Frame Rate (extended)
@@ -463,6 +464,7 @@ REGISTER_INFO = {
     REG_OFFSET_X: ("OffsetX", "int", "RW"),
     REG_OFFSET_Y: ("OffsetY", "int", "RW"),
     REG_CENTER_IMAGE: ("CenterImage", "bool", "RW"),
+    REG_LOCKED_CENTER_IMAGE: ("LockedCenterImage", "bool", "RO"),
     # Frame Rate (extended)
     REG_FRAME_RATE_MODE: ("FrameRateMode", "enum", "RW"),
     REG_FRAME_RATE_MAX_FG: ("FrameRateMaxFG", "float", "RW"),

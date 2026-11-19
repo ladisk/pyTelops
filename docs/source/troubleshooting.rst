@@ -173,6 +173,30 @@ heartbeat timeout expires.
 camera and auto-recovers once the heartbeat timeout elapses. If it
 takes longer, power-cycle the camera.
 
+Camera acquires but sends no data
+---------------------------------
+
+**Symptom:** The TDC status shows that acquisition has started. GVCP
+commands work. ``grab()`` returns ``None`` or the live viewer stays empty.
+pyTelops warns that the camera reports acquiring but no complete frame
+arrived, and that no stream packet arrived.
+
+If the warning says that stream packets arrive, the cause is packet loss, not
+a dead stream channel. See the next section.
+
+**Cause:** Not confirmed. It was seen after sessions that ended abruptly,
+and with a faulty Ethernet adapter or driver. The stream channel of the camera
+then possibly stays in a bad state.
+
+**Fix:**
+
+1. Stop the program.
+2. Power-cycle the camera.
+3. Run ``discover()`` again.
+
+The link-local IP address of the camera can change after a power cycle. Use
+discovery. Do not reuse the old address.
+
 Live streaming: ``packets unrecoverable`` warnings
 --------------------------------------------------
 

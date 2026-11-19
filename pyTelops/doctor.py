@@ -357,6 +357,11 @@ def check_probe(ctx, stream_requested=False):
     return _chk("probe", "ok", f"{state}, ready, not acquiring")
 
 
+# Measured on the FAST M3k (2026-11-19): 2.03 s from AcquisitionStart to the
+# first streamed frame, at 100 fps and at 1000 fps.
+_FIRST_FRAME_DELAY_S = 2.1
+
+
 def check_stream(ctx, frames=20):
     regs = ctx.get("regs")
     if regs is None:
@@ -398,8 +403,10 @@ def check_stream(ctx, frames=20):
         timeout = max(2.0, 3.0 / rate) if rate > 0 else 2.0
         cam.acquisition_start()
         prev = None
-        for _ in range(frames):
-            result = cam._gvsp.get_frame_with_info(timeout=timeout)
+        for i in range(frames):
+            # The camera sends its first frame about 2.03 s after AcquisitionStart.
+            wait = timeout + _FIRST_FRAME_DELAY_S if i == 0 else timeout
+            result = cam._gvsp.get_frame_with_info(timeout=wait)
             if result is None:
                 break
             _, info = result
