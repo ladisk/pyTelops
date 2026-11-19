@@ -16,6 +16,8 @@ Version 0.2.6
 - **Added:** ``Camera.connect(force_control=False)`` raises ``GVCPError`` at
   once on ``ACCESS_DENIED``. The default ``True`` still waits up to 15 s for a
   stale control lock to expire.
+- **Changed:** pyTelops now needs pyGigEVision 0.3.0 or later and uses only its
+  public API.
 - **Fixed:** ``roi_offset`` failed with ``GVCPError`` (GENERIC_ERROR) on
   the offset write, for example ``cam.roi_offset = (0, 0)`` after
   connect to a camera already at full frame (issue #29). The cause is not

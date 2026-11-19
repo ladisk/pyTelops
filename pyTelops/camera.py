@@ -991,7 +991,7 @@ class Camera:
     def _check_connected(self):
         if not self._connected:
             raise RuntimeError("Camera not connected. Call connect() first.")
-        if self._gvcp and self._gvcp._control_lost:
+        if self._gvcp and self._gvcp.control_lost:
             raise RuntimeError(
                 "Camera control was lost (another application took over). "
                 "Call disconnect() then connect() to re-establish."
@@ -1939,7 +1939,7 @@ class Camera:
             non_size_bits = pkt_reg & ~SC_PACKET_SIZE_MASK
             self._gvcp.write_reg(REG_SC_PACKET_SIZE, non_size_bits | target_pkt_size)
 
-        self._gvsp._packet_data_size = target_pkt_size - 8
+        self._gvsp.packet_size = target_pkt_size
 
         # Inter-packet delay: respect user override if set, otherwise
         # force to 0 for maximum throughput (original default behavior).
@@ -1954,7 +1954,7 @@ class Camera:
             pass
 
         # Tell camera where to send stream data
-        sock_ip = self._gvsp._sock.getsockname()[0]
+        sock_ip = self._gvsp.local_ip
         if not sock_ip or sock_ip == "0.0.0.0":
             sock_ip = self._local_ip
         ip_int = struct.unpack(">I", socket.inet_aton(sock_ip))[0]
@@ -4842,8 +4842,7 @@ class Camera:
 
         # Reset resend counters so last_download_stats reflects only this call
         # (the GVSP receiver persists across downloads and would accumulate).
-        if hasattr(self._gvsp, "reset_resend_stats"):
-            self._gvsp.reset_resend_stats()
+        self._gvsp.reset_resend_stats()
 
         # Select sequence and get info
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
@@ -4963,9 +4962,7 @@ class Camera:
             _order_ts = [by_pos[k][1].get("timestamp", 0) for k in _order_pos]
             n_out_of_order, n_stride_gaps = _timestamp_order_report(_order_pos, _order_ts)
 
-        resend_stats = getattr(
-            self._gvsp, "_resend_stats", {"requested": 0, "recovered": 0, "failed": 0}
-        )
+        resend = self._gvsp.stats
         # Read the payload-size register at most once (skip when nothing landed).
         payload = None
         if n_complete and elapsed > 0:
@@ -4975,9 +4972,9 @@ class Camera:
             n_frames=n_complete,
             n_incomplete=len(missing_after),
             incomplete_frame_ids=[start_frame + k for k in missing_after],
-            resend_requested=int(resend_stats.get("requested", 0)),
-            resend_recovered=int(resend_stats.get("recovered", 0)),
-            resend_failed=int(resend_stats.get("failed", 0)),
+            resend_requested=int(resend.resend_requested),
+            resend_recovered=int(resend.resend_recovered),
+            resend_failed=int(resend.resend_failed),
             recovered_by_retry=recovered_by_retry,
             first_pass_n_complete=first_pass_n_complete,
             elapsed_s=elapsed,
@@ -5144,7 +5141,7 @@ class Camera:
             if packet_size > 1500:
                 new_pkt_reg &= ~SC_SCPS_DO_NOT_FRAGMENT
             self._write_reg_retry(REG_SC_PACKET_SIZE, new_pkt_reg)
-            self._gvsp._packet_data_size = packet_size - 8
+            self._gvsp.packet_size = packet_size
 
         self._write_reg_retry(reg.REG_ACQUISITION_START, 1)
 
@@ -5178,9 +5175,9 @@ class Camera:
                     reg.REG_MEMORY_BUFFER_DOWNLOAD_MODE, reg.MemoryBufferDownloadMode.OFF
                 )
             if old_pkt_reg is not None:
-                with suppress(GVCPError):
+                with suppress(GVCPError, ValueError):
                     self._gvcp.write_reg(REG_SC_PACKET_SIZE, old_pkt_reg)
-                    self._gvsp._packet_data_size = (old_pkt_reg & SC_PACKET_SIZE_MASK) - 8
+                    self._gvsp.packet_size = old_pkt_reg & SC_PACKET_SIZE_MASK
             if old_delay_reg:
                 with suppress(GVCPError):
                     self._gvcp.write_reg(REG_SC_PACKET_DELAY, old_delay_reg)

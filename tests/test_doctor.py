@@ -3,6 +3,7 @@
 import json
 import socket
 import struct
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -49,10 +50,15 @@ def linux(monkeypatch):
     monkeypatch.setattr(doctor.sys, "platform", "linux")
 
 
+# Fake sysfs trees use USB interface names such as "1-2:1.0"; Windows forbids ":".
+posix_paths = pytest.mark.skipif(sys.platform == "win32", reason="sysfs paths contain ':'")
+
+
 class TestAdapters:
     def run(self, tmp_path, addrs=None):
         return doctor.check_adapters(str(tmp_path), host_ipv4=lambda: addrs or {})
 
+    @posix_paths
     def test_asix_cdc_ncm_warns_with_port(self, tmp_path, linux):
         make_nic(tmp_path, "enp1", "0b95", "1790", "cdc_ncm", port="3-1")
         (res,) = self.run(tmp_path)
@@ -60,11 +66,13 @@ class TestAdapters:
         assert "ASIX 0b95:1790 on cdc_ncm" in res["detail"]
         assert "/sys/bus/usb/devices/3-1/bConfigurationValue" in res["fix"]
 
+    @posix_paths
     def test_asix_vendor_driver_ok(self, tmp_path, linux):
         make_nic(tmp_path, "enp1", "0b95", "1790", "ax88179_178a")
         (res,) = self.run(tmp_path)
         assert res["status"] == "ok"
 
+    @posix_paths
     def test_tplink_warns(self, tmp_path, linux):
         make_nic(tmp_path, "enp1", "2357", "0601", "r8152")
         (res,) = self.run(tmp_path)
