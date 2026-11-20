@@ -214,8 +214,8 @@ Live streaming
 --------------
 
 Frames stream directly to the PC over Ethernet, limited by GigE bandwidth
-(~125 MB/s). On one test setup this reached about 760 fps at full frame
-(320×256); achievable rates depend on the host, NIC, and network path.
+(~125 MB/s). This gives up to around 700 fps at full frame (320×256),
+depending on the Ethernet adapter.
 
 .. code-block:: python
 
@@ -495,7 +495,15 @@ GigE Vision requires a firewall rule to allow inbound UDP from the camera:
 
 .. code-block:: bash
 
+   sudo ufw allow in proto udp from 169.254.0.0/16   # if UFW is on
    sudo sysctl -w net.core.rmem_max=16777216
+
+Connect the camera with a direct cable to its own Ethernet port or USB
+adapter. A building network or wall socket usually puts the camera on a
+different subnet, and discovery does not find it. The camera link-local IP
+changes after every power cycle, so find the camera with ``discover()`` and do
+not store its IP. Some USB Ethernet adapters need a driver change on Linux.
+See "Linux USB Ethernet adapters" in the troubleshooting guide.
 
 Or use the built-in setup helper:
 
