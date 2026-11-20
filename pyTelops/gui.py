@@ -55,16 +55,17 @@ COLORBAR_WIDTH = 60
 
 # Focus assist
 FOCUS_BOX = 64  # side of the Shift+click focus box, image pixels
-PEAKING_TOP = 0.05  # fraction of pixels with the strongest edges to color
+PEAKING_TOP = 0.03  # fraction of pixels with the strongest edges to color
 PEAKING_COLOR = (0, 255, 0)
+PEAKING_ALPHA = 0.5  # opacity of the peaking color over the image
 LOUPE_SRC = 32  # side of the magnified region, image pixels
 LOUPE_SIZE = 192  # side of the loupe on screen, display pixels
 SHARPNESS_SMOOTHING = 0.15  # weight of the newest frame in the shown score
 _EDGE = 2  # pixels lost at each border by the 3x3 smoothing plus the gradient
 
 
-def _gradient_sq(img: np.ndarray) -> np.ndarray:
-    """Squared gradient magnitude of the 3x3-smoothed image.
+def _gradients(img: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``(gx, gy)`` central-difference gradients of the 3x3-smoothed image.
 
     The smoothing removes most single-pixel sensor noise, which otherwise
     dominates the gradient of a low-contrast thermal scene. The result is
@@ -75,14 +76,22 @@ def _gradient_sq(img: np.ndarray) -> np.ndarray:
     img = sum(img[dy : h - 2 + dy, dx : w - 2 + dx] for dy in range(3) for dx in range(3)) / 9.0
     gx = img[1:-1, 2:] - img[1:-1, :-2]
     gy = img[2:, 1:-1] - img[:-2, 1:-1]
+    return gx, gy
+
+
+def _gradient_sq(img: np.ndarray) -> np.ndarray:
+    """Squared gradient magnitude of the 3x3-smoothed image (see :func:`_gradients`)."""
+    gx, gy = _gradients(img)
     return gx * gx + gy * gy
 
 
 def sharpness(img: np.ndarray, box: tuple[int, int, int, int] | None = None) -> float:
-    """Focus measure: mean squared gradient (Tenengrad) of *img*.
+    """Focus measure: mean squared gradient (Tenengrad) divided by the variance.
 
     A sharper image of the same scene gives a larger value, so turn the lens
-    until the value peaks. Only compare values of the same scene and box.
+    until the value peaks. Dividing by the variance of the region makes the
+    value independent of contrast, so a heated specimen that cools down does
+    not drift the score. Only compare values of the same scene and box.
 
     Parameters
     ----------
@@ -96,7 +105,10 @@ def sharpness(img: np.ndarray, box: tuple[int, int, int, int] | None = None) -> 
         img = img[y0:y1, x0:x1]
     if img.shape[0] < 2 * _EDGE + 1 or img.shape[1] < 2 * _EDGE + 1:
         return 0.0
-    return float(_gradient_sq(img).mean())
+    var = float(np.var(np.asarray(img, dtype=np.float64)))
+    if var <= 0:
+        return 0.0
+    return float(_gradient_sq(img).mean()) / var
 
 
 def peaking_mask(img: np.ndarray, top: float = PEAKING_TOP) -> np.ndarray:
@@ -104,14 +116,23 @@ def peaking_mask(img: np.ndarray, top: float = PEAKING_TOP) -> np.ndarray:
 
     Marks the *top* fraction of pixels by gradient magnitude. Pixels below four
     times the median gradient are never marked, so a flat or noisy scene shows
-    no false edges.
+    no false edges. Only the ridge of each edge is kept (pixels that are a local
+    maximum across the edge), so edges show as thin lines.
     """
     mask = np.zeros(img.shape, dtype=bool)
     if img.shape[0] < 2 * _EDGE + 1 or img.shape[1] < 2 * _EDGE + 1:
         return mask
-    g = _gradient_sq(img)
+    gx, gy = _gradients(img)
+    g = gx * gx + gy * gy
     threshold = max(float(np.quantile(g, 1.0 - top)), 16.0 * float(np.median(g)))
-    mask[_EDGE:-_EDGE, _EDGE:-_EDGE] = (g >= threshold) & (g > 0)
+    strong = (g >= threshold) & (g > 0)
+    # Thin the edges: keep a pixel only if it is a maximum across the edge,
+    # that is along x where the gradient is mostly horizontal, else along y.
+    pad = np.pad(g, 1, mode="edge")
+    ridge_x = (g >= pad[1:-1, :-2]) & (g >= pad[1:-1, 2:])
+    ridge_y = (g >= pad[:-2, 1:-1]) & (g >= pad[2:, 1:-1])
+    ridge = np.where(np.abs(gx) >= np.abs(gy), ridge_x, ridge_y)
+    mask[_EDGE:-_EDGE, _EDGE:-_EDGE] = strong & ridge
     return mask
 
 
@@ -407,7 +428,11 @@ class LiveView:
             # Focus assist
             if self.peaking_on.get():
                 colored = colored.copy()
-                colored[peaking_mask(img)] = PEAKING_COLOR
+                m = peaking_mask(img)
+                a = PEAKING_ALPHA
+                colored[m] = (
+                    (1 - a) * colored[m] + a * np.array(PEAKING_COLOR, dtype=np.float32)
+                ).astype(np.uint8)
             if self.sharp_on.get():
                 self._update_sharpness(img)
             elif self.sharp_var.get():

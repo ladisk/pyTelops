@@ -11,7 +11,10 @@ def _edge(blur: int) -> np.ndarray:
     img[:, 32:] = 10.0
     if blur > 1:
         k = np.ones(blur) / blur
-        img = np.apply_along_axis(lambda r: np.convolve(r, k, mode="same"), 1, img)
+        pad = blur // 2
+        img = np.apply_along_axis(
+            lambda r: np.convolve(np.pad(r, pad, mode="edge"), k, mode="valid")[: r.size], 1, img
+        )
     return img
 
 
@@ -60,3 +63,19 @@ def test_sharpness_ranks_focus_through_sensor_noise():
     sharp = sharpness(_edge(1) / 10 + noise)
     blurred = sharpness(_edge(9) / 10 + noise)
     assert sharp > 1.5 * blurred
+
+
+def test_peaking_draws_a_thin_line_on_a_soft_edge():
+    mask = peaking_mask(_edge(5))
+    per_row = mask.sum(axis=1)
+    assert per_row.max() <= 2
+    assert per_row[5:-5].min() >= 1
+
+
+def test_sharpness_does_not_change_with_contrast():
+    # A cooling specimen lowers the contrast; the score must stay the same.
+    rng = np.random.default_rng(2)
+    noise = rng.normal(0.0, 0.05, (32, 64)).astype(np.float32)
+    hot = sharpness(_edge(3) + noise)
+    cooled = sharpness(0.3 * (_edge(3) + noise) + 20.0)
+    assert abs(hot - cooled) / hot < 0.01
