@@ -321,6 +321,24 @@ def _group_contiguous(positions):
     return runs
 
 
+# The camera skips buffer frames (a strided download) when the bitrate cap lets
+# it send more than about 750 frames per second: 1000 Mbit/s is safe at full
+# frame (320x256) but strides at 320x128 and 320x64 (issue #38). The automatic
+# bitrate is therefore scaled to the frame size.
+_FULL_FRAME_PIXELS = 320 * 256
+_MAX_AUTO_BITRATE = 1000.0
+_MIN_AUTO_BITRATE = 100.0
+
+
+def _auto_bitrate_cap(width, height):
+    """Largest automatic download bitrate (Mbit/s) for a *width* x *height* frame."""
+    pixels = int(width) * int(height)
+    if pixels <= 0:
+        return _MAX_AUTO_BITRATE
+    cap = _MAX_AUTO_BITRATE * min(1.0, pixels / _FULL_FRAME_PIXELS)
+    return max(_MIN_AUTO_BITRATE, cap)
+
+
 def _learn_bitrate(first_pass_frac, current_bitrate, *, threshold=0.95, factor=0.5, floor=100.0):
     """Next starting bitrate given the first-pass completeness of this download.
 
@@ -4798,8 +4816,11 @@ class Camera:
             ``REG_DOWNLOAD_BITRATE_MAX`` register. ``None`` (default)
             auto-resolves: a value learned from earlier downloads this
             connection (lowered after drops) when :attr:`auto_tune` is on,
-            otherwise 1000.0. Pass a number to override (e.g. 300 to ease
-            network contention) and disable learning for this call.
+            otherwise 1000.0. The automatic value is scaled to the frame
+            size: 1000 at full frame, 500 at 320x128, 250 at 320x64. A higher
+            rate makes the camera skip frames on small windows. Pass a number
+            to override (e.g. 300 to ease network contention) and disable
+            learning for this call.
         packet_size : int or None, optional
             GVSP UDP payload size in bytes. ``None`` (default) auto-resolves:
             with :attr:`auto_tune` on, the largest size the path delivers is
@@ -4976,7 +4997,8 @@ class Camera:
         self._gvsp.reset_resend_stats()
         if bitrate_mbps is None:
             cached_br = self.recommended_download_kwargs.get("bitrate_mbps")
-            bitrate_mbps = float(cached_br) if cached_br is not None else 1000.0
+            bitrate_mbps = float(cached_br) if cached_br is not None else _MAX_AUTO_BITRATE
+            bitrate_mbps = min(bitrate_mbps, self._auto_bitrate_cap())
 
         # Set up progress bar
         pbar = None
@@ -5280,6 +5302,15 @@ class Camera:
             self._gvsp.resend_enabled = True
             self.stop_stream()
         return out
+
+    def _auto_bitrate_cap(self):
+        """Automatic bitrate cap for the current window; see :func:`_auto_bitrate_cap`."""
+        try:
+            width = self._gvcp.read_reg(reg.REG_WIDTH)
+            height = self._gvcp.read_reg(reg.REG_HEIGHT) - 2  # minus the header rows
+        except GVCPError:
+            return _MAX_AUTO_BITRATE
+        return _auto_bitrate_cap(width, height)
 
     def _probe_max_packet_size(self, desired, candidates=None, sequence=0):
         """Find the largest packet size the path actually delivers.

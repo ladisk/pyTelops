@@ -9,6 +9,7 @@ from pyGigEVision import GVCPError
 from pyTelops import registers as reg
 from pyTelops.camera import (
     Camera,
+    _auto_bitrate_cap,
     _group_contiguous,
     _learn_bitrate,
     _missing_positions,
@@ -838,3 +839,56 @@ def test_download_stats_exclude_probe_resends():
     cam._download_range = MagicMock(side_effect=_complete_range)
     cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False)
     assert order == ["probe", "reset"]
+
+
+@pytest.mark.parametrize(
+    ("wh", "expected"),
+    [
+        ((320, 256), 1000.0),
+        ((320, 128), 500.0),
+        ((320, 64), 250.0),
+        ((64, 4), 100.0),
+        ((0, 0), 1000.0),
+    ],
+)
+def test_auto_bitrate_cap_scales_with_frame_size(wh, expected):
+    # Issue #38: 1000 Mbit/s strides at 320x128 and 320x64 but not at full frame.
+    assert _auto_bitrate_cap(*wh) == expected
+
+
+def _cam_with_window(width, height):
+    cam = _fake_cam_for_download()
+    regs = {reg.REG_WIDTH: width, reg.REG_HEIGHT: height + 2}
+    cam._gvcp.read_reg.side_effect = lambda addr: regs.get(addr, 0)
+    return cam
+
+
+def _seen_bitrate(cam, **kw):
+    seen = {}
+
+    def dr(frame_id, count, *, bitrate_mbps, **k):
+        seen["br"] = bitrate_mbps
+        return _complete_range(frame_id, count)
+
+    cam._download_range = MagicMock(side_effect=dr)
+    cam._probe_max_packet_size = MagicMock(return_value=1500)
+    cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False, **kw)
+    return seen["br"]
+
+
+def test_auto_bitrate_is_capped_on_a_small_window():
+    assert _seen_bitrate(_cam_with_window(320, 128)) == 500.0
+
+
+def test_auto_bitrate_stays_1000_at_full_frame():
+    assert _seen_bitrate(_cam_with_window(320, 256)) == 1000.0
+
+
+def test_learned_bitrate_is_capped_on_a_small_window():
+    cam = _cam_with_window(320, 64)
+    cam.recommended_download_kwargs = {"bitrate_mbps": 800}
+    assert _seen_bitrate(cam) == 250.0
+
+
+def test_explicit_bitrate_is_not_capped():
+    assert _seen_bitrate(_cam_with_window(320, 128), bitrate_mbps=1000) == 1000
