@@ -1,6 +1,17 @@
 Changelog
 =========
 
+Version 0.3.1
+-------------
+
+- **Fixed:** the first ``buffer_download()`` of a connection read the wrong
+  sequence when ``sequence`` was not 0 and the packet size was chosen
+  automatically. The jumbo-packet probe selected sequence 0 and did not select
+  the requested sequence again, so most frames could not be recovered
+  (issue #39).
+- **Fixed:** ``last_download_stats`` no longer counts the resends of the
+  packet-size probe.
+
 Version 0.3.0
 -------------
 

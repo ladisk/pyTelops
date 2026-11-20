@@ -792,3 +792,49 @@ class TestTimestampOrderReport:
 
     def test_too_few_frames_skip(self):
         assert _timestamp_order_report([0, 1], [5, 6]) == (0, 0)
+
+
+def _selector_writes(cam):
+    return [
+        c.args[1]
+        for c in cam._gvcp.write_reg.call_args_list
+        if c.args and c.args[0] == reg.REG_MEMORY_BUFFER_SEQ_SELECTOR
+    ]
+
+
+def test_jumbo_probe_keeps_the_requested_sequence_selected():
+    # Issue #39: the first download of a connection probed jumbo on sequence 0
+    # and left the selector there, so a download of sequence 1 read the wrong slot.
+    cam = _fake_cam_for_download()
+    cam._download_range = MagicMock(side_effect=_complete_range)
+    cam.buffer_download(sequence=1, n_frames=2, convert=False, strip_header=False, verbose=False)
+    writes = _selector_writes(cam)
+    assert writes, "the download must select its sequence"
+    assert all(w == 1 for w in writes)
+
+
+def test_explicit_jumbo_probe_uses_the_requested_sequence():
+    cam = _fake_cam_for_download()
+    cam._probe_max_packet_size = MagicMock(return_value=8000)
+    cam._download_range = MagicMock(side_effect=_complete_range)
+    cam.buffer_download(
+        sequence=2,
+        n_frames=2,
+        packet_size=8000,
+        convert=False,
+        strip_header=False,
+        verbose=False,
+    )
+    assert cam._probe_max_packet_size.call_args.kwargs["sequence"] == 2
+
+
+def test_download_stats_exclude_probe_resends():
+    cam = _fake_cam_for_download()
+    order = []
+    cam._probe_max_packet_size = MagicMock(
+        side_effect=lambda *a, **k: order.append("probe") or 1500
+    )
+    cam._gvsp.reset_resend_stats.side_effect = lambda: order.append("reset")
+    cam._download_range = MagicMock(side_effect=_complete_range)
+    cam.buffer_download(n_frames=2, convert=False, strip_header=False, verbose=False)
+    assert order == ["probe", "reset"]
