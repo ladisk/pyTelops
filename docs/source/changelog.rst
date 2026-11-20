@@ -17,6 +17,10 @@ Version 0.3.1
   camera skips buffer frames. The automatic bitrate is now scaled to the frame
   size: 1000 Mbit/s at full frame, 500 at 320x128, 250 at 320x64. An explicit
   ``bitrate_mbps`` is not changed (issue #38).
+- **Changed:** the docs cover Linux connectivity: use a direct cable, the UFW
+  rule, the camera IP that changes after a power cycle, and the VPN on Linux.
+  The live streaming limit is now "up to around 700 fps at full frame,
+  depending on the Ethernet adapter" instead of an untested 760 fps.
 
 Version 0.3.0
 -------------
