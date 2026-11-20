@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from pyTelops.gui import focus_box, peaking_mask, sharpness
+from pyTelops.gui import focus_box, move_box, peaking_mask, resize_box, sharpness
 
 
 def _edge(blur: int) -> np.ndarray:
@@ -79,3 +79,17 @@ def test_sharpness_does_not_change_with_contrast():
     hot = sharpness(_edge(3) + noise)
     cooled = sharpness(0.3 * (_edge(3) + noise) + 20.0)
     assert abs(hot - cooled) / hot < 0.01
+
+
+def test_move_box_shifts_and_stays_inside_the_frame():
+    box = (10, 10, 74, 74)
+    assert move_box(box, 5, -3, 320, 256) == (15, 7, 79, 71)
+    assert move_box(box, -100, 0, 320, 256) == (0, 10, 64, 74)
+    assert move_box(box, 1000, 1000, 320, 256) == (256, 192, 320, 256)
+
+
+def test_resize_box_keeps_the_centre_and_limits_the_size():
+    box = (128, 96, 192, 160)  # 64 px, centre (160, 128)
+    assert resize_box(box, 1, 320, 256) == (124, 92, 196, 164)
+    assert resize_box(box, -100, 320, 256) == (152, 120, 168, 136)
+    assert resize_box(box, 100, 320, 256) == (32, 0, 288, 256)

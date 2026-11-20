@@ -245,8 +245,10 @@ normalization (handles hot pixels), and colormap selector.
 Focus assist tools help you focus the lens by hand:
 
 - **Sharpness:** a score and bar that peak when the image is sharpest, with a
-  best-so-far value. Set **Area** to ``box`` to score only a 64 px box.
-  Shift+click moves the box, Shift+right-click scores the full frame again.
+  best-so-far value. Set **Area** to ``box`` to score only a box (64 px at start).
+  Drag the box to move it, or Shift+click to put it at the cursor. Turn the
+  mouse wheel over the box to change its size.
+  Shift+right-click scores the full frame again.
 - **Peaking:** colors the strongest edges green.
 - **Loupe:** shows a magnified view of the area around the cursor.
 

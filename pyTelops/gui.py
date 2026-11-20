@@ -54,7 +54,9 @@ COLORMAP_CHOICES = ["inferno", "hot", "plasma", "magma", "viridis", "gray"]
 COLORBAR_WIDTH = 60
 
 # Focus assist
-FOCUS_BOX = 64  # side of the Shift+click focus box, image pixels
+FOCUS_BOX = 64  # default side of the focus box, image pixels
+FOCUS_BOX_MIN = 16  # smallest focus box side (mouse wheel), image pixels
+FOCUS_BOX_STEP = 8  # change of the box side per mouse wheel step
 PEAKING_TOP = 0.03  # fraction of pixels with the strongest edges to color
 PEAKING_COLOR = (0, 255, 0)
 PEAKING_ALPHA = 0.5  # opacity of the peaking color over the image
@@ -144,6 +146,23 @@ def focus_box(ix: int, iy: int, width: int, height: int, side: int = FOCUS_BOX):
     return (x0, y0, x0 + side_x, y0 + side_y)
 
 
+def move_box(box, dx: int, dy: int, width: int, height: int):
+    """Shift *box* by (dx, dy) image pixels, kept inside the frame."""
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    x0 = min(max(x0 + dx, 0), width - w)
+    y0 = min(max(y0 + dy, 0), height - h)
+    return (x0, y0, x0 + w, y0 + h)
+
+
+def resize_box(box, step: int, width: int, height: int):
+    """Grow (step > 0) or shrink *box* by FOCUS_BOX_STEP per step, about its centre."""
+    x0, y0, x1, y1 = box
+    side = max(x1 - x0, y1 - y0) + step * FOCUS_BOX_STEP
+    side = min(max(side, FOCUS_BOX_MIN), min(width, height))
+    return focus_box((x0 + x1) // 2, (y0 + y1) // 2, width, height, side)
+
+
 def _check_gui_deps() -> None:
     """Raise ImportError if optional GUI dependencies (tkinter, matplotlib, Pillow) are absent."""
     if not HAS_GUI_DEPS:
@@ -197,6 +216,7 @@ class LiveView:
         self._box = focus_box(w // 2, h // 2, w, h)  # (x0, y0, x1, y1), image pixels
         self._sharp = None  # smoothed sharpness score
         self._sharp_best = 0.0
+        self._drag_from = None  # grab point inside the box while dragging
 
         # Start continuous acquisition
         self.cam.acquisition_start()
@@ -276,7 +296,12 @@ class LiveView:
         self.canvas.bind("<Motion>", self._on_mouse_move)
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Button-3>", self._on_right_click)  # right-click clears markers
+        self.canvas.bind("<B1-Motion>", self._on_drag)  # drag the focus box
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<Shift-Button-1>", self._on_shift_click)  # set focus box
+        self.canvas.bind("<MouseWheel>", self._on_wheel)  # resize focus box (Windows, macOS)
+        self.canvas.bind("<Button-4>", lambda e: self._on_wheel(e, 1))  # Linux wheel up
+        self.canvas.bind("<Button-5>", lambda e: self._on_wheel(e, -1))  # Linux wheel down
         self.canvas.bind("<Shift-Button-3>", self._on_shift_right_click)  # clear focus box
 
         self.photo = None
@@ -299,23 +324,64 @@ class LiveView:
         """Track mouse position for cursor readout."""
         self._mouse_img_x = event.x // self.scale
         self._mouse_img_y = event.y // self.scale
+        over = self._over_box(self._mouse_img_x, self._mouse_img_y)
+        self.canvas.config(cursor="fleur" if over else "")
+
+    def _box_shown(self):
+        """True when the focus box is drawn on the image."""
+        return self.sharp_on.get() and self.area_var.get() == "box"
+
+    def _over_box(self, ix, iy):
+        """True when image pixel (ix, iy) is inside the drawn focus box."""
+        x0, y0, x1, y1 = self._box
+        return self._box_shown() and x0 <= ix < x1 and y0 <= iy < y1
 
     def _on_click(self, event):
-        """Place a persistent marker at click position."""
+        """Start a box drag inside the focus box, else place a persistent marker."""
         ix = event.x // self.scale
         iy = event.y // self.scale
-        if 0 <= ix < self.width and 0 <= iy < self.img_height:
+        if self._over_box(ix, iy):
+            self._drag_from = (ix - self._box[0], iy - self._box[1])  # grab offset
+        elif 0 <= ix < self.width and 0 <= iy < self.img_height:
             self._markers.append((ix, iy))
+
+    def _on_drag(self, event):
+        """Move the focus box with the mouse."""
+        if self._drag_from is None:
+            return
+        ix, iy = event.x // self.scale, event.y // self.scale
+        dx = ix - self._drag_from[0] - self._box[0]
+        dy = iy - self._drag_from[1] - self._box[1]
+        self._box = move_box(self._box, dx, dy, self.width, self.img_height)
+        self._mouse_img_x, self._mouse_img_y = ix, iy
+
+    def _on_release(self, event):
+        """End a box drag and start a new score for the new region."""
+        if self._drag_from is not None:
+            self._drag_from = None
+            self._reset_sharpness()
 
     def _on_right_click(self, event):
         """Clear all markers."""
         self._markers.clear()
 
+    def _on_wheel(self, event, step=None):
+        """Resize the focus box with the mouse wheel while the cursor is over it."""
+        if step is None:
+            step = 1 if event.delta > 0 else -1
+        if self._over_box(event.x // self.scale, event.y // self.scale):
+            new = resize_box(self._box, step, self.width, self.img_height)
+            if new != self._box:
+                self._box = new
+                self._reset_sharpness()
+
     def _on_shift_click(self, event):
         """Place the focus box around the click and score only the box."""
         ix, iy = event.x // self.scale, event.y // self.scale
         if 0 <= ix < self.width and 0 <= iy < self.img_height:
-            self._box = focus_box(ix, iy, self.width, self.img_height)
+            x0, y0, x1, y1 = self._box
+            side = max(x1 - x0, y1 - y0)  # keep the current size
+            self._box = focus_box(ix, iy, self.width, self.img_height, side)
             self.area_var.set("box")
             self._reset_sharpness()
         return "break"  # do not also place a marker
@@ -339,7 +405,7 @@ class LiveView:
         self._sharp = value if self._sharp is None else a * value + (1 - a) * self._sharp
         self._sharp_best = max(self._sharp_best, self._sharp)
         frac = self._sharp / self._sharp_best if self._sharp_best > 0 else 0.0
-        where = "box" if box else "frame"
+        where = f"box {box[2] - box[0]} px" if box else "frame"
         self.sharp_var.set(f"{self._sharp:.4g}  best {self._sharp_best:.4g}  ({frac:.0%}, {where})")
         w = int(self.sharp_bar["width"])
         h = int(self.sharp_bar["height"])
