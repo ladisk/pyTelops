@@ -28,10 +28,10 @@ Pass ``latest=True`` to :meth:`pyTelops.Camera.read_frame` in display loops to
 always show the most recent frame rather than processing a growing backlog.  See
 :doc:`troubleshooting` for details on the growing-lag symptom.
 
-The first frame arrives about 2 s after acquisition starts (2.03 s measured
-on a FAST M3k). Until then, :meth:`pyTelops.Camera.read_frame` returns
-``None``. Give the first read a timeout of at least 3 s, or keep reading in a
-loop.
+The first frame can arrive up to about 2 s after acquisition starts (2.03 s
+measured on a FAST M3k). Other starts deliver it at once. Until the first frame
+arrives, :meth:`pyTelops.Camera.read_frame` returns ``None``. Give the first
+read a timeout of at least 3 s, or keep reading in a loop.
 
 For short captures you can use the convenience methods directly:
 
