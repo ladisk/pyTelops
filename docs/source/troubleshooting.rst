@@ -60,6 +60,13 @@ unreachable.
   ``reachable`` (whether the camera is on a subnet served by one of your
   host NICs) and ``interface_ip`` (the host interface the camera replied
   on). If discovery still returns nothing, work through the fixes below.
+- Connect the camera with a direct cable. A building network or wall socket
+  usually puts the camera on a different subnet, and the discovery broadcast
+  does not get there.
+- Do not reuse an old camera IP. The link-local IP changes after every power
+  cycle. Run ``pytelops discover`` again.
+- If discovery found the camera before and now finds nothing with the link
+  up, the camera can be hung. Power-cycle the camera.
 - Confirm the camera has a link-local address (``169.254.x.x``) and
   your host has a matching link-local IP on the same Ethernet adapter.
   ``ipconfig`` on Windows, ``ip a`` on Linux.
@@ -68,7 +75,9 @@ unreachable.
   ``python.exe``. Python environment changes (new venv, Anaconda vs
   system Python) require a new rule per binary.
 - On Linux, raise the kernel UDP receive buffer:
-  ``sudo sysctl -w net.core.rmem_max=16777216``.
+  ``sudo sysctl -w net.core.rmem_max=16777216``. If UFW is on, allow the
+  camera traffic: ``sudo ufw allow in proto udp from 169.254.0.0/16``.
+- On Linux with a USB Ethernet adapter, see `Linux USB Ethernet adapters`_.
 - Rule out corporate endpoint security per-binary WFP filters. These
   can silently drop UDP for a specific ``python.exe`` even with Windows
   Firewall disabled. Test by running the same code with a different
@@ -81,7 +90,9 @@ If discovery finds no camera (or only unrelated GigE Vision devices) while
 a VPN is running, its virtual link-local adapter is shadowing the Ethernet
 adapter that the camera is on. Stop the VPN service and disable its virtual
 network adapter from the Windows network settings, then retry discovery.
-Re-enable the VPN once you are done.
+On Linux, stop the VPN client and check with ``ip -br addr`` that only the
+camera adapter has a ``169.254.x.x`` address. Re-enable the VPN once you are
+done.
 
 Camera found but not reachable (wrong subnet)
 ---------------------------------------------

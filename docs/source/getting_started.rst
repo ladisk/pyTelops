@@ -19,7 +19,9 @@ Requirements
 
 * Python 3.10 or newer
 * A network interface on the camera's subnet (usually a link-local
-  ``169.254.x.x`` address on a dedicated Ethernet adapter)
+  ``169.254.x.x`` address on a dedicated Ethernet adapter). Use a direct
+  cable. A building network or wall socket usually puts the camera on a
+  different subnet.
 * Inbound UDP allowed for the Python process (see :doc:`troubleshooting`)
 
 First contact
@@ -52,6 +54,9 @@ NICs. If the chosen camera is on no host subnet (its discovery entry has
 ``reachable == False``), connecting raises an actionable error. In that case
 use :func:`~pyTelops.force_ip` to move the camera onto a reachable subnet; see
 :doc:`troubleshooting` for the full procedure.
+
+The camera gets a new link-local IP after every power cycle. Find the camera
+with ``discover()`` or ``Camera()`` and do not store its IP in scripts.
 
 .. warning::
 

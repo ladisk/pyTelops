@@ -10,8 +10,8 @@ Live streaming
 --------------
 
 In streaming mode the camera sends each frame over Ethernet as it is captured.
-GigE bandwidth limits throughput to roughly 125 MB/s, which supports up to
-approximately 760 fps at full resolution (320x256).
+GigE bandwidth limits throughput to roughly 125 MB/s. This gives up to around
+700 fps at full resolution (320x256), depending on the Ethernet adapter.
 
 Start and stop streaming with :meth:`pyTelops.Camera.acquisition_start` and
 :meth:`pyTelops.Camera.acquisition_stop`, or use the context manager shorthand:
@@ -27,6 +27,11 @@ Start and stop streaming with :meth:`pyTelops.Camera.acquisition_start` and
 Pass ``latest=True`` to :meth:`pyTelops.Camera.read_frame` in display loops to
 always show the most recent frame rather than processing a growing backlog.  See
 :doc:`troubleshooting` for details on the growing-lag symptom.
+
+The first frame arrives about 2 s after acquisition starts (2.03 s measured
+on a FAST M3k). Until then, :meth:`pyTelops.Camera.read_frame` returns
+``None``. Give the first read a timeout of at least 3 s, or keep reading in a
+loop.
 
 For short captures you can use the convenience methods directly:
 
