@@ -242,6 +242,14 @@ Or from the command line:
 Opens a Tkinter window with real-time thermal display, percentile
 normalization (handles hot pixels), and colormap selector.
 
+Focus assist tools help you focus the lens by hand:
+
+- **Sharpness:** a score and bar that peak when the image is sharpest, with a
+  best-so-far value. Set **Area** to ``box`` to score only a 64 px box.
+  Shift+click moves the box, Shift+right-click scores the full frame again.
+- **Peaking:** colors the strongest edges green.
+- **Loupe:** shows a magnified view of the area around the cursor.
+
 Buffer recording
 ----------------
 

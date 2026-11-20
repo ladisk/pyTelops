@@ -1,6 +1,13 @@
 Changelog
 =========
 
+Version 0.3.2
+-------------
+
+- **Added:** focus assist in the live viewer (``pytelops live``,
+  ``cam.live_view()``): a sharpness score for the full frame or a focus box,
+  focus peaking, and a zoom loupe around the cursor.
+
 Version 0.3.1
 -------------
 
