@@ -4954,10 +4954,6 @@ class Camera:
         self._check_connected()
         self.last_download_stats = None
 
-        # Reset resend counters so last_download_stats reflects only this call
-        # (the GVSP receiver persists across downloads and would accumulate).
-        self._gvsp.reset_resend_stats()
-
         # Select sequence and get info
         self._gvcp.write_reg(reg.REG_MEMORY_BUFFER_SEQ_SELECTOR, sequence)
 
@@ -4980,7 +4976,10 @@ class Camera:
             if cached_ps is not None:
                 packet_size = int(cached_ps)
             elif self.auto_tune:
-                packet_size = self._probe_max_packet_size(9000)
+                # Probe on the requested sequence: the probe writes the sequence
+                # selector, and a probe on another slot left the download
+                # reading the wrong sequence (issue #39).
+                packet_size = self._probe_max_packet_size(9000, sequence=sequence)
                 self._jumbo_probed = True
                 self.recommended_download_kwargs["packet_size"] = packet_size
                 if verbose and packet_size > 1500:
@@ -4988,10 +4987,14 @@ class Camera:
             else:
                 packet_size = 1500
         elif packet_size > 1500:
-            probe_max = self._probe_max_packet_size(packet_size)
+            probe_max = self._probe_max_packet_size(packet_size, sequence=sequence)
             packet_size, pkt_warn = _resolve_packet_size(packet_size, probe_max)
             if pkt_warn:
                 logger.warning(pkt_warn)
+        # Reset resend counters so last_download_stats reflects only this call:
+        # the GVSP receiver persists across downloads, and the packet-size probe
+        # above streams frames of its own.
+        self._gvsp.reset_resend_stats()
         if bitrate_mbps is None:
             cached_br = self.recommended_download_kwargs.get("bitrate_mbps")
             bitrate_mbps = float(cached_br) if cached_br is not None else _MAX_AUTO_BITRATE
