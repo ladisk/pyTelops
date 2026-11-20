@@ -1,6 +1,16 @@
 Changelog
 =========
 
+Version 0.3.1
+-------------
+
+- **Fixed:** ``buffer_download()`` returned strided frames on small windows
+  (for example about 12 % at 320x128) because the automatic bitrate was
+  1000 Mbit/s for every window size. Above about 750 frames per second the
+  camera skips buffer frames. The automatic bitrate is now scaled to the frame
+  size: 1000 Mbit/s at full frame, 500 at 320x128, 250 at 320x64. An explicit
+  ``bitrate_mbps`` is not changed (issue #38).
+
 Version 0.3.0
 -------------
 
